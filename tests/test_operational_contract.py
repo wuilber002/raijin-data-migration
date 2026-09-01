@@ -868,13 +868,13 @@ def test_flight_board_projects_only_durable_ready_backlog_and_recovers_zero_widt
         transferred_object = ObjectRecord(source_id=source.id, wave_id=completed.id, object_key="done", size_bytes=1000,
                                           state=ObjectState.TRANSFERRED, transfer_elapsed_seconds=20,
                                           transferred_at=now - timedelta(minutes=5))
-        ready_object = ObjectRecord(source_id=source.id, wave_id=ready.id, object_key="next", size_bytes=125_000_000,
+        ready_object = ObjectRecord(source_id=source.id, wave_id=ready.id, object_key="next", size_bytes=1_000_000_000_000,
                                     state=ObjectState.RESTORED)
         session.add_all([transferred_object, ready_object]); session.flush()
         transferred_item = TransferQueueItem(source_id=source.id, wave_id=completed.id, object_id=transferred_object.id,
                                              size_bytes=1000, state=TransferQueueState.TRANSFERRED)
         ready_item = TransferQueueItem(source_id=source.id, wave_id=ready.id, object_id=ready_object.id,
-                                       size_bytes=125_000_000, state=TransferQueueState.READY)
+                                       size_bytes=1_000_000_000_000, state=TransferQueueState.READY)
         session.add_all([transferred_item, ready_item]); session.flush()
         session.add(TransferLaneSegment(source_id=source.id, wave_id=completed.id, queue_item_id=transferred_item.id,
                                         started_at=now - timedelta(minutes=10), completed_at=now - timedelta(minutes=10),
@@ -888,8 +888,9 @@ def test_flight_board_projects_only_durable_ready_backlog_and_recovers_zero_widt
         assert observed["start_at"] == now - timedelta(minutes=10)
         assert observed["end_at"] == now - timedelta(minutes=5)
         assert projected["wave_name"] == "ready"
-        assert projected["bytes_transferred"] == 125_000_000
+        assert projected["bytes_transferred"] == 1_000_000_000_000
         assert board["waves"][1]["transfer_queue_projected_start_at"] == projected["start_at"]
+        assert board["timeline_end_at"] == projected["end_at"]
 
 
 def test_simulation_clock_advances_only_through_durable_decisions():

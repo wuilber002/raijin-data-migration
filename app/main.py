@@ -4149,6 +4149,15 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             transfer_lane_phases.append(projection)
     transfer_lane_phases.sort(key=lambda item: (item["start_at"], item["end_at"], bool(item["planned"])))
     timeline_points = [point for wave in board_waves for phase_item in wave["phases"] for point in (phase_item["start_at"], phase_item["end_at"])]
+    # The shared lane is rendered above the per-wave restore rows, but it is
+    # still part of the same time axis. Omitting its endpoint clips a long
+    # transfer against the right border and makes it look similar to a short
+    # interval despite correct durable start/end timestamps.
+    lane_timeline_points = [
+        point for phase_item in transfer_lane_phases
+        for point in (phase_item["start_at"], phase_item["end_at"])
+    ]
+    all_timeline_points = timeline_points + lane_timeline_points
     # Once processing starts, the time origin is immutable: it is the first
     # observed AWS restore submission for this source/run.  It must not drift
     # with ``now`` while the modal refreshes.  Sources without a submission
@@ -4157,13 +4166,13 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         wave["started_at"] for wave in board_waves
         if wave["started_at"] is not None
     ]
-    timeline_start = min(submitted_points) if submitted_points else (min(timeline_points) if timeline_points else now)
+    timeline_start = min(submitted_points) if submitted_points else (min(all_timeline_points) if all_timeline_points else now)
     return {"waves": board_waves,
             "transfer_lane": {"enabled": True, "phases": transfer_lane_phases},
             "generated_at": now, "source_id": source_id,
             "source_name": source_name,
             "timeline_start_at": timeline_start,
-            "timeline_end_at": max(timeline_points) if timeline_points else now + timedelta(hours=1),
+            "timeline_end_at": max(all_timeline_points) if all_timeline_points else now + timedelta(hours=1),
             "truncated": len(rows) >= 500}
 
 
