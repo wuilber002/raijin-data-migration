@@ -235,6 +235,11 @@ class Source(Base):
     destination_size_mismatch_count: Mapped[int] = mapped_column(Integer, default=0)
     destination_metadata_mismatch_count: Mapped[int] = mapped_column(Integer, default=0)
     destination_extra_count: Mapped[int] = mapped_column(Integer, default=0)
+    # The transfer forecast is frozen when the first restore is submitted.
+    # It preserves what the operator was told at the beginning even when the
+    # adaptive scheduler later changes worker allocation or wave timing.
+    completion_estimate_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completion_estimated_transfer_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     objects: Mapped[list[ObjectRecord]] = relationship(back_populates="source")
     waves: Mapped[list[Wave]] = relationship(back_populates="source")
@@ -1318,7 +1323,7 @@ def create_schema() -> None:
     }
     source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_objects_inserted": "BIGINT NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_bucket_region": "VARCHAR(64)", "backend_kind": "VARCHAR(16) NOT NULL DEFAULT 'REAL'", "simulation_scenario_id": "VARCHAR(36)", "simulation_execution_id": "VARCHAR(36)", "simulation_correlation_id": "VARCHAR(36)", "simulation_tenant_id": "VARCHAR(36)", "simulation_project_id": "VARCHAR(36)", "simulation_fidelity": "VARCHAR(16)", "business_priority": "INTEGER NOT NULL DEFAULT 999"}
     source_columns["archived_at"] = "TIMESTAMP WITH TIME ZONE"
-    source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0"})
+    source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION"})
     wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_requested_virtual_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_started_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_completed_virtual_at": "TIMESTAMP WITH TIME ZONE", "simulation_transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
     existing_runtime_columns = {column["name"] for column in inspect(engine).get_columns("runtime_settings")}
     existing_source_columns = {column["name"] for column in inspect(engine).get_columns("sources")}
@@ -5215,6 +5220,7 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
         .order_by(DynamicPipelineRun.id.desc()).limit(1)
     )
     return {"source_id": source_id, "objects": count, "bytes": bytes_total, "object_states": states, "migration_status": migration_status,
+            "completion_statistics": source_completion_statistics(session, source, completed=migration_status == "COMPLETED"),
             "pipeline": {"status": pipeline.status if pipeline else "NOT_STARTED",
                          "run_id": pipeline.id if pipeline else None,
                          "scheduled_restores": bool(pipeline.scheduled_restores) if pipeline else False},
@@ -6100,6 +6106,130 @@ def dynamic_schedule_times(now: datetime, plans: list[dict], safety_seconds: int
 def restore_service_window_seconds(tier: str | None) -> int:
     """Return the conservative service window used by the local planner."""
     return (48 if tier == "BULK" else 12) * 3600
+
+
+def _completion_timestamp(value: datetime | None) -> datetime | None:
+    """Normalize legacy SQLite timestamps before comparing source windows."""
+    return value.replace(tzinfo=timezone.utc) if value is not None and value.tzinfo is None else value
+
+
+def _completion_windows(intervals: list[tuple[datetime | None, datetime | None]]) -> list[tuple[datetime, datetime]]:
+    """Merge calendar windows; parallel workers never inflate elapsed time."""
+    normalized = sorted(
+        ((start, end) for raw_start, raw_end in intervals
+         if (start := _completion_timestamp(raw_start)) is not None
+         and (end := _completion_timestamp(raw_end)) is not None and end > start),
+        key=lambda item: (item[0], item[1]),
+    )
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in normalized:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _completion_window_seconds(windows: list[tuple[datetime, datetime]]) -> int:
+    return int(sum((end - start).total_seconds() for start, end in windows))
+
+
+def _completion_gap_seconds(windows: list[tuple[datetime, datetime]]) -> int:
+    """Only gaps between work count as idle; setup and post-completion do not."""
+    return int(sum(max(0, (right[0] - left[1]).total_seconds())
+                   for left, right in zip(windows, windows[1:])))
+
+
+def capture_source_completion_estimate(session: Session, source: Source,
+                                       settings: RuntimeSettings | None = None) -> None:
+    """Freeze the configured-link transfer forecast at the first paid restore.
+
+    The source can receive adaptive waves later, but this datum deliberately
+    remains unchanged: it is the estimate available when execution began.
+    """
+    if source.completion_estimate_created_at is not None:
+        return
+    settings = settings or runtime_settings(session)
+    total_bytes = session.scalar(select(func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(
+        ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True)
+    )) or 0
+    bits_per_second = max(1.0, float(settings.max_throughput_mbps or 1) * 1_000_000)
+    source.completion_estimated_transfer_seconds = float(total_bytes) * 8 / bits_per_second
+    source.completion_estimate_created_at = utcnow()
+
+
+def source_completion_statistics(session: Session, source: Source,
+                                 *, completed: bool) -> dict:
+    """Return source-end evidence and forecasts for the arrival report modal."""
+    if not completed:
+        return {"available": False, "reason": "Aguardando a conclusão e a verificação de integridade da source."}
+    settings = runtime_settings(session)
+    simulated = runtime_context.is_simulation and bool(source.simulation_execution_id)
+    waves = list(session.scalars(select(Wave).where(Wave.source_id == source.id).order_by(Wave.id)))
+    if not waves:
+        return {"available": False, "reason": "A source não possui waves com execução concluída."}
+    wave_ids = [wave.id for wave in waves]
+    object_times = {
+        wave_id: (requested, available)
+        for wave_id, requested, available in session.execute(
+            select(ObjectRecord.wave_id, func.min(ObjectRecord.restore_requested_at), func.max(ObjectRecord.restored_at))
+            .where(ObjectRecord.wave_id.in_(wave_ids)).group_by(ObjectRecord.wave_id)
+        )
+    }
+    expected_restore: list[tuple[datetime | None, datetime | None]] = []
+    actual_restore: list[tuple[datetime | None, datetime | None]] = []
+    for wave in waves:
+        persisted_requested, persisted_available = object_times.get(wave.id, (None, None))
+        requested = wave.restore_requested_virtual_at if simulated else persisted_requested
+        available = wave.last_restore_available_virtual_at if simulated else persisted_available
+        planned = wave.planned_restore_at or requested
+        if planned:
+            expected_restore.append((planned, planned + timedelta(seconds=restore_service_window_seconds(wave.restore_tier))))
+        if requested and available:
+            actual_restore.append((requested, available))
+
+    actual_lane: list[tuple[datetime | None, datetime | None]] = []
+    for segment, elapsed, terminal in session.execute(
+        select(TransferLaneSegment, ObjectRecord.transfer_elapsed_seconds, Wave.transfer_completed_virtual_at)
+        .join(TransferQueueItem, TransferQueueItem.id == TransferLaneSegment.queue_item_id)
+        .outerjoin(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
+        .join(Wave, Wave.id == TransferLaneSegment.wave_id)
+        .where(TransferLaneSegment.source_id == source.id)
+        .order_by(TransferLaneSegment.started_at, TransferLaneSegment.id)
+    ):
+        start = segment.started_at
+        end = segment.completed_at
+        if start and (not end or end <= start):
+            recovered = float(elapsed or 0)
+            end = start + timedelta(seconds=recovered) if recovered > 0 else terminal
+        actual_lane.append((start, end))
+
+    expected_restore_windows = _completion_windows(expected_restore)
+    actual_restore_windows = _completion_windows(actual_restore)
+    actual_lane_windows = _completion_windows(actual_lane)
+    total_bytes = session.scalar(select(func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(
+        ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True)
+    )) or 0
+    configured_estimate = float(total_bytes) * 8 / max(1.0, float(settings.max_throughput_mbps or 1) * 1_000_000)
+    estimated_transfer = source.completion_estimated_transfer_seconds
+    if estimated_transfer is None:
+        estimated_transfer = configured_estimate
+    estimated_restore_seconds = _completion_window_seconds(expected_restore_windows)
+    actual_restore_seconds = _completion_window_seconds(actual_restore_windows)
+    actual_transfer_seconds = _completion_window_seconds(actual_lane_windows)
+    return {
+        "available": True,
+        "estimate_created_at": source.completion_estimate_created_at,
+        "configured_link_mbps": settings.max_throughput_mbps,
+        "transfer": {"estimated_seconds": int(estimated_transfer), "actual_seconds": actual_transfer_seconds,
+                     "difference_seconds": actual_transfer_seconds - int(estimated_transfer)},
+        "restore": {"estimated_seconds": estimated_restore_seconds, "actual_seconds": actual_restore_seconds,
+                    "difference_seconds": actual_restore_seconds - estimated_restore_seconds},
+        "idle": {"transfer_lane_seconds": _completion_gap_seconds(actual_lane_windows),
+                 "restore_queue_seconds": _completion_gap_seconds(actual_restore_windows)},
+        "evidence": {"restore_windows": len(actual_restore_windows), "transfer_windows": len(actual_lane_windows),
+                     "waves": len(waves)},
+    }
 
 
 def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings, now: datetime | None = None) -> int:

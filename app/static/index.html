@@ -1056,4 +1056,48 @@ refreshAll();
   .lane-operation .queue-workers td:nth-child(3){max-width:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lane-operation .queue-workers .queue-worker-idle td{white-space:normal;overflow-wrap:anywhere}
 </style>
+<div id="source-completion-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="source-completion-title"><div class="modal-panel source-completion-panel"><div class="row"><h2 id="source-completion-title">🏁 Chegada da source</h2><button class="secondary" type="button" onclick="closeSourceCompletionModal()">Fechar</button></div><div id="source-completion-content" class="hint">Carregando resumo…</div></div></div>
+<script>
+  function closeSourceCompletionModal(){closeModal('#source-completion-modal')}
+  function completionDuration(seconds){return seconds===null||seconds===undefined?'—':duration(Math.abs(Number(seconds)))}
+  function completionDifference(seconds){if(seconds===null||seconds===undefined)return '—';const n=Number(seconds);return `${n===0?'igual ao previsto':`${n<0?'−':'+'}${completionDuration(n)}`}`}
+  async function showSourceCompletion(){
+    if(!selectedSource)return say('Selecione uma origem.',true);
+    $('#source-completion-content').innerHTML='<p class="hint">Carregando o relatório de chegada…</p>';
+    openModal('#source-completion-modal');
+    try{
+      const summary=await api(`/api/sources/${selectedSource}/summary`), report=summary.completion_statistics||{};
+      if(!report.available){
+        $('#source-completion-content').innerHTML=`<p class="hint">${escape(report.reason||'O relatório será disponibilizado quando a source for concluída.')}</p><p class="hint">As estatísticas finais usam janelas persistidas de restore e transferência; elas só ficam disponíveis após a conclusão e a verificação de integridade.</p>`;
+        return;
+      }
+      const restore=report.restore||{},transfer=report.transfer||{},idle=report.idle||{},evidence=report.evidence||{};
+      const varianceClass=value=>Number(value)>0?'warning':Number(value)<0?'ok':'hint';
+      $('#source-completion-content').innerHTML=`
+        <p class="hint">Visão final da source. “Realizado” mede tempo de calendário: operações paralelas são unificadas, não somadas.</p>
+        <table class="source-completion-table"><thead><tr><th>Etapa</th><th>Estimado</th><th>Realizado</th><th>Diferença</th></tr></thead><tbody>
+          <tr><th>Restore</th><td>${completionDuration(restore.estimated_seconds)}</td><td>${completionDuration(restore.actual_seconds)}</td><td class="${varianceClass(restore.difference_seconds)}">${completionDifference(restore.difference_seconds)}</td></tr>
+          <tr><th>Transferência</th><td>${completionDuration(transfer.estimated_seconds)}</td><td>${completionDuration(transfer.actual_seconds)}</td><td class="${varianceClass(transfer.difference_seconds)}">${completionDifference(transfer.difference_seconds)}</td></tr>
+        </tbody></table>
+        <h3>Ociosidade observada</h3><table class="source-completion-table"><thead><tr><th>Métrica</th><th>Tempo</th><th>Como é calculado</th></tr></thead><tbody>
+          <tr><th>Lane contínua</th><td>${completionDuration(idle.transfer_lane_seconds)}</td><td>Lacunas entre janelas de transferência; não inclui preparação nem o período após a última cópia.</td></tr>
+          <tr><th>Fila de restores</th><td>${completionDuration(idle.restore_queue_seconds)}</td><td>Lacunas entre janelas de restore; ajuda a identificar espaço para antecipação do scheduler.</td></tr>
+        </tbody></table>
+        <p class="hint">Previsão de transferência registrada em ${report.estimate_created_at?new Date(report.estimate_created_at).toLocaleString(raijinLocale()):'início não registrado (estimativa recuperada da capacidade configurada)'} · link configurado: ${fmt(report.configured_link_mbps)} Mbps · evidências: ${fmt(evidence.restore_windows)} janela(s) de restore e ${fmt(evidence.transfer_windows)} janela(s) da lane em ${fmt(evidence.waves)} wave(s).</p>`;
+    }catch(error){$('#source-completion-content').innerHTML=`<p class="error">${escape(error.message)}</p>`}
+  }
+  (()=>{
+    const ensureArrivalButton=()=>{
+      const row=$('.source-actions');if(!row||$('#source-completion-action'))return;
+      const button=document.createElement('button');button.type='button';button.id='source-completion-action';button.className='secondary';button.title='Resumo final de chegada da source';button.textContent='🏁 Chegada';button.onclick=showSourceCompletion;row.insertBefore(button,$('#source-lifecycle-action'));
+    };
+    ensureArrivalButton();
+    const priorSelectSource=selectSource;
+    selectSource=async function(){ensureArrivalButton();const button=$('#source-completion-action');if(button)button.disabled=!$('#source-select').value;return priorSelectSource()};
+  })();
+</script>
+<style>
+  .source-completion-panel{width:min(900px,calc(100vw - 2rem));max-height:calc(100vh - 2rem);overflow-y:auto}
+  .source-completion-panel h2{margin:.1rem 0}.source-completion-panel h3{margin:1.25rem 0 .45rem}.source-completion-table{width:100%;table-layout:fixed}.source-completion-table th,.source-completion-table td{vertical-align:top;overflow-wrap:anywhere}
+</style>
 </body></html>

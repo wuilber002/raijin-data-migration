@@ -22,7 +22,7 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 
 from datetime import datetime, timedelta, timezone
 
-from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, continuous_lane_capacity_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, internal_rate_value, list_sources, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, source_key_in_scope, transfer_queue, wave_cost_estimate
+from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, continuous_lane_capacity_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, internal_rate_value, list_sources, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, source_completion_statistics, source_key_in_scope, transfer_queue, wave_cost_estimate
 from app.real_worker import GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, require_new_restore_approval, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, task_kinds_for_role, validate_restore_preflight
 
 
@@ -915,6 +915,63 @@ def test_continuous_lane_releases_each_observed_object_without_a_percent_thresho
     assert "def reconcile_restored_transfer_lane" in worker
     assert "def enqueue_available_transfer_objects" in Path("app/main.py").read_text(encoding="utf-8")
     assert "early_transfer_minimum_percent" not in worker
+
+
+def test_source_arrival_report_uses_calendar_windows_and_frozen_link_estimate():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session() as session:
+        session.add(RuntimeSettings(max_throughput_mbps=80))
+        source = Source(name="arrival", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+        session.add(source); session.flush()
+        first = Wave(source_id=source.id, name="first", max_bytes=500_000_000, restore_days=1,
+                     restore_tier="STANDARD", planned_restore_at=now)
+        second = Wave(source_id=source.id, name="second", max_bytes=500_000_000, restore_days=1,
+                      restore_tier="STANDARD", planned_restore_at=now + timedelta(hours=13))
+        session.add_all([first, second]); session.flush()
+        first.restore_requested_virtual_at, first.last_restore_available_virtual_at = now, now + timedelta(hours=12)
+        second.restore_requested_virtual_at, second.last_restore_available_virtual_at = now + timedelta(hours=13), now + timedelta(hours=25)
+        one = ObjectRecord(source_id=source.id, wave_id=first.id, object_key="one", size_bytes=500_000_000,
+                           state=ObjectState.TRANSFERRED, restore_requested_at=now,
+                           restored_at=now + timedelta(hours=12))
+        two = ObjectRecord(source_id=source.id, wave_id=second.id, object_key="two", size_bytes=500_000_000,
+                           state=ObjectState.TRANSFERRED, restore_requested_at=now + timedelta(hours=13),
+                           restored_at=now + timedelta(hours=25))
+        session.add_all([one, two]); session.flush()
+        capture_source_completion_estimate(session, source, session.get(RuntimeSettings, 1))
+        assert source.completion_estimated_transfer_seconds == 100
+        first_item = TransferQueueItem(source_id=source.id, wave_id=first.id, object_id=one.id,
+                                       size_bytes=one.size_bytes, state=TransferQueueState.TRANSFERRED)
+        second_item = TransferQueueItem(source_id=source.id, wave_id=second.id, object_id=two.id,
+                                        size_bytes=two.size_bytes, state=TransferQueueState.TRANSFERRED)
+        session.add_all([first_item, second_item]); session.flush()
+        # Overlap is copied by two Raijus, but represents 90 seconds of lane
+        # calendar time, not 120 worker-seconds.
+        session.add_all([
+            TransferLaneSegment(source_id=source.id, wave_id=first.id, queue_item_id=first_item.id,
+                                started_at=now, completed_at=now + timedelta(seconds=60), bytes_transferred=one.size_bytes),
+            TransferLaneSegment(source_id=source.id, wave_id=second.id, queue_item_id=second_item.id,
+                                started_at=now + timedelta(seconds=30), completed_at=now + timedelta(seconds=90), bytes_transferred=two.size_bytes),
+        ])
+        session.flush()
+        report = source_completion_statistics(session, source, completed=True)
+        assert report["available"] is True
+        assert report["transfer"] == {"estimated_seconds": 100, "actual_seconds": 90, "difference_seconds": -10}
+        assert report["restore"]["actual_seconds"] == 24 * 3600
+        assert report["idle"]["restore_queue_seconds"] == 3600
+        assert report["idle"]["transfer_lane_seconds"] == 0
+
+
+def test_source_arrival_report_is_hidden_until_integrity_completion():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="arrival-pending", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+        session.add(source); session.flush()
+        assert source_completion_statistics(session, source, completed=False)["available"] is False
 
 
 def test_dynamic_prediction_prefers_p75_history_then_conservative_link_model():
