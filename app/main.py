@@ -3548,6 +3548,57 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
             TransferQueueItem.preemption_successor_item_id.is_not(None),
         )
     ) or 0)
+    # The continuous lane is independent from a wave.  Its live operators
+    # therefore need one source/wave-neutral view of the objects currently
+    # occupying Raiju capacity, rather than the old "active wave owns the
+    # workers" presentation.  Queue items are the durable ownership record;
+    # ObjectRecord provides the bounded progress snapshot for the browser.
+    active_raiju_rows = list(session.execute(
+        select(TransferQueueItem, ObjectRecord, Wave, Source)
+        .join(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
+        .join(Wave, Wave.id == TransferQueueItem.wave_id)
+        .join(Source, Source.id == TransferQueueItem.source_id)
+        .where(
+            TransferQueueItem.state == TransferQueueState.LEASED,
+            ObjectRecord.state == ObjectState.TRANSFERRING,
+            Wave.status != "PAUSED",
+            Source.archived_at.is_(None),
+        )
+        .order_by(Source.id, TransferQueueItem.last_dispatched_at, TransferQueueItem.id)
+    ))
+    lane_totals["workers"] = [{
+        # Slot assignment is ephemeral while a transfer executor is alive.
+        # Expose a stable display order for this snapshot without claiming it
+        # is a durable worker identity; completed segments retain the true
+        # historical worker_slot for the flight board and reports.
+        "slot": index,
+        "state": "TRANSFERRING",
+        "source_id": source.id,
+        "source_name": source.name,
+        "wave_id": wave.id,
+        "wave_name": wave.name,
+        "object_key": obj.object_key,
+        "progress_bytes": int(obj.transfer_progress_bytes or 0),
+        "total_bytes": int(obj.size_bytes or item.size_bytes or 0),
+        "rate_mbps": round(float(obj.transfer_rate_mbps or 0), 2),
+        "elapsed_seconds": int(float(obj.transfer_elapsed_seconds or 0)),
+        "priority_band": item.priority_band,
+        "restore_expires_at": item.restore_expires_at,
+    } for index, (item, obj, wave, source) in enumerate(active_raiju_rows, start=1)]
+    active_worker_targets = [
+        int(value or 0) for value in session.scalars(
+            select(Wave.active_transfer_workers).where(
+                Wave.id.in_(select(TransferQueueItem.wave_id).where(
+                    TransferQueueItem.state == TransferQueueState.LEASED
+                ))
+            )
+        )
+    ]
+    lane_totals["worker_capacity"] = max(
+        RAIJU_MIN_WORKERS,
+        len(lane_totals["workers"]),
+        sum(active_worker_targets),
+    )
     # The queue screen must explain what Raikou will do next without causing
     # another AWS call.  This is a read of the durable lane after the most
     # recent priority refresh performed by governance/dispatch.

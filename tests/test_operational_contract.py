@@ -1238,6 +1238,39 @@ def test_transfer_queue_keeps_restore_lifecycle_distinct_from_worker_task_state(
         assert queued[0]["operational_state"] == "RESTORING"
 
 
+def test_transfer_queue_exposes_source_scoped_raiju_lane_not_an_active_wave_owner():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(id=426, name="lane-source", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+        first = Wave(id=427, source_id=source.id, name="restore-a", max_bytes=1024, restore_days=1,
+                     restore_tier="BULK", status="RESTORING", active_transfer_workers=3)
+        second = Wave(id=428, source_id=source.id, name="restore-b", max_bytes=1024, restore_days=1,
+                      restore_tier="BULK", status="RESTORING", active_transfer_workers=4)
+        first_object = ObjectRecord(id=429, source_id=source.id, wave_id=first.id, object_key="a.bin",
+                                    size_bytes=100, state=ObjectState.TRANSFERRING,
+                                    transfer_progress_bytes=25, transfer_rate_mbps=11)
+        second_object = ObjectRecord(id=430, source_id=source.id, wave_id=second.id, object_key="b.bin",
+                                     size_bytes=200, state=ObjectState.TRANSFERRING,
+                                     transfer_progress_bytes=50, transfer_rate_mbps=12)
+        session.add_all([source, first, second, first_object, second_object])
+        session.add_all([
+            TransferQueueItem(id=431, source_id=source.id, wave_id=first.id, object_id=first_object.id,
+                              size_bytes=100, state=TransferQueueState.LEASED),
+            TransferQueueItem(id=432, source_id=source.id, wave_id=second.id, object_id=second_object.id,
+                              size_bytes=200, state=TransferQueueState.LEASED),
+        ])
+        session.commit()
+
+        lane = transfer_queue(session)["continuous_lane"]
+
+        assert lane["worker_capacity"] == 7
+        assert [(worker["wave_id"], worker["object_key"]) for worker in lane["workers"]] == [
+            (first.id, "a.bin"), (second.id, "b.bin"),
+        ]
+
+
 def test_adaptive_restore_capacity_honors_global_ceiling_after_history():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
