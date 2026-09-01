@@ -897,7 +897,7 @@ refreshAll();
     const when=value=>value?new Date(value).toLocaleString(raijinLocale()):'—';
     const waveLink=wave=>`<button type="button" class="queue-wave-link" title="Ver acompanhamento do restore" onclick="showQueuedRestore(${wave.wave_id})">#${fmt(wave.wave_id)}: ${escape(wave.wave_name)}</button>`;
     const laneState=wave=>{const states=wave.continuous_lane?.states||{};const ready=Number(states.READY||0)+Number(states.AVAILABLE||0);const leased=Number(states.LEASED||0);return `${ready?`${fmt(ready)} pronto(s)`:''}${ready&&leased?' · ':''}${leased?`${fmt(leased)} em cópia`:''}`||'sem arquivos na lane'};
-    const restoreBadge=wave=>{const restore=wave.restore||{};const available=Number(restore.available_objects||0);const requested=Number(restore.requested_objects||wave.total_files||0);if(!requested)return '<span class="restore-availability planned">RESTORE PLANEJADO</span>';const complete=available>=requested;return `<span class="restore-availability ${complete?'complete':'partial'}">${complete?'RESTORE CONCLUÍDO':'PARTIAL RESTORE'}: ${fmt(available)} / ${fmt(requested)} AVAILABLE</span>`};
+    const restoreBadge=wave=>{const restore=wave.restore||{};const available=Number(restore.available_objects||0);const requested=Number(restore.requested_objects||wave.total_files||0);if(!requested)return '<span class="restore-availability planned">RESTORE PLANEJADO</span>';const complete=available>=requested;return `<span class="restore-availability ${complete?'complete':'partial'}">${complete?'RESTORE CONCLUÍDO':'PARTIAL RESTORE'}: ${fmt(available)} / ${fmt(requested)}</span>`};
     const restoreRow=wave=>{const restore=wave.restore||{};const available=Number(restore.available_objects||0);const requested=Number(restore.requested_objects||wave.total_files||0);const availableBytes=wave.continuous_lane?.bytes||0;const expiry=restore.earliest_expiry_at||wave.continuous_lane?.earliest_expiry_at;const progress=requested?`${fmt(available)} / ${fmt(requested)} (${Math.min(100,Math.round(available*100/requested))}%)`:'Aguardando inventário de restore';return `<tr><td><b>${escape(wave.source_name)}</b><br>${waveLink(wave)}<br>${restoreBadge(wave)}</td><td><span class="queue-state">${escape(wave.operational_state||wave.status||'—')}</span><br><small>${escape(wave.task_kind||'RESTORE')}</small></td><td><b>${progress}</b>${availableBytes?`<br><small>${bytes(availableBytes)} na lane</small>`:''}</td><td>Solicitado: ${when(restore.requested_at)}<br><small>Primeiro disponível: ${when(restore.first_available_at)}</small></td><td>${expiry?`<span class="queue-expiry">${when(expiry)}</span>`:'—'}<br><small>${escape(laneState(wave))}</small></td></tr>`};
     const plannedRow=wave=>`<tr><td><b>${escape(wave.source_name)}</b><br>#${fmt(wave.wave_id)}: ${escape(wave.wave_name)}<br>${restoreBadge(wave)}</td><td><span class="queue-state">PLANEJADA</span></td><td>—</td><td>Previsto: ${when(wave.planned_restore_at)}</td><td><small>Replanejável; ainda não gera chamada AWS.</small></td></tr>`;
     renderTransferQueue=function(queue){
@@ -988,6 +988,13 @@ refreshAll();
         'Progresso':'Bytes já copiados em relação ao tamanho do arquivo, com a taxa e o tempo da cópia em andamento.',
         'Prioridade':'Faixa usada pelo scheduler para escolher o próximo objeto. Ela considera expiração, disponibilidade, idade na fila e prioridade da source.'
       };
+      const restoreColumnHelp={
+        'Fonte / wave':'Identifica a source e a wave que delimita o trabalho de restore. A lane de transferência pode consumir arquivos de várias waves em paralelo.',
+        'Estado':'Estado operacional atual da wave. Waves em restore ou liberando arquivos aparecem antes; as planejadas ficam ao final.',
+        'Disponível':'Quantidade de arquivos restaurados e já visíveis para a lane, comparada ao total da wave. A porcentagem mostra o progresso do restore.',
+        'Restore':'Marcos persistidos do restore: quando foi solicitado e quando o primeiro arquivo ficou disponível.',
+        'Expiração / lane':'Prazo mais próximo de uma cópia temporária restaurada e resumo dos arquivos da wave que já estão prontos ou em cópia na lane.'
+      };
       if(lanePanel){
         for(const label of lanePanel.querySelectorAll('.queue-lane-summary .metric>span')){
           const text=label.textContent.trim(),help=metricHelp[text];
@@ -997,6 +1004,10 @@ refreshAll();
           const text=header.textContent.trim(),help=columnHelp[text];
           if(help&&!header.querySelector('.help'))header.insertAdjacentHTML('beforeend',` <span class="help" tabindex="0" data-help="${escape(help)}">i</span>`);
         }
+      }
+      for(const header of panel.querySelectorAll('thead th')){
+        const text=header.textContent.trim(),help=restoreColumnHelp[text];
+        if(help&&!header.querySelector('.help'))header.insertAdjacentHTML('beforeend',` <span class="help" tabindex="0" data-help="${escape(help)}">i</span>`);
       }
       const tables=panel.querySelectorAll('table');if(tables.length<2)return;
       const primary=tables[0],secondary=tables[1],primaryBody=primary.tBodies[0],secondaryBody=secondary.tBodies[0];
@@ -1009,11 +1020,11 @@ refreshAll();
         const match=row.textContent.match(/#([0-9]+)/),wave=match&&wavesById.get(Number(match[1]));if(!wave)continue;
         const cell=row.cells[0];if(cell.querySelector('.restore-availability'))continue;
         const restore=wave.restore||{},available=Number(restore.available_objects||0),requested=Number(restore.requested_objects||wave.total_files||0),complete=requested>0&&available>=requested;
-        const marker=requested?`${complete?'RESTORE CONCLUÍDO':'PARTIAL RESTORE'}: ${fmt(available)} / ${fmt(requested)} AVAILABLE`:'RESTORE PLANEJADO';
+        const marker=requested?`${complete?'RESTORE CONCLUÍDO':'PARTIAL RESTORE'}: ${fmt(available)} / ${fmt(requested)}`:'RESTORE PLANEJADO';
         cell.insertAdjacentHTML('beforeend',`<br><span class="restore-availability ${requested?(complete?'complete':'partial'):'planned'}">${marker}</span>`);
       }
     };
   })();
 </script>
-<style>.restore-availability.planned{background:#334155;color:#dbeafe}</style>
+<style>.restore-operation .restore-availability{font-size:10px;white-space:nowrap}.restore-availability.planned{background:#334155;color:#dbeafe}</style>
 </body></html>
