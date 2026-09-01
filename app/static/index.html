@@ -1039,5 +1039,21 @@ refreshAll();
     };
   })();
 </script>
-<style>.restore-operation .restore-availability{font-size:10px;white-space:nowrap}.restore-availability.planned{background:#334155;color:#dbeafe}</style>
+<style>
+  .restore-operation .restore-availability{font-size:10px;white-space:nowrap}.restore-availability.planned{background:#334155;color:#dbeafe}
+  /* The Raiju panel is an operational snapshot, not a wide data grid. Keep
+     it readable inside its card and scroll only when more than eight workers
+     are actually shown. */
+  .lane-operation .queue-table-wrap{max-height:478px;overflow-x:hidden;overflow-y:auto}
+  .lane-operation .queue-workers table{width:100%;min-width:0;table-layout:fixed;font-size:.82rem}
+  .lane-operation .queue-workers th{white-space:nowrap;font-size:.78rem}
+  .lane-operation .queue-workers th:nth-child(1){width:16%}
+  .lane-operation .queue-workers th:nth-child(2){width:20%}
+  .lane-operation .queue-workers th:nth-child(3){width:27%}
+  .lane-operation .queue-workers th:nth-child(4){width:22%}
+  .lane-operation .queue-workers th:nth-child(5){width:15%}
+  .lane-operation .queue-workers td{min-width:0;overflow-wrap:anywhere}
+  .lane-operation .queue-workers td:nth-child(3){max-width:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lane-operation .queue-workers .queue-worker-idle td{white-space:normal;overflow-wrap:anywhere}
+</style>
 </body></html>
