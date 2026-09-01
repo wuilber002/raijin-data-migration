@@ -2523,6 +2523,11 @@ def claim_continuous_transfer_batch(session, source: Source, settings, task: Tas
     mechanism: Raiju only commits the currently assigned objects to a thread
     pool; unstarted claimed entries are returned immediately, allowing a
     newly released critical object to take the next slot safely.
+
+    The object and byte values in ``RuntimeSettings`` are *upper bounds*,
+    never an admission threshold.  As soon as one restored object is durable
+    in the lane it is a valid one-object batch; waiting to fill a 100-object
+    or 1-GiB batch could let a temporary restored copy expire.
     """
     # Priority/expiry belongs to the source timeline; task retries and leases
     # are deliberately real-time so a virtual date can never make an item

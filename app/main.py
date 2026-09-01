@@ -3968,6 +3968,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         transfer_lane_phases.append({
             "kind": "TRANSFER", "start_at": interval["start_at"], "end_at": interval["end_at"],
             "planned": False,
+            "time_basis": "WINDOW_UNION",
             "expected_seconds": max(1, int((interval["end_at"] - interval["start_at"]).total_seconds())),
             "elapsed_seconds": max(1, int((interval["end_at"] - interval["start_at"]).total_seconds())),
             "bytes_transferred": interval["bytes_transferred"], "object_count": interval["object_count"],
@@ -4014,6 +4015,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             if prior is None:
                 prior = projection_by_wave[item.wave_id] = {
                     "kind": "TRANSFER", "start_at": start, "end_at": end, "planned": True,
+                    "time_basis": "READY_BACKLOG_PROJECTION",
                     "expected_seconds": seconds, "elapsed_seconds": 0,
                     "bytes_transferred": int(item.size_bytes or 0), "object_count": 1,
                     "wave_id": item.wave_id, "wave_name": board_by_id[item.wave_id]["wave_name"],

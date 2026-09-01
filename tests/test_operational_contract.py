@@ -254,6 +254,7 @@ def test_continuous_lane_dispatch_batches_and_cooperative_preemption_are_durable
     assert "preemption_cooldown_until" in worker
     assert "CONTINUOUS_TRANSFER_COOPERATIVE_PREEMPTION_RESERVED" in worker
     assert "CONTINUOUS_TRANSFER_COOPERATIVE_PREEMPTION_EXECUTED" in worker
+    assert "never an admission threshold" in worker
 
 
 def test_cooperative_preemption_targets_lowest_remaining_raiju_and_honors_cooldown():
@@ -795,7 +796,17 @@ def test_flight_board_continuous_lane_uses_only_observed_transfer_segments():
             started_at=now - timedelta(minutes=7), completed_at=now - timedelta(minutes=2),
             bytes_transferred=1024, object_count=1,
         )
-        session.add(segment); session.commit()
+        second_object = ObjectRecord(source_id=source.id, wave_id=observed.id, object_key="overlap.bin", size_bytes=2048, state=ObjectState.TRANSFERRING)
+        session.add(second_object); session.flush()
+        second_item = TransferQueueItem(source_id=source.id, wave_id=observed.id, object_id=second_object.id,
+                                        size_bytes=2048, state=TransferQueueState.TRANSFERRED)
+        session.add(second_item); session.flush()
+        overlapping_segment = TransferLaneSegment(
+            source_id=source.id, wave_id=observed.id, queue_item_id=second_item.id,
+            started_at=now - timedelta(minutes=6), completed_at=now - timedelta(minutes=1),
+            bytes_transferred=2048, object_count=1,
+        )
+        session.add_all([segment, overlapping_segment]); session.commit()
 
         board = flight_board(source_id=source.id, run_id=None, session=session)
 
@@ -803,6 +814,12 @@ def test_flight_board_continuous_lane_uses_only_observed_transfer_segments():
         assert len(lane) == 1
         assert lane[0]["wave_name"] == "observed"
         assert lane[0]["planned"] is False
+        # Two Raijus overlap for four minutes.  The board must draw the
+        # calendar window (six minutes), not add their ten worker-minutes.
+        assert lane[0]["start_at"] == now - timedelta(minutes=7)
+        assert lane[0]["end_at"] == now - timedelta(minutes=1)
+        assert lane[0]["elapsed_seconds"] == 6 * 60
+        assert lane[0]["time_basis"] == "WINDOW_UNION"
         by_name = {wave["wave_name"]: wave for wave in board["waves"]}
         assert not [phase for phase in by_name["planned-only"]["phases"] if phase["kind"] == "TRANSFER"]
         assert "transfer_elapsed_seconds" in by_name["observed"]

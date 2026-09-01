@@ -890,23 +890,28 @@ refreshAll();
   // queue cards while preserving the same durable API read model.
   (()=>{
     const restoreStates=new Set(['RESTORE_REQUESTED','RESTORE_REQUEST_ACCEPTED','RESTORING','RESTORED','TRANSFERRING','RESTORE_DRAINING','RESTORE_REAPPROVAL_REQUIRED']);
+    // This renderer owns the availability marker for every row, including a
+    // completed restore.  Do not let the legacy post-render helper add a
+    // second marker only for POLL_RESTORE rows.
+    addRestoreAvailabilityIndicators=()=>{};
     const when=value=>value?new Date(value).toLocaleString(raijinLocale()):'—';
     const waveLink=wave=>`<button type="button" class="queue-wave-link" title="Ver acompanhamento do restore" onclick="showQueuedRestore(${wave.wave_id})">#${fmt(wave.wave_id)}: ${escape(wave.wave_name)}</button>`;
     const laneState=wave=>{const states=wave.continuous_lane?.states||{};const ready=Number(states.READY||0)+Number(states.AVAILABLE||0);const leased=Number(states.LEASED||0);return `${ready?`${fmt(ready)} pronto(s)`:''}${ready&&leased?' · ':''}${leased?`${fmt(leased)} em cópia`:''}`||'sem arquivos na lane'};
-    const restoreRow=wave=>{const restore=wave.restore||{};const available=Number(restore.available_objects||0);const requested=Number(restore.requested_objects||wave.total_files||0);const availableBytes=wave.continuous_lane?.bytes||0;const expiry=restore.earliest_expiry_at||wave.continuous_lane?.earliest_expiry_at;const progress=requested?`${fmt(available)} / ${fmt(requested)} (${Math.min(100,Math.round(available*100/requested))}%)`:'Aguardando inventário de restore';return `<tr><td><b>${escape(wave.source_name)}</b><br>${waveLink(wave)}</td><td><span class="queue-state">${escape(wave.operational_state||wave.status||'—')}</span><br><small>${escape(wave.task_kind||'RESTORE')}</small></td><td><b>${progress}</b>${availableBytes?`<br><small>${bytes(availableBytes)} na lane</small>`:''}</td><td>Solicitado: ${when(restore.requested_at)}<br><small>Primeiro disponível: ${when(restore.first_available_at)}</small></td><td>${expiry?`<span class="queue-expiry">${when(expiry)}</span>`:'—'}<br><small>${escape(laneState(wave))}</small></td></tr>`};
-    const plannedRow=wave=>`<tr><td><b>${escape(wave.source_name)}</b><br>#${fmt(wave.wave_id)}: ${escape(wave.wave_name)}</td><td><span class="queue-state">PLANEJADA</span></td><td>—</td><td>Previsto: ${when(wave.planned_restore_at)}</td><td><small>Replanejável; ainda não gera chamada AWS.</small></td></tr>`;
+    const restoreBadge=wave=>{const restore=wave.restore||{};const available=Number(restore.available_objects||0);const requested=Number(restore.requested_objects||wave.total_files||0);if(!requested)return '<span class="restore-availability planned">RESTORE PLANEJADO</span>';const complete=available>=requested;return `<span class="restore-availability ${complete?'complete':'partial'}">${complete?'RESTORE CONCLUÍDO':'PARTIAL RESTORE'}: ${fmt(available)} / ${fmt(requested)} AVAILABLE</span>`};
+    const restoreRow=wave=>{const restore=wave.restore||{};const available=Number(restore.available_objects||0);const requested=Number(restore.requested_objects||wave.total_files||0);const availableBytes=wave.continuous_lane?.bytes||0;const expiry=restore.earliest_expiry_at||wave.continuous_lane?.earliest_expiry_at;const progress=requested?`${fmt(available)} / ${fmt(requested)} (${Math.min(100,Math.round(available*100/requested))}%)`:'Aguardando inventário de restore';return `<tr><td><b>${escape(wave.source_name)}</b><br>${waveLink(wave)}<br>${restoreBadge(wave)}</td><td><span class="queue-state">${escape(wave.operational_state||wave.status||'—')}</span><br><small>${escape(wave.task_kind||'RESTORE')}</small></td><td><b>${progress}</b>${availableBytes?`<br><small>${bytes(availableBytes)} na lane</small>`:''}</td><td>Solicitado: ${when(restore.requested_at)}<br><small>Primeiro disponível: ${when(restore.first_available_at)}</small></td><td>${expiry?`<span class="queue-expiry">${when(expiry)}</span>`:'—'}<br><small>${escape(laneState(wave))}</small></td></tr>`};
+    const plannedRow=wave=>`<tr><td><b>${escape(wave.source_name)}</b><br>#${fmt(wave.wave_id)}: ${escape(wave.wave_name)}<br>${restoreBadge(wave)}</td><td><span class="queue-state">PLANEJADA</span></td><td>—</td><td>Previsto: ${when(wave.planned_restore_at)}</td><td><small>Replanejável; ainda não gera chamada AWS.</small></td></tr>`;
     renderTransferQueue=function(queue){
       const target=$('#transfer-queue');if(!target)return;
       const lane=queue.continuous_lane||{};
       const allWaves=queue.waves||[];
-      const restoring=allWaves.filter(w=>restoreStates.has(w.status)||w.restore?.requested_at).sort((left,right)=>{
+      const restoring=allWaves.filter(w=>(restoreStates.has(w.status)||w.restore?.requested_at)&&w.status!=='RESTORE_SCHEDULED').sort((left,right)=>{
         const leftAvailable=Number(left.restore?.available_objects||0),rightAvailable=Number(right.restore?.available_objects||0);
         if(leftAvailable!==rightAvailable)return rightAvailable-leftAvailable;
         const leftExpiry=left.restore?.earliest_expiry_at||left.continuous_lane?.earliest_expiry_at||'9999';
         const rightExpiry=right.restore?.earliest_expiry_at||right.continuous_lane?.earliest_expiry_at||'9999';
         return String(leftExpiry).localeCompare(String(rightExpiry))||left.wave_id-right.wave_id;
       });
-      const planned=(queue.planned_lookahead||[]).slice().sort((left,right)=>String(left.planned_restore_at||'').localeCompare(String(right.planned_restore_at||''))||left.wave_id-right.wave_id);
+      const planned=[...allWaves.filter(w=>w.status==='RESTORE_SCHEDULED'),...(queue.planned_lookahead||[])].filter((wave,index,items)=>items.findIndex(item=>item.wave_id===wave.wave_id)===index).slice().sort((left,right)=>String(left.planned_restore_at||'').localeCompare(String(right.planned_restore_at||''))||left.wave_id-right.wave_id);
       const workers=(lane.workers||[]).slice();
       const capacity=Math.max(Number(lane.worker_capacity||0),workers.length,5);
       for(let slot=workers.length+1;slot<=capacity;slot++)workers.push({slot,state:'IDLE'});
@@ -945,7 +950,8 @@ refreshAll();
       const [,label]=flightBoardPhase(phase.kind),observed=!phase.planned;
       const durationLabel=observed?'Duração observada':'Duração projetada';
       const durationValue=flightBoardDuration(observed?phase.elapsed_seconds:phase.expected_seconds);
-      const lane=phase.kind==='TRANSFER'?`\nObjetos/bytes: ${fmt(phase.object_count||0)} · ${bytes(phase.bytes_transferred||0)}${phase.entry_reason?`\nOrigem: ${phase.entry_reason}`:''}${phase.nearest_expiry_at?`\nExpiração mais próxima: ${flightBoardMoment(phase.nearest_expiry_at)}`:''}`:'';
+      const timeBasis=phase.time_basis==='WINDOW_UNION'?'\nReferência: união da primeira abertura à última conclusão das janelas persistidas; segmentos paralelos não são somados.':phase.time_basis==='READY_BACKLOG_PROJECTION'?'\nReferência: projeção do backlog já restaurado aguardando Raiju.':'';
+      const lane=phase.kind==='TRANSFER'?`\nObjetos/bytes: ${fmt(phase.object_count||0)} · ${bytes(phase.bytes_transferred||0)}${timeBasis}${phase.entry_reason?`\nOrigem: ${phase.entry_reason}`:''}${phase.nearest_expiry_at?`\nExpiração mais próxima: ${flightBoardMoment(phase.nearest_expiry_at)}`:''}`:'';
       return `Tipo: ${label}\nInício: ${flightBoardMoment(phase.start_at)} [${observed?'observado':'previsto'}]\n${durationLabel}: ${durationValue}${lane}`;
     };
     flightBoardTransferSchedule=function(w){
@@ -955,9 +961,35 @@ refreshAll();
     };
     const priorModal=renderFlightBoardModal;
     renderFlightBoardModal=function(d,title,introduction){
-      const clearer=`A posição das barras usa um único relógio virtual por source. Azul sólido é evidência observada da lane; azul listrado é previsão apenas de objetos já restaurados e esperando Raiju. A duração da transferência pode ultrapassar a duração do restore: após o último arquivo ficar disponível, a lane ainda pode estar copiando o backlog.`;
+      const clearer=`A posição das barras usa um único relógio virtual por source. Azul sólido é a união das janelas observadas da lane — transferências paralelas não têm suas durações somadas. Azul listrado é previsão apenas de objetos já restaurados e esperando Raiju. A duração da transferência pode ultrapassar a duração do restore: após o último arquivo ficar disponível, a lane ainda pode estar copiando o backlog.`;
       return priorModal(d,title,clearer);
     };
   })();
 </script>
+<script>
+  // Normalize the restore view after its renderer is defined: active and
+  // planned waves share one table, with planned work at the ordered tail.
+  (()=>{
+    const renderQueueBase=renderTransferQueue;
+    renderTransferQueue=function(queue){
+      renderQueueBase(queue);
+      const panel=$('#transfer-queue .restore-operation');if(!panel)return;
+      const tables=panel.querySelectorAll('table');if(tables.length<2)return;
+      const primary=tables[0],secondary=tables[1],primaryBody=primary.tBodies[0],secondaryBody=secondary.tBodies[0];
+      const empty=primaryBody.querySelector('td[colspan]');if(empty)empty.closest('tr').remove();
+      for(const row of [...secondaryBody.rows])if(!row.querySelector('td[colspan]'))primaryBody.append(row);
+      for(const heading of [...panel.querySelectorAll('h4')])heading.remove();
+      secondary.closest('.queue-table-wrap')?.remove();
+      const wavesById=new Map([...(queue.waves||[]),...(queue.planned_lookahead||[])].map(wave=>[Number(wave.wave_id),wave]));
+      for(const row of [...primaryBody.rows]){
+        const match=row.textContent.match(/#([0-9]+)/),wave=match&&wavesById.get(Number(match[1]));if(!wave)continue;
+        const cell=row.cells[0];if(cell.querySelector('.restore-availability'))continue;
+        const restore=wave.restore||{},available=Number(restore.available_objects||0),requested=Number(restore.requested_objects||wave.total_files||0),complete=requested>0&&available>=requested;
+        const marker=requested?`${complete?'RESTORE CONCLUÍDO':'PARTIAL RESTORE'}: ${fmt(available)} / ${fmt(requested)} AVAILABLE`:'RESTORE PLANEJADO';
+        cell.insertAdjacentHTML('beforeend',`<br><span class="restore-availability ${requested?(complete?'complete':'partial'):'planned'}">${marker}</span>`);
+      }
+    };
+  })();
+</script>
+<style>.restore-availability.planned{background:#334155;color:#dbeafe}</style>
 </body></html>
