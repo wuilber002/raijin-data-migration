@@ -950,7 +950,7 @@ refreshAll();
       const [,label]=flightBoardPhase(phase.kind),observed=!phase.planned;
       const durationLabel=observed?'Duração observada':'Duração projetada';
       const durationValue=flightBoardDuration(observed?phase.elapsed_seconds:phase.expected_seconds);
-      const timeBasis=phase.time_basis==='WINDOW_UNION'?'\nReferência: união da primeira abertura à última conclusão das janelas persistidas; segmentos paralelos não são somados.':phase.time_basis==='READY_BACKLOG_PROJECTION'?'\nReferência: projeção do backlog já restaurado aguardando Raiju.':'';
+      const timeBasis=phase.time_basis==='WINDOW_UNION'?'\nReferência: união da primeira abertura à última conclusão das janelas persistidas; segmentos paralelos não são somados.':phase.time_basis==='DISPATCHED_VIRTUAL_OCCUPANCY'?'\nReferência: ocupação virtual já despachada aos Raijus; ainda não é período observado no relógio virtual.':phase.time_basis==='READY_BACKLOG_PROJECTION'?'\nReferência: projeção do backlog já restaurado aguardando Raiju, após a ocupação virtual já despachada.':'';
       const lane=phase.kind==='TRANSFER'?`\nObjetos/bytes: ${fmt(phase.object_count||0)} · ${bytes(phase.bytes_transferred||0)}${timeBasis}${phase.entry_reason?`\nOrigem: ${phase.entry_reason}`:''}${phase.nearest_expiry_at?`\nExpiração mais próxima: ${flightBoardMoment(phase.nearest_expiry_at)}`:''}`:'';
       return `Tipo: ${label}\nInício: ${flightBoardMoment(phase.start_at)} [${observed?'observado':'previsto'}]\n${durationLabel}: ${durationValue}${lane}`;
     };
@@ -961,7 +961,7 @@ refreshAll();
     };
     const priorModal=renderFlightBoardModal;
     renderFlightBoardModal=function(d,title,introduction){
-      const clearer=`A posição das barras usa um único relógio virtual por source. Azul sólido é a união das janelas observadas da lane — transferências paralelas não têm suas durações somadas. Azul listrado é previsão apenas de objetos já restaurados e esperando Raiju. A duração da transferência pode ultrapassar a duração do restore: após o último arquivo ficar disponível, a lane ainda pode estar copiando o backlog.`;
+      const clearer=`A posição das barras usa um único relógio virtual por source. Azul sólido é a união das janelas observadas da lane — transferências paralelas não têm suas durações somadas. Azul listrado mostra tanto a ocupação virtual já despachada aos Raijus quanto o backlog restaurado que ainda aguarda despacho; o fim da última faixa listrada é a previsão de término da lane.`;
       return priorModal(d,title,clearer);
     };
   })();
@@ -996,12 +996,12 @@ refreshAll();
         'Expiração / lane':'Prazo mais próximo de uma cópia temporária restaurada e resumo dos arquivos da wave que já estão prontos ou em cópia na lane.'
       };
       if(lanePanel){
-        const lane=queue.continuous_lane||{},active=Number(lane.active_items||0),capacity=Math.max(active,Number(lane.worker_capacity||0),5),idle=Math.max(0,capacity-active),reconciling=Number(lane.reconciliation_items||0);
+        const lane=queue.continuous_lane||{},active=Number(lane.active_items||0),capacity=Math.max(active,Number(lane.worker_capacity||0),5),idle=Math.max(0,capacity-active),reconciling=Number(lane.reconciliation_items||0),virtual=lane.activity_basis==='VIRTUAL_LANE';
         const heading=lanePanel.querySelector('.queue-panel-heading .hint');
-        if(heading)heading.textContent=`${fmt(active)} ativo(s) · ${fmt(idle)} vaga(s) livre(s) de ${fmt(capacity)}`;
+        if(heading)heading.textContent=`${fmt(active)} ativo(s)${virtual?' no relógio virtual':''} · ${fmt(idle)} vaga(s) livre(s) de ${fmt(capacity)}`;
         const copyMetric=[...lanePanel.querySelectorAll('.queue-lane-summary .metric')].find(metric=>metric.querySelector('span')?.textContent.trim()==='Em cópia');
         if(copyMetric)copyMetric.innerHTML=`<span>Em cópia</span><b>${fmt(active)}</b><small>${fmt(capacity)} vaga(s) da lane · ${fmt(idle)} livre(s)</small>`;
-        const workerHeading=lanePanel.querySelector('.queue-workers h4');if(workerHeading)workerHeading.textContent='Raijus em cópia';
+        const workerHeading=lanePanel.querySelector('.queue-workers h4');if(workerHeading)workerHeading.textContent=virtual?'Raijus em cópia virtual':'Raijus em cópia';
         const workerBody=lanePanel.querySelector('.queue-workers tbody');
         if(workerBody){
           for(const row of [...workerBody.querySelectorAll('.queue-worker-idle')])row.remove();

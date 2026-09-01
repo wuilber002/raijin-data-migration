@@ -3585,12 +3585,65 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
         "priority_band": item.priority_band,
         "restore_expires_at": item.restore_expires_at,
     } for index, (item, obj, wave, source) in enumerate(active_raiju_rows, start=1)]
+    lane_totals["activity_basis"] = "WALL_CLOCK"
+    # Fujin CONTROL finishes the physical database operation in milliseconds
+    # while the durable segment carries the virtual WAN interval.  A normal
+    # browser refresh can therefore miss every wall-clock thread. For a
+    # simulated source, render the Raijus whose persisted segments contain
+    # the source's current virtual instant; that is the truthful operational
+    # view of an accelerated execution.
+    if runtime_context.is_simulation:
+        virtual_sources = {
+            source.id: source for source in session.scalars(select(Source).where(
+                Source.id.in_({wave.source_id for wave in wave_models.values()}),
+                Source.simulation_execution_id.is_not(None),
+                Source.archived_at.is_(None),
+            ))
+        } if wave_models else {}
+        virtual_nows: dict[int, datetime] = {}
+        for source_id, source in virtual_sources.items():
+            try:
+                virtual_nows[source_id] = cloud_backend.clock(source.simulation_execution_id).effective_now
+            except (OSError, TimeoutError, ValueError):
+                continue
+        virtual_workers = []
+        for source_id, virtual_now in virtual_nows.items():
+            for segment, item, obj, wave, source in session.execute(
+                select(TransferLaneSegment, TransferQueueItem, ObjectRecord, Wave, Source)
+                .join(TransferQueueItem, TransferQueueItem.id == TransferLaneSegment.queue_item_id)
+                .join(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
+                .join(Wave, Wave.id == TransferLaneSegment.wave_id)
+                .join(Source, Source.id == TransferLaneSegment.source_id)
+                .where(
+                    TransferLaneSegment.source_id == source_id,
+                    TransferLaneSegment.started_at <= virtual_now,
+                    TransferLaneSegment.completed_at > virtual_now,
+                ).order_by(TransferLaneSegment.worker_slot, TransferLaneSegment.id)
+            ):
+                started = segment.started_at.replace(tzinfo=timezone.utc) if segment.started_at.tzinfo is None else segment.started_at
+                completed = segment.completed_at.replace(tzinfo=timezone.utc) if segment.completed_at.tzinfo is None else segment.completed_at
+                total_bytes = int(obj.size_bytes or item.size_bytes or 0)
+                elapsed = max(0.0, (virtual_now - started).total_seconds())
+                total_seconds = max(1.0, (completed - started).total_seconds())
+                virtual_workers.append({
+                    "slot": int(segment.worker_slot or len(virtual_workers) + 1),
+                    "state": "TRANSFERRING", "source_id": source.id, "source_name": source.name,
+                    "wave_id": wave.id, "wave_name": wave.name, "object_key": obj.object_key,
+                    "progress_bytes": min(total_bytes, int(total_bytes * elapsed / total_seconds)),
+                    "total_bytes": total_bytes,
+                    "rate_mbps": round(total_bytes * 8 / total_seconds / 1_000_000, 2),
+                    "elapsed_seconds": int(elapsed), "priority_band": item.priority_band,
+                    "restore_expires_at": item.restore_expires_at,
+                })
+        if virtual_workers:
+            lane_totals["workers"] = virtual_workers
+            lane_totals["activity_basis"] = "VIRTUAL_LANE"
     # A lease is a crash-safe ownership fence, not proof that bytes are being
     # copied at this exact instant.  Keep those concepts distinct in the UI:
     # only TRANSFERRING objects occupy a displayed Raiju.  A lease paired with
     # a delivered object is shown as reconciliation work until the next Raiju
     # loop finalizes it after an interruption.
-    lane_totals["active_items"] = len(active_raiju_rows)
+    lane_totals["active_items"] = len(lane_totals["workers"])
     lane_totals["reconciliation_items"] = int(session.scalar(
         select(func.count(TransferQueueItem.id))
         .join(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
@@ -3930,6 +3983,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     wave_by_id = {wave.id: wave for wave, _source in rows}
     board_by_id = {wave["wave_id"]: wave for wave in board_waves}
     observed_intervals: list[dict] = []
+    dispatched_virtual_intervals: list[dict] = []
     for wave_id, entries in segments_by_wave.items():
         board_wave = board_by_id[wave_id]
         terminal_at = board_timestamp(board_wave.get("transfer_completed_at"))
@@ -3954,29 +4008,47 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                 # Keep a durable instantaneous event visible without claiming
                 # that it occupied an unrecorded interval.
                 end = start + timedelta(seconds=1)
-            observed_intervals.append({
+            interval = {
+                "source_id": wave_by_id[wave_id].source_id,
                 "start_at": start, "end_at": end, "wave_ids": {wave_id},
                 "bytes_transferred": int(segment.bytes_transferred or 0),
                 "object_count": int(segment.object_count or 1),
                 "nearest_expiry_at": segment.nearest_expiry_at,
                 "segment_count": 1,
-            })
+            }
+            # CONTROL commits the object record immediately but its segment
+            # represents scheduled virtual WAN occupancy. A future segment is
+            # not yet observed calendar work. Split it at the source clock so
+            # solid blue never hides the striped forecast that remains.
+            if runtime_context.is_simulation:
+                virtual_now = board_timestamp(source_clock_now.get(interval["source_id"], now))
+                if interval["start_at"] < virtual_now:
+                    observed_intervals.append({**interval, "end_at": min(interval["end_at"], virtual_now)})
+                if interval["end_at"] > virtual_now:
+                    dispatched_virtual_intervals.append({**interval, "start_at": max(interval["start_at"], virtual_now)})
+            else:
+                observed_intervals.append(interval)
 
-    observed_intervals.sort(key=lambda item: (item["start_at"], item["end_at"]))
-    merged_observed: list[dict] = []
-    for interval in observed_intervals:
-        if merged_observed and interval["start_at"] <= merged_observed[-1]["end_at"]:
-            current = merged_observed[-1]
-            current["end_at"] = max(current["end_at"], interval["end_at"])
-            current["wave_ids"].update(interval["wave_ids"])
-            current["bytes_transferred"] += interval["bytes_transferred"]
-            current["object_count"] += interval["object_count"]
-            current["segment_count"] += interval["segment_count"]
-            expiry = interval["nearest_expiry_at"]
-            if expiry and (current["nearest_expiry_at"] is None or expiry < current["nearest_expiry_at"]):
-                current["nearest_expiry_at"] = expiry
-        else:
-            merged_observed.append(interval)
+    def merge_lane_intervals(intervals: list[dict]) -> list[dict]:
+        merged: list[dict] = []
+        for interval in sorted(intervals, key=lambda item: (item["source_id"], item["start_at"], item["end_at"])):
+            if (merged and interval["source_id"] == merged[-1]["source_id"]
+                    and interval["start_at"] <= merged[-1]["end_at"]):
+                current = merged[-1]
+                current["end_at"] = max(current["end_at"], interval["end_at"])
+                current["wave_ids"].update(interval["wave_ids"])
+                current["bytes_transferred"] += interval["bytes_transferred"]
+                current["object_count"] += interval["object_count"]
+                current["segment_count"] += interval["segment_count"]
+                expiry = interval["nearest_expiry_at"]
+                if expiry and (current["nearest_expiry_at"] is None or expiry < current["nearest_expiry_at"]):
+                    current["nearest_expiry_at"] = expiry
+            else:
+                merged.append(interval)
+        return merged
+
+    merged_observed = merge_lane_intervals(observed_intervals)
+    merged_dispatched_virtual = merge_lane_intervals(dispatched_virtual_intervals)
 
     transfer_lane_phases: list[dict] = []
     for interval in merged_observed:
@@ -3993,6 +4065,25 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             "wave_name": board_by_id[involved[0]]["wave_name"] if len(involved) == 1 else None,
             "entry_reason": f"{interval['segment_count']} segmento(s) observados na lane; " + ", ".join(labels),
                 "exit_reason": "janela observada consolidada",
+            "nearest_expiry_at": interval["nearest_expiry_at"],
+        })
+    dispatched_lane_end_by_source: dict[int, datetime] = {}
+    for interval in merged_dispatched_virtual:
+        involved = sorted(interval["wave_ids"])
+        labels = [f"#{wave_id}: {board_by_id[wave_id]['wave_name']}" for wave_id in involved]
+        dispatched_lane_end_by_source[interval["source_id"]] = max(
+            dispatched_lane_end_by_source.get(interval["source_id"], interval["end_at"]), interval["end_at"]
+        )
+        transfer_lane_phases.append({
+            "kind": "TRANSFER", "start_at": interval["start_at"], "end_at": interval["end_at"],
+            "planned": True, "time_basis": "DISPATCHED_VIRTUAL_OCCUPANCY",
+            "expected_seconds": max(1, int((interval["end_at"] - interval["start_at"]).total_seconds())),
+            "elapsed_seconds": 0,
+            "bytes_transferred": interval["bytes_transferred"], "object_count": interval["object_count"],
+            "wave_id": involved[0] if len(involved) == 1 else None,
+            "wave_name": board_by_id[involved[0]]["wave_name"] if len(involved) == 1 else None,
+            "entry_reason": f"{interval['segment_count']} segmento(s) já despachados na lane; " + ", ".join(labels),
+            "exit_reason": "ocupação virtual já despachada",
             "nearest_expiry_at": interval["nearest_expiry_at"],
         })
 
@@ -4021,13 +4112,19 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     projection_by_wave: dict[int, dict] = {}
     settings = runtime_settings(session)
     if queued_items:
-        source_nows = [board_timestamp(source_clock_now.get(wave_by_id[item.wave_id].source_id, now)) for item in queued_items]
-        cursor = max(source_nows)
+        cursors_by_source = {
+            source_id: max(board_timestamp(source_clock_now.get(source_id, now)), lane_end)
+            for source_id, lane_end in dispatched_lane_end_by_source.items()
+        }
         rate_bps = max(1.0, float(settings.max_throughput_mbps) * 1_000_000 / 8)
         for item in queued_items:
+            item_source_id = wave_by_id[item.wave_id].source_id
+            cursor = cursors_by_source.get(
+                item_source_id, board_timestamp(source_clock_now.get(item_source_id, now))
+            )
             seconds = max(1, math.ceil(int(item.size_bytes or 0) / rate_bps))
             start, end = cursor, cursor + timedelta(seconds=seconds)
-            cursor = end
+            cursors_by_source[item_source_id] = end
             prior = projection_by_wave.get(item.wave_id)
             if prior is None:
                 prior = projection_by_wave[item.wave_id] = {
