@@ -924,4 +924,40 @@ refreshAll();
 <style>
   .queue-operations-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:1rem;margin-top:.65rem}.queue-operation-panel{min-width:0;padding:.9rem;border:1px solid #385574;border-radius:8px;background:#111e33}.restore-operation{border-color:#a16207}.lane-operation{border-color:#2563eb}.queue-panel-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:.7rem;margin-bottom:.75rem}.queue-panel-heading h3{margin:0}.queue-panel-heading p{margin:.2rem 0 0}.queue-panel-tag{padding:.15rem .5rem;border-radius:999px;background:#263b59;color:#bfdbfe;font-size:.75rem;font-weight:800}.restore-operation .queue-panel-tag{background:#713f12;color:#fef3c7}.queue-operation-panel h4{margin:1rem 0 .4rem;font-size:.9rem;color:#dbeafe}.queue-operation-panel h4:first-of-type{margin-top:0}.queue-table-wrap{overflow:auto}.queue-operation-panel table{min-width:650px}.queue-operation-panel td{line-height:1.35}.queue-operation-panel .queue-wave-link{white-space:normal}.queue-expiry{color:#fcd34d;font-weight:700}.queue-lane-summary{grid-template-columns:repeat(2,minmax(0,1fr));margin:.1rem 0 .75rem}.queue-lane-summary .metric{min-height:82px}.queue-lane-summary small{display:block;margin-top:.25rem;color:#b7c6e0}.queue-next{margin:.55rem 0 .8rem;padding:.55rem .65rem;border-left:3px solid #60a5fa;background:#0c172b}.queue-worker-idle td{color:#aab9d1;background:#0d1728}.queue-workers h4{margin:.55rem 0}.queue-workers td:nth-child(3){max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}@media(max-width:1100px){.queue-operations-grid{grid-template-columns:1fr}}@media(max-width:600px){.queue-lane-summary{grid-template-columns:1fr}}
 </style>
+<script>
+  // Make virtual-time semantics explicit wherever the operator compares a
+  // restore with the continuous lane.  "Worker effort" is intentionally a
+  // separate parallel-work metric, never a calendar duration.
+  (()=>{
+    function laneDurationLabel(summary){return summary.transfer_time_basis==='VIRTUAL_LANE'?'Duração virtual da transferência':'Duração operacional da transferência'}
+    renderWaveReportSummary=function(reportData){
+      const summary=reportData.summary||{},restore=reportData.restore_timing||{},lane=reportData.continuous_lane||{};
+      const transferDuration=summary.transfer_elapsed_seconds!=null?duration(summary.transfer_elapsed_seconds):'—';
+      const restoreDuration=restore.restore_elapsed_seconds!=null?duration(restore.restore_elapsed_seconds):'em andamento';
+      const effort=Number(summary.worker_effort_seconds||0)>0?duration(summary.worker_effort_seconds):'—';
+      const basis=summary.transfer_time_basis==='VIRTUAL_LANE'?'Usa o mesmo relógio virtual do restore e a janela persistida da lane.':'Tempo de calendário entre o primeiro arquivo iniciado e o último concluído.';
+      const segments=(lane.segments||[]);
+      const segmentDetails=segments.length?`<details><summary>${fmt(segments.length)} intervalo(s) observados da lane · ${bytes(lane.bytes_transferred||0)}</summary><ul>${segments.map(segment=>`<li>Raiju ${segment.worker_slot||'—'} · ${reportDate(segment.started_at)} → ${reportDate(segment.completed_at)} · ${bytes(segment.bytes_transferred)}</li>`).join('')}</ul></details>`:'Sem intervalos de transferência contínua registrados.';
+      const table=`<h3>Tempo e execução</h3><table><tbody><tr><th>${laneDurationLabel(summary)} <span class="help" tabindex="0" data-help="${escape(basis)}">i</span></th><td>${transferDuration}</td><th>Tempo total de restore <span class="help" tabindex="0" data-help="Intervalo entre a solicitação de restore e o instante em que todos os objetos da wave ficaram disponíveis.">i</span></th><td>${restoreDuration}</td></tr><tr><th>Início observado da transferência</th><td>${reportDate(summary.transfer_started_at)}</td><th>Conclusão observada</th><td>${reportDate(summary.transfer_completed_at)}</td></tr><tr><th>Trabalho acumulado dos Raijus <span class="help" tabindex="0" data-help="Soma do trabalho lógico de cada arquivo nos Raijus. Como vários Raijus trabalham em paralelo, este valor pode ser maior que a duração virtual da transferência; ele não é tempo de calendário.">i</span></th><td>${effort}</td><th>Arquivos transferidos</th><td>${fmt(summary.transferred_files)} / ${fmt(reportData.objects)}</td></tr><tr><th>Dados transferidos</th><td>${bytes(summary.transferred_bytes)} / ${bytes(reportData.bytes)}</td><th>Arquivos disponíveis</th><td>${fmt(restore.available_objects)} / ${fmt(restore.requested_objects)}</td></tr><tr><th>Restore solicitado</th><td>${reportDate(restore.requested_at)}</td><th>Todos disponíveis</th><td>${reportDate(restore.last_available_at)}</td></tr><tr><th>Lane contínua</th><td colspan="3">${segmentDetails}</td></tr></tbody></table><p class="hint">Restore e transferência compartilham o relógio virtual, mas têm janelas independentes: a transferência pode continuar após todos os arquivos do restore se tornarem disponíveis.</p>`;
+      $('#wave-report-content').insertAdjacentHTML('afterbegin',table);
+    };
+    flightBoardPhaseTooltip=function(phase){
+      const [,label]=flightBoardPhase(phase.kind),observed=!phase.planned;
+      const durationLabel=observed?'Duração observada':'Duração projetada';
+      const durationValue=flightBoardDuration(observed?phase.elapsed_seconds:phase.expected_seconds);
+      const lane=phase.kind==='TRANSFER'?`\nObjetos/bytes: ${fmt(phase.object_count||0)} · ${bytes(phase.bytes_transferred||0)}${phase.entry_reason?`\nOrigem: ${phase.entry_reason}`:''}${phase.nearest_expiry_at?`\nExpiração mais próxima: ${flightBoardMoment(phase.nearest_expiry_at)}`:''}`:'';
+      return `Tipo: ${label}\nInício: ${flightBoardMoment(phase.start_at)} [${observed?'observado':'previsto'}]\n${durationLabel}: ${durationValue}${lane}`;
+    };
+    flightBoardTransferSchedule=function(w){
+      if(w.transfer_started_at)return `<b>Início observado:</b> ${flightBoardDate(w.transfer_started_at)}<br><b>Conclusão:</b> ${flightBoardDate(w.transfer_completed_at)}<br><b>Duração virtual:</b> ${w.transfer_elapsed_seconds!=null?flightBoardDuration(w.transfer_elapsed_seconds):'em andamento'}`;
+      if(w.transfer_queue_projected_start_at)return `<b>Backlog já restaurado:</b> ${flightBoardDate(w.transfer_queue_projected_start_at)} → ${flightBoardDate(w.transfer_queue_projected_end_at)} <small class="hint">(projeção da fila pronta)</small>`;
+      return '<span class="hint">Sem objeto restaurado na lane.</span>';
+    };
+    const priorModal=renderFlightBoardModal;
+    renderFlightBoardModal=function(d,title,introduction){
+      const clearer=`A posição das barras usa um único relógio virtual por source. Azul sólido é evidência observada da lane; azul listrado é previsão apenas de objetos já restaurados e esperando Raiju. A duração da transferência pode ultrapassar a duração do restore: após o último arquivo ficar disponível, a lane ainda pode estar copiando o backlog.`;
+      return priorModal(d,title,clearer);
+    };
+  })();
+</script>
 </body></html>

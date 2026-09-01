@@ -3887,6 +3887,10 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             "started_at": request_at or transfer_started_at or (wave.created_at if not simulated else None),
             "completed_at": transfer_completed_at if status in {"COMPLETED", "VERIFIED", "TRANSFERRED"} else None,
             "planned_restore_at": wave.planned_restore_at,
+            "restore_requested_at": request_at,
+            "first_restore_available_at": first_available_at,
+            "restore_available_at": available_at,
+            "restore_elapsed_seconds": restore_progress_seconds if request_at else None,
             "expected_restore_available_at": expected_available_at,
             # Retained only as a durable scheduler datum for APIs and reports;
             # it is deliberately not rendered as transfer work on this board.
@@ -3895,6 +3899,9 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             "transfer_completed_at": transfer_completed_at,
             "transfer_effective_start_at": transfer_started_at,
             "transfer_start_inferred": False,
+            "transfer_elapsed_seconds": max(0, int((
+                (transfer_completed_at or effective_now) - transfer_started_at
+            ).total_seconds())) if transfer_started_at else None,
             "predicted_transfer_seconds": int(wave.predicted_transfer_seconds or 0),
             "phases": phases,
         })
@@ -6648,6 +6655,28 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
         ).where(ObjectRecord.wave_id == wave_id)
     ).one()
     now = utcnow()
+    worker_effort_seconds = int(session.scalar(select(
+        func.coalesce(func.sum(ObjectRecord.transfer_elapsed_seconds), 0)
+    ).where(ObjectRecord.wave_id == wave_id)) or 0)
+    transfer_time_basis = "WALL_CLOCK"
+    # Fujin finishes logical payload operations quickly in wall-clock time.
+    # The durable wave milestones and lane segments are the only truthful
+    # calendar for a simulated migration.  Never compare physical object
+    # timestamps with restore timestamps from the virtual clock.
+    if runtime_context.is_simulation and wave.transfer_started_virtual_at:
+        transfer_time_basis = "VIRTUAL_LANE"
+        transfer_started_at = wave.transfer_started_virtual_at
+        transfer_completed_at = wave.transfer_completed_virtual_at
+        if transfer_completed_at is None and wave.source.simulation_execution_id:
+            try:
+                transfer_completed_at = cloud_backend.clock(
+                    wave.source.simulation_execution_id
+                ).effective_now
+            except (OSError, TimeoutError, ValueError):
+                latest_segment_end = session.scalar(select(func.max(TransferLaneSegment.completed_at)).where(
+                    TransferLaneSegment.wave_id == wave_id
+                ))
+                transfer_completed_at = latest_segment_end or transfer_started_at
     transfer_elapsed_seconds = max(0, int(((transfer_completed_at or now) - transfer_started_at).total_seconds())) if transfer_started_at else None
     failed_tasks = sum(1 for task in tasks if task.state == TaskState.FAILED)
     timing = restore_timing(session, wave_id)
@@ -6703,6 +6732,10 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
         }
     return {"wave_id": wave_id, "status": wave.status, "objects": total_objects, "bytes": total_bytes, "object_states": by_state,
             "summary": {"transfer_elapsed_seconds": transfer_elapsed_seconds,
+                        "transfer_time_basis": transfer_time_basis,
+                        "transfer_started_at": transfer_started_at,
+                        "transfer_completed_at": transfer_completed_at,
+                        "worker_effort_seconds": worker_effort_seconds,
                         "transfer_started_at": transfer_started_at, "transfer_completed_at": transfer_completed_at,
                         "transferred_files": int(transferred_files or 0), "transferred_bytes": int(transferred_bytes or 0),
                         "failed_objects": int(failed_objects or 0), "failed_tasks": failed_tasks,

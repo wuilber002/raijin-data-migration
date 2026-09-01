@@ -805,6 +805,8 @@ def test_flight_board_continuous_lane_uses_only_observed_transfer_segments():
         assert lane[0]["planned"] is False
         by_name = {wave["wave_name"]: wave for wave in board["waves"]}
         assert not [phase for phase in by_name["planned-only"]["phases"] if phase["kind"] == "TRANSFER"]
+        assert "transfer_elapsed_seconds" in by_name["observed"]
+        assert "restore_elapsed_seconds" in by_name["observed"]
 
 
 def test_flight_board_projects_only_durable_ready_backlog_and_recovers_zero_width_segments():
