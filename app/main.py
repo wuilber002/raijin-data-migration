@@ -3585,6 +3585,23 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
         "priority_band": item.priority_band,
         "restore_expires_at": item.restore_expires_at,
     } for index, (item, obj, wave, source) in enumerate(active_raiju_rows, start=1)]
+    # A lease is a crash-safe ownership fence, not proof that bytes are being
+    # copied at this exact instant.  Keep those concepts distinct in the UI:
+    # only TRANSFERRING objects occupy a displayed Raiju.  A lease paired with
+    # a delivered object is shown as reconciliation work until the next Raiju
+    # loop finalizes it after an interruption.
+    lane_totals["active_items"] = len(active_raiju_rows)
+    lane_totals["reconciliation_items"] = int(session.scalar(
+        select(func.count(TransferQueueItem.id))
+        .join(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
+        .where(
+            TransferQueueItem.state == TransferQueueState.LEASED,
+            ObjectRecord.state.in_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]),
+        )
+    ) or 0)
+    lane_totals["reserved_items"] = max(
+        0, int(lane_totals["leased_items"]) - lane_totals["active_items"] - lane_totals["reconciliation_items"]
+    )
     active_worker_targets = [
         int(value or 0) for value in session.scalars(
             select(Wave.active_transfer_workers).where(

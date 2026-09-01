@@ -23,7 +23,7 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 from datetime import datetime, timedelta, timezone
 
 from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, continuous_lane_capacity_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, internal_rate_value, list_sources, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, source_key_in_scope, transfer_queue, wave_cost_estimate
-from app.real_worker import GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, require_new_restore_approval, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, task_kinds_for_role, validate_restore_preflight
+from app.real_worker import GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, require_new_restore_approval, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, task_kinds_for_role, validate_restore_preflight
 
 
 def test_object_model_contains_durable_multipart_checkpoint_fields():
@@ -255,6 +255,29 @@ def test_continuous_lane_dispatch_batches_and_cooperative_preemption_are_durable
     assert "CONTINUOUS_TRANSFER_COOPERATIVE_PREEMPTION_RESERVED" in worker
     assert "CONTINUOUS_TRANSFER_COOPERATIVE_PREEMPTION_EXECUTED" in worker
     assert "never an admission threshold" in worker
+
+
+def test_completed_object_lease_is_reconciled_after_raiju_interruption():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="reconcile-lane", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="wave", max_bytes=1024, restore_days=1, restore_tier="BULK", status="TRANSFERRING")
+        session.add(wave); session.flush()
+        obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="done", size_bytes=1024,
+                           state=ObjectState.TRANSFERRED, transferred_at=datetime.now(timezone.utc))
+        session.add(obj); session.flush()
+        item = TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=obj.id, size_bytes=1024,
+                                 state=TransferQueueState.LEASED, lease_owner="interrupted-raiju")
+        session.add(item); session.commit()
+
+        assert reconcile_completed_continuous_item_leases(session, source) == 1
+        session.commit()
+        recovered = session.get(TransferQueueItem, item.id)
+        assert recovered.state == TransferQueueState.TRANSFERRED
+        assert recovered.lease_owner is None
 
 
 def test_cooperative_preemption_targets_lowest_remaining_raiju_and_honors_cooldown():

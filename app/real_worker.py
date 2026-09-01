@@ -2460,6 +2460,58 @@ def _continuous_ready_item_count(session, source_id: int, now: datetime) -> int:
     ) or 0)
 
 
+def reconcile_completed_continuous_item_leases(session, source: Source) -> int:
+    """Finalize durable claims whose object copy survived a worker restart.
+
+    Object delivery is committed by the transfer routine before the dispatcher
+    records the queue transition.  If the worker/VM stops in that narrow
+    interval, keeping the item as ``LEASED`` makes the dashboard report a
+    fictitious Raiju and can strand the next dispatch cycle.  The destination
+    evidence is decisive: a transferred or verified object completes its
+    queue item immediately, regardless of the former lease expiry.
+    """
+    completed_items = list(session.scalars(
+        select(TransferQueueItem)
+        .join(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
+        .where(
+            TransferQueueItem.source_id == source.id,
+            TransferQueueItem.state == TransferQueueState.LEASED,
+            ObjectRecord.state.in_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]),
+        ).order_by(TransferQueueItem.id)
+        .with_for_update(skip_locked=True)
+        .limit(TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE)
+    ))
+    if not completed_items:
+        return 0
+    now = utcnow()
+    batch_ids: set[int] = set()
+    for item in completed_items:
+        obj = session.get(ObjectRecord, item.object_id)
+        item.state = TransferQueueState.TRANSFERRED
+        item.lease_token = item.lease_owner = None
+        item.lease_expires_at = None
+        item.transferred_at = (obj.transferred_at if obj and obj.transferred_at else now)
+        item.decision_reason = "reconciled after Raiju interruption; OCI delivery was already durable"
+        if item.dispatch_batch_id:
+            batch_ids.add(int(item.dispatch_batch_id))
+    session.flush()
+    for batch_id in batch_ids:
+        batch = session.get(TransferDispatchBatch, batch_id)
+        remaining = session.scalar(select(func.count(TransferQueueItem.id)).where(
+            TransferQueueItem.dispatch_batch_id == batch_id,
+            TransferQueueItem.state == TransferQueueState.LEASED,
+        )) or 0
+        if batch and not remaining:
+            batch.state, batch.completed_at = "COMPLETED", now
+    event(
+        session,
+        "CONTINUOUS_TRANSFER_LEASES_RECONCILED",
+        f"Raikou reconciled {len(completed_items)} completed Raiju lease(s) after an interruption.",
+        source_id=source.id,
+    )
+    return len(completed_items)
+
+
 def recover_expired_continuous_item_leases(session, source: Source) -> int:
     """Return abandoned object claims after a Raiju/VM interruption.
 
@@ -2467,6 +2519,7 @@ def recover_expired_continuous_item_leases(session, source: Source) -> int:
     wave level.  The item lease is the exact idempotency fence: an expired
     lease becomes READY and retains any multipart checkpoint on the object.
     """
+    completed = reconcile_completed_continuous_item_leases(session, source)
     now = utcnow()
     # Recovery is invoked on every claim. Bound it just like admission and
     # priority refresh; repeated dispatch cycles deterministically drain an
@@ -2511,7 +2564,7 @@ def recover_expired_continuous_item_leases(session, source: Source) -> int:
             target.preemption_successor_item_id = None
             target.preemption_requested_at = None
             target.decision_reason = "cooperative handoff reservation expired; normal dispatch resumed"
-    return len(items)
+    return completed + len(items)
 
 
 def claim_continuous_transfer_batch(session, source: Source, settings, task: Task,
@@ -3333,6 +3386,13 @@ def run_once(role: str = WORKER_ROLE) -> None:
     with SessionLocal() as session:
         settings = runtime_settings(session)
         allowed_task_kinds = task_kinds_for_role(role)
+        if role in {"transfer", "raiju", "all"}:
+            reconciled = sum(
+                reconcile_completed_continuous_item_leases(session, source)
+                for source in session.scalars(select(Source).where(Source.archived_at.is_(None)))
+            )
+            if reconciled:
+                session.commit()
         if role in {"governance", "raikou", "all"}:
             if runtime_context.is_simulation:
                 # Stop any clock created by an earlier release before planner

@@ -996,6 +996,19 @@ refreshAll();
         'Expiração / lane':'Prazo mais próximo de uma cópia temporária restaurada e resumo dos arquivos da wave que já estão prontos ou em cópia na lane.'
       };
       if(lanePanel){
+        const lane=queue.continuous_lane||{},active=Number(lane.active_items||0),capacity=Math.max(active,Number(lane.worker_capacity||0),5),idle=Math.max(0,capacity-active),reconciling=Number(lane.reconciliation_items||0);
+        const heading=lanePanel.querySelector('.queue-panel-heading .hint');
+        if(heading)heading.textContent=`${fmt(active)} ativo(s) · ${fmt(idle)} vaga(s) livre(s) de ${fmt(capacity)}`;
+        const copyMetric=[...lanePanel.querySelectorAll('.queue-lane-summary .metric')].find(metric=>metric.querySelector('span')?.textContent.trim()==='Em cópia');
+        if(copyMetric)copyMetric.innerHTML=`<span>Em cópia</span><b>${fmt(active)}</b><small>${fmt(capacity)} vaga(s) da lane · ${fmt(idle)} livre(s)</small>`;
+        const workerHeading=lanePanel.querySelector('.queue-workers h4');if(workerHeading)workerHeading.textContent='Raijus em cópia';
+        const workerBody=lanePanel.querySelector('.queue-workers tbody');
+        if(workerBody){
+          for(const row of [...workerBody.querySelectorAll('.queue-worker-idle')])row.remove();
+          if(!workerBody.rows.length)workerBody.innerHTML=`<tr class="queue-worker-idle"><td colspan="5">Nenhum Raiju está copiando neste instante. ${fmt(idle)} vaga(s) aguardam o próximo arquivo restaurado e elegível.</td></tr>`;
+        }
+        lanePanel.querySelector('.queue-lane-reconciliation')?.remove();
+        if(reconciling)lanePanel.querySelector('.queue-lane-summary')?.insertAdjacentHTML('afterend',`<p class="hint queue-lane-reconciliation"><b>Reconciliação:</b> ${fmt(reconciling)} lease(s) já possuem entrega concluída e serão finalizados automaticamente pelo Raiju; não representam cópias ativas.</p>`);
         for(const label of lanePanel.querySelectorAll('.queue-lane-summary .metric>span')){
           const text=label.textContent.trim(),help=metricHelp[text];
           if(help&&!label.querySelector('.help'))label.insertAdjacentHTML('beforeend',` <span class="help" tabindex="0" data-help="${escape(help)}">i</span>`);
