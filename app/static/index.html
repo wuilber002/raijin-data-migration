@@ -974,6 +974,30 @@ refreshAll();
     renderTransferQueue=function(queue){
       renderQueueBase(queue);
       const panel=$('#transfer-queue .restore-operation');if(!panel)return;
+      const lanePanel=$('#transfer-queue .lane-operation');
+      const metricHelp={
+        'Prontos':'Arquivos restaurados, duravelmente enfileirados e elegíveis para o próximo despacho de um Raiju. Eles não aguardam o lote atingir um tamanho mínimo.',
+        'Em cópia':'Arquivos com lease ativo, já atribuídos a um Raiju. O total abaixo indica a capacidade atual escolhida pelo scheduler.',
+        'Retry / retomada':'Itens preservados na fila após uma falha transitória ou uma cópia multipart que precisa continuar. Eles serão reavaliados no instante de retry.',
+        'Expiração mais próxima':'Menor prazo de expiração entre as cópias temporariamente restauradas que ainda estão na lane. É usado para elevar a prioridade antes que o objeto deixe de estar disponível.'
+      };
+      const columnHelp={
+        'Worker':'Identificação da vaga Raiju na lane contínua. A mesma vaga pode copiar arquivos de waves diferentes.',
+        'Origem':'Source e wave aos quais pertence o arquivo atualmente atribuído ao Raiju.',
+        'Arquivo atual':'Chave do objeto que o Raiju está transferindo. Fica vazia enquanto a vaga aguarda um despacho.',
+        'Progresso':'Bytes já copiados em relação ao tamanho do arquivo, com a taxa e o tempo da cópia em andamento.',
+        'Prioridade':'Faixa usada pelo scheduler para escolher o próximo objeto. Ela considera expiração, disponibilidade, idade na fila e prioridade da source.'
+      };
+      if(lanePanel){
+        for(const label of lanePanel.querySelectorAll('.queue-lane-summary .metric>span')){
+          const text=label.textContent.trim(),help=metricHelp[text];
+          if(help&&!label.querySelector('.help'))label.insertAdjacentHTML('beforeend',` <span class="help" tabindex="0" data-help="${escape(help)}">i</span>`);
+        }
+        for(const header of lanePanel.querySelectorAll('.queue-workers th')){
+          const text=header.textContent.trim(),help=columnHelp[text];
+          if(help&&!header.querySelector('.help'))header.insertAdjacentHTML('beforeend',` <span class="help" tabindex="0" data-help="${escape(help)}">i</span>`);
+        }
+      }
       const tables=panel.querySelectorAll('table');if(tables.length<2)return;
       const primary=tables[0],secondary=tables[1],primaryBody=primary.tBodies[0],secondaryBody=secondary.tBodies[0];
       const empty=primaryBody.querySelector('td[colspan]');if(empty)empty.closest('tr').remove();
