@@ -7282,11 +7282,20 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                 if not has_batch_task and wave.status == "RESTORE_SCHEDULED"
                 else max(scheduler_now, start - timedelta(seconds=restore_lead))
             )
-            shifted = abs((wave.planned_transfer_start_at - start).total_seconds()) if wave.planned_transfer_start_at else float("inf")
-            if shifted >= 60:
+            transfer_shifted = abs((wave.planned_transfer_start_at - start).total_seconds()) if wave.planned_transfer_start_at else float("inf")
+            restore_shifted = (
+                abs((wave.planned_restore_at - new_restore_at).total_seconds())
+                if not has_batch_task and wave.status == "RESTORE_SCHEDULED" and wave.planned_restore_at
+                else 0
+            )
+            # Restore-slot and transfer-lane forecasts are independent. A
+            # future wave may already have the right transfer start while its
+            # restore is still incorrectly drawn at the source origin.
+            if transfer_shifted >= 60 or restore_shifted >= 60:
                 prior_transfer_at = wave.planned_transfer_start_at
                 prior_restore_at = wave.planned_restore_at
-                wave.planned_transfer_start_at = start
+                if transfer_shifted >= 60:
+                    wave.planned_transfer_start_at = start
                 if not has_batch_task and wave.status == "RESTORE_SCHEDULED":
                     wave.planned_restore_at = new_restore_at
                 changed += 1
@@ -7379,6 +7388,10 @@ def create_dynamic_waves(source_id: int, payload: DynamicWaveCreate, session: Se
         session, settings, run, now=source_scheduler_clock(source).effective_now
     )
     release_dynamic_restore_horizon(session, settings)
+    # The first two horizon waves have just acquired durable submission tasks.
+    # Correct the remaining mutable slice in the same transaction so it is
+    # born behind the occupied restore slots, never briefly at the origin.
+    replan_dynamic_pipeline(session, settings, now=source_scheduler_clock(source).effective_now)
     record_event(session, "DYNAMIC_PIPELINE_STARTED",
                  f"Dynamic pipeline run {run.id} started with horizon {run.restore_horizon_waves}; {len(created)} wave(s) materialized from {matching_objects} object(s) / {matching_bytes} byte(s). Future waves will be packed after observed transfer results.",
                  source_id=source.id)

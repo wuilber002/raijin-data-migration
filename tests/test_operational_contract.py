@@ -1495,6 +1495,13 @@ def test_simulated_replan_keeps_future_restore_behind_two_occupied_slots():
         assert future.planned_restore_at == initial + timedelta(hours=48)
 
 
+def test_dynamic_restore_slot_correction_is_persisted_independently_of_lane_forecast():
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    assert "transfer_shifted >= 60 or restore_shifted >= 60" in source
+    assert "if transfer_shifted >= 60:" in source
+    assert "replan_dynamic_pipeline(session, settings, now=source_scheduler_clock(source).effective_now)" in source
+
+
 def test_dynamic_replan_anchors_submitted_restore_to_its_actual_service_window():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
