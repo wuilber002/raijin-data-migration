@@ -5808,11 +5808,14 @@ def continuous_lane_capacity_profile(session: Session, source_id: int,
             current["bytes"] += interval["bytes"]
         else:
             windows.append(interval)
-    rates = [
-        item["bytes"] * 8 / (item["end"] - item["start"]).total_seconds() / 1_000_000
-        for item in windows
-        if item["end"] > item["start"] and item["bytes"] > 0
-    ]
+    # A source can have many short contiguous runs due to object boundaries,
+    # priority handoffs and polling.  They are observations of one link, not
+    # independent bandwidth samples.  Weight them as one active-lane sample;
+    # otherwise the P25 of tiny runs can predict days of work from a healthy
+    # aggregate lane.
+    active_seconds = sum((item["end"] - item["start"]).total_seconds() for item in windows)
+    active_bytes = sum(int(item["bytes"]) for item in windows)
+    rates = [active_bytes * 8 / active_seconds / 1_000_000] if active_seconds > 0 and active_bytes > 0 else []
     observed = percentile_25(rates)
     ceiling = max(1.0, float(configured_mbps))
     return {
