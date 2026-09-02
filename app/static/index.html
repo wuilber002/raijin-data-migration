@@ -666,9 +666,18 @@ refreshAll();
     $('#flight-board-content').innerHTML=`<p class="hint">${introduction}</p><div class="flight-board-legend"><span><i style="background:#64748b"></i>Na fila</span><span><i style="background:#d97706"></i>Restore</span><span><i style="background:#0f766e"></i>Aguardando transferência</span><span><i style="background:#2563eb"></i>Transferência</span><span><i style="background:repeating-linear-gradient(135deg,#ffffff99 0 3px,#64748b 3px 6px)"></i>Previsto</span></div><div class="flight-board-chart">${flightBoardAxis(start,end)}${transferLane}<div class="flight-board-restore-heading">Janelas de restore por wave</div>${chart}</div><table class="flight-board-table"><thead><tr><th>Wave</th><th>Status</th><th>Restore</th><th>Transferência</th></tr></thead><tbody>${rows}</tbody></table>${d.truncated?'<p class="warning">Exibindo as primeiras 500 waves dinâmicas desta source.</p>':''}`;
     openModal('#flight-board-modal');
   }
+  function openFlightBoardLoading(title){
+    $('#flight-board-title').textContent=title;
+    $('#flight-board-content').innerHTML='<div class="flight-board-loading" role="status" aria-live="polite"><span class="flight-board-spinner" aria-hidden="true"></span><strong>Montando a timeline…</strong><small>Consolidando as janelas persistidas de restore e da lane contínua.</small></div>';
+    openModal('#flight-board-modal');
+  }
+  function nextRenderFrame(){return new Promise(resolve=>requestAnimationFrame(resolve))}
   showFlightBoard=async function(){
     try{
       if(!flightBoardSourceId)return say('Não há source dinâmica na fila para exibir.',true);
+      const source=sources.find(item=>Number(item.id)===Number(flightBoardSourceId));
+      openFlightBoardLoading(`Inventário de bordo — ${source?.name||'source'}`);
+      await nextRenderFrame();
       const d=await api(`/api/flight-board?source_id=${flightBoardSourceId}`);
       if(!(d.waves||[]).length)return say('Não há waves dinâmicas para exibir nesta source.',true);
       renderFlightBoardModal(d,`Inventário de bordo — ${d.source_name||d.waves[0].source_name}`,'A lane contínua consolida os períodos de transferência observados a partir dos segmentos persistidos. Barras azuis listradas projetam apenas o backlog já restaurado na fila aguardando Raiju; waves em restore não recebem previsão de transferência.');
@@ -676,6 +685,8 @@ refreshAll();
   };
   showPipelineHistoryFlightBoard=async function(runId){
     try{
+      openFlightBoardLoading(`Histórico de bordo — execução #${runId}`);
+      await nextRenderFrame();
       const d=await api(`/api/flight-board?run_id=${runId}`);
       if(!(d.waves||[]).length)return say('Não há waves registradas nesta execução.',true);
       renderFlightBoardModal(d,`Histórico de bordo — execução #${runId}`,'Linha do tempo persistida desta execução. A lane consolida transferências observadas; seu trecho listrado, quando existir, é calculado exclusivamente da fila de objetos restaurados aguardando Raiju.');
@@ -687,6 +698,7 @@ refreshAll();
   #source-context-tags .source-tag-discovery{border-color:#a3e635;background:#365314;color:#ecfccb}
   #source-context-tags .source-tag-continuous{border-color:#fb923c;background:#7c2d12;color:#ffedd5}
   .flight-board-phase.forecast-extension{background-color:#7e22ce!important;background-image:repeating-linear-gradient(135deg,#f3e8ff99 0 4px,transparent 4px 8px)!important;opacity:1}
+  .flight-board-loading{display:grid;place-items:center;gap:.7rem;min-height:260px;text-align:center;color:#bfdbfe}.flight-board-loading strong{color:#e7eefb}.flight-board-loading small{max-width:34rem;color:#94a3b8}.flight-board-spinner{width:2.25rem;height:2.25rem;border:4px solid #60a5fa40;border-top-color:#60a5fa;border-radius:50%;animation:flight-board-spin .75s linear infinite}@keyframes flight-board-spin{to{transform:rotate(360deg)}}
   .virtual-clock-state{cursor:help}
   .virtual-clock-tooltip{position:fixed;z-index:120;width:min(360px,calc(100vw - 2rem));padding:.6rem;border:1px solid #64748b;border-radius:6px;background:#020617;color:#e7eefb;font-size:.75rem;font-weight:500;line-height:1.35;text-align:left;text-transform:none;letter-spacing:normal;box-shadow:0 4px 15px #0008;pointer-events:none}
 </style>

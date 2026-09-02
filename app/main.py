@@ -3896,12 +3896,11 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     if not wave_ids:
         return {"waves": [], "generated_at": now, "truncated": False, "source_id": source_id,
                 "source_name": source_name}
-    run_ids = [wave.pipeline_run_id for wave, _ in rows if wave.pipeline_run_id is not None]
-    runs = list(session.scalars(select(DynamicPipelineRun).where(DynamicPipelineRun.id.in_(run_ids)))) if run_ids else []
-    for run in runs:
-        refresh_dynamic_pipeline_run(session, run)
-    if runs:
-        session.commit()
+    # The board is an observability read model.  Replanning a pipeline here
+    # used to make opening the modal compete with the workers and could turn
+    # a simple visualization into a slow, mutating operation.  Raikou owns
+    # lifecycle refreshes; the persisted waves below remain the authoritative
+    # snapshot for this request.
     object_times = {
         wave_id: {"restore_requested_at": requested, "first_available_at": first_available,
                   "last_available_at": last_available, "transfer_started_at": transfer_started,
