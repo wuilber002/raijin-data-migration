@@ -7685,6 +7685,54 @@ def deep_audit_preview(wave_id: int, session: Session = Depends(get_session)) ->
             "minimum_seconds": minimum_seconds}
 
 
+def source_deep_audit_candidates(session: Session, source: Source) -> list[Wave]:
+    """Completed waves that can safely enter Raikou's serial audit queue."""
+    eligible_statuses = {"COMPLETED", "TRANSFERRED", "TRANSFERRED_WITH_ERRORS", "VERIFICATION_FAILED"}
+    queued_ids = set(session.scalars(select(Task.wave_id).where(
+        Task.kind == "VERIFY_WAVE", Task.state.in_([TaskState.READY, TaskState.RUNNING])
+    )))
+    return [wave for wave in session.scalars(select(Wave).where(
+        Wave.source_id == source.id, Wave.status.in_(eligible_statuses)
+    ).order_by(Wave.id)) if wave.id not in queued_ids]
+
+
+@app.get("/api/sources/{source_id}/deep-audit-preview")
+def source_deep_audit_preview(source_id: int, session: Session = Depends(get_session)) -> dict:
+    source = source_or_404(session, source_id)
+    waves = source_deep_audit_candidates(session, source)
+    wave_ids = [wave.id for wave in waves]
+    objects, total_bytes = session.execute(select(
+        func.count(ObjectRecord.id), func.coalesce(func.sum(ObjectRecord.size_bytes), 0)
+    ).where(ObjectRecord.wave_id.in_(wave_ids))).one() if wave_ids else (0, 0)
+    throughput_mbps = runtime_settings(session).max_throughput_mbps
+    minimum_seconds = max(1, (int(total_bytes) * 8 + throughput_mbps * 1_000_000 - 1) // (throughput_mbps * 1_000_000)) if total_bytes else 0
+    return {"source_id": source.id, "source_name": source.name, "waves": len(waves),
+            "wave_names": [wave.name for wave in waves], "objects": int(objects), "bytes": int(total_bytes),
+            "throughput_mbps": throughput_mbps, "minimum_seconds": minimum_seconds}
+
+
+@app.post("/api/sources/{source_id}/deep-audit")
+def start_source_deep_audit(source_id: int, payload: DeepAuditStart,
+                            session: Session = Depends(get_session)) -> dict:
+    if not payload.confirmed:
+        raise HTTPException(status_code=422, detail="Explicit deep-audit confirmation is required")
+    source = source_or_404(session, source_id)
+    waves = source_deep_audit_candidates(session, source)
+    if not waves:
+        raise HTTPException(status_code=409, detail="No completed waves are eligible for a deep audit")
+    # Raikou owns governance work as a single worker. Tasks are created in
+    # stable wave order, so it processes this source audit sequentially.
+    for wave in waves:
+        wave.status = "VERIFICATION_QUEUED"
+        session.add(Task(wave_id=wave.id, kind="VERIFY_WAVE"))
+        record_event(session, "SOURCE_DEEP_AUDIT_QUEUED",
+                     f"Source deep SHA-256 audit queued in serial order for wave '{wave.name}'",
+                     source_id=source.id, wave_id=wave.id)
+    session.commit()
+    return {"source_id": source.id, "waves": len(waves), "wave_ids": [wave.id for wave in waves],
+            "message": "Source deep audit queued sequentially"}
+
+
 @app.post("/api/waves/{wave_id}/verify")
 def verify_wave(wave_id: int, payload: DeepAuditStart, session: Session = Depends(get_session)) -> dict:
     """Queue a costly full OCI reread only after an explicit acknowledgement."""
