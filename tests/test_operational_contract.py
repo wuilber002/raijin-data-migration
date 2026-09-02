@@ -1433,6 +1433,37 @@ def test_dynamic_replan_does_not_delay_restore_eligibility_behind_lane_forecast(
         assert future.planned_restore_at == initial
 
 
+def test_simulated_replan_keeps_future_restore_behind_two_occupied_slots():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    initial = datetime(2026, 8, 25, 12, 0)
+    with Session() as session:
+        source = Source(id=988, name="simulated-restore-slots", s3_bucket="source",
+                        aws_region="us-east-1", destination_bucket="destination",
+                        backend_kind="SIMULATED", simulation_fidelity="CONTROL")
+        settings = RuntimeSettings(id=1, max_throughput_mbps=1100, dynamic_restore_max_slots=2)
+        run = DynamicPipelineRun(id=989, source_id=source.id, status="SCHEDULED",
+                                 scheduled_restores=True, restore_safety_seconds=0)
+        active = [
+            Wave(id=1100 + index, source_id=source.id, pipeline_run_id=run.id,
+                 name=f"active-{index}", max_bytes=1, restore_days=1,
+                 restore_tier="BULK", status="RESTORING", planner_mode="DYNAMIC",
+                 predicted_transfer_seconds=60, restore_requested_virtual_at=initial,
+                 planned_restore_at=initial, planned_transfer_start_at=initial + timedelta(days=3))
+            for index in range(2)
+        ]
+        future = Wave(id=1102, source_id=source.id, pipeline_run_id=run.id,
+                      name="future", max_bytes=1, restore_days=1, restore_tier="BULK",
+                      status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
+                      predicted_transfer_seconds=60, planned_restore_at=initial + timedelta(days=8),
+                      planned_transfer_start_at=initial + timedelta(days=9))
+        session.add_all([source, settings, run, *active, future]); session.flush()
+
+        assert replan_dynamic_pipeline(session, settings, now=initial) >= 1
+        assert future.planned_restore_at == initial + timedelta(hours=48)
+
+
 def test_dynamic_replan_anchors_submitted_restore_to_its_actual_service_window():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

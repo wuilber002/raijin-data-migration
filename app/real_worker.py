@@ -660,7 +660,6 @@ def simulation_restore_poll_clock_leader(session, task: Task, wave: Wave) -> boo
     """
     if not runtime_context.is_simulation or wave.source.backend_kind != "SIMULATED":
         return False
-    due_by = utcnow() + timedelta(seconds=1)
     leader_id = session.scalar(
         select(Task.id)
         .join(Wave)
@@ -669,11 +668,14 @@ def simulation_restore_poll_clock_leader(session, task: Task, wave: Wave) -> boo
             Task.kind == "POLL_RESTORE",
             Wave.source_id == wave.source_id,
             Task.state.in_([TaskState.READY, TaskState.RUNNING]),
-            or_(Task.available_at.is_(None), Task.available_at <= due_by),
             Wave.status != "PAUSED",
             Source.archived_at.is_(None),
         )
-        .order_by(Task.available_at, Task.id)
+        # Do not order by ``available_at``.  A leader queues its next poll at
+        # +1s after advancing the clock while a peer still carries its older
+        # original due time; ordering by due time would let the peer become a
+        # second leader in the same virtual cycle.
+        .order_by(Task.id)
         .limit(1)
     )
     return leader_id == task.id

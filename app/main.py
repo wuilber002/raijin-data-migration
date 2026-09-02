@@ -7052,6 +7052,37 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
         # forecast can put a corrupted/past transfer slot before its own
         # restore request and recursively amplify the error.
         waves = list(session.scalars(select(Wave).where(Wave.pipeline_run_id == run.id).order_by(Wave.id)))
+        # FUJIN has one virtual restore lane per source.  A mutable horizon
+        # wave must not be redrawn as eligible "now" while every restore slot
+        # is already occupied: it has not been submitted, but its forecast
+        # still needs to wait for the first active restore reference window.
+        # Keep this simulation-only so the established real planner remains
+        # completely untouched by virtual-clock scheduling rules.
+        simulated_restore_slot_floor = scheduler_now
+        if run.source.backend_kind == "SIMULATED":
+            active_restore_statuses = {"RESTORE_REQUESTED", "RESTORE_REQUEST_ACCEPTED", "RESTORING"}
+            occupied_restore_ends: list[datetime] = []
+            for candidate in waves:
+                has_submission = session.scalar(select(Task.id).where(
+                    Task.wave_id == candidate.id, Task.kind == "SUBMIT_BATCH_RESTORE"
+                ).limit(1)) is not None
+                if candidate.status not in active_restore_statuses and not (
+                    candidate.status == "RESTORE_SCHEDULED" and has_submission
+                ):
+                    continue
+                restore_started = candidate.restore_requested_virtual_at or candidate.planned_restore_at
+                if restore_started is None:
+                    continue
+                restored_at = candidate.last_restore_available_virtual_at
+                occupied_restore_ends.append(
+                    restored_at if restored_at and restored_at > scheduler_now else max(
+                        scheduler_now,
+                        restore_started + timedelta(seconds=restore_service_window_seconds(candidate.restore_tier)),
+                    )
+                )
+            restore_capacity = adaptive_restore_slot_limit(session, run, settings)
+            if len(occupied_restore_ends) >= restore_capacity:
+                simulated_restore_slot_floor = min(occupied_restore_ends)
         cursor: datetime | None = None
         cursor_basis = "initial forecast"
         for wave in waves:
@@ -7223,7 +7254,7 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             # slots are occupied.  Coupling this timestamp to ``start`` made
             # the board falsely place restores after all transfer work.
             new_restore_at = (
-                scheduler_now
+                simulated_restore_slot_floor
                 if not has_batch_task and wave.status == "RESTORE_SCHEDULED"
                 else max(scheduler_now, start - timedelta(seconds=restore_lead))
             )
