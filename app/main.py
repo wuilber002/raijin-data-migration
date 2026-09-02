@@ -7004,6 +7004,30 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                         source_id=wave.source_id,
                         wave_id=wave.id,
                     )
+                # The former per-wave window could be many times longer than
+                # an object's real lane share when waves overlap.  Retain the
+                # original start evidence above, but replace that stale
+                # duration with the source-wide lane model so it cannot push
+                # a later materialized wave days into the future.
+                wave_bytes = int(session.scalar(select(func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(
+                    ObjectRecord.wave_id == wave.id
+                )) or 0)
+                source_lane_duration = max(1, math.ceil(predicted_continuous_lane_seconds(
+                    wave_bytes, 0, settings, lane_profile,
+                )))
+                if source_lane_duration != int(wave.predicted_transfer_seconds or 0):
+                    prior_duration = int(wave.predicted_transfer_seconds or 0)
+                    wave.predicted_transfer_seconds = source_lane_duration
+                    wave.prediction_samples = max(int(wave.prediction_samples or 0), int(lane_profile["samples"] or 0))
+                    run_changed = True
+                    record_event(
+                        session,
+                        "DYNAMIC_WAVE_REFORECAST",
+                        f"Wave '{wave.name}' transfer forecast {prior_duration}s -> {source_lane_duration}s "
+                        "from the source-wide continuous-lane evidence",
+                        source_id=wave.source_id,
+                        wave_id=wave.id,
+                    )
                 cursor = max(cursor or lane_observed_end, source_lane_observed_end or lane_observed_end)
                 cursor_basis = "observed source-wide continuous lane"
                 continue
