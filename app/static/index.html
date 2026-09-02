@@ -1056,14 +1056,16 @@ refreshAll();
   .lane-operation .queue-workers td:nth-child(3){max-width:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lane-operation .queue-workers .queue-worker-idle td{white-space:normal;overflow-wrap:anywhere}
 </style>
-<div id="source-completion-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="source-completion-title"><div class="modal-panel source-completion-panel"><div class="row"><h2 id="source-completion-title">🏁 Chegada da source</h2><button class="secondary" type="button" onclick="closeSourceCompletionModal()">Fechar</button></div><div id="source-completion-content" class="hint">Carregando resumo…</div></div></div>
+<div id="source-completion-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="source-completion-title"><div class="modal-panel source-completion-panel"><div class="row"><h2 id="source-completion-title">Resultado da migração</h2><button class="secondary" type="button" onclick="closeSourceCompletionModal()">Fechar</button></div><div id="source-completion-content" class="hint">Carregando resumo…</div></div></div>
 <script>
   function closeSourceCompletionModal(){closeModal('#source-completion-modal')}
   function completionDuration(seconds){return seconds===null||seconds===undefined?'—':duration(Math.abs(Number(seconds)))}
   function completionDifference(seconds){if(seconds===null||seconds===undefined)return '—';const n=Number(seconds);return `${n===0?'igual ao previsto':`${n<0?'−':'+'}${completionDuration(n)}`}`}
   async function showSourceCompletion(){
     if(!selectedSource)return say('Selecione uma origem.',true);
-    $('#source-completion-content').innerHTML='<p class="hint">Carregando o relatório de chegada…</p>';
+    const source=sources.find(item=>String(item.id)===String(selectedSource));
+    $('#source-completion-title').textContent=`Resultado da migração — ${source?.name||'source'}`;
+    $('#source-completion-content').innerHTML='<p class="hint">Carregando o resultado final…</p>';
     openModal('#source-completion-modal');
     try{
       const summary=await api(`/api/sources/${selectedSource}/summary`), report=summary.completion_statistics||{};
@@ -1088,17 +1090,18 @@ refreshAll();
     }catch(error){$('#source-completion-content').innerHTML=`<p class="error">${escape(error.message)}</p>`}
   }
   (()=>{
+    let sourceCompletionAvailable=false;
     const ensureArrivalButton=()=>{
       // Older loaded pages may still have the former top-row action.
       $('#source-completion-action')?.remove();
       const actions=$('#source-summary-actions');if(!actions)return;
-      const button=document.createElement('button');button.type='button';button.id='source-completion-action';button.className='secondary';button.title='Tempos previstos e realizados desta source';button.textContent='🏁 Tempos';button.onclick=showSourceCompletion;actions.append(button);
+      const button=document.createElement('button');button.type='button';button.id='source-completion-action';button.className=sourceCompletionAvailable?'secondary':'danger source-completion-pending';button.title=sourceCompletionAvailable?'Resultado final da migração':'Resultado final ainda indisponível: a source não foi concluída';button.textContent='🏁 Resultado final';button.onclick=showSourceCompletion;actions.append(button);
     };
     ensureArrivalButton();
     const priorSelectSource=selectSource;
     selectSource=async function(){const result=await priorSelectSource();ensureArrivalButton();return result};
     const loadSummaryWithArrival=loadSummary;
-    loadSummary=async function(){await loadSummaryWithArrival();ensureArrivalButton()};
+    loadSummary=async function(){await loadSummaryWithArrival();const summary=selectedSource?await api(`/api/sources/${selectedSource}/summary`):null;sourceCompletionAvailable=Boolean(summary?.completion_statistics?.available);ensureArrivalButton()};
   })();
 </script>
 <style>
