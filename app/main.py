@@ -3037,6 +3037,27 @@ def destination_provenance_matches(obj: ObjectRecord, headers: dict) -> bool:
     return True
 
 
+def normalized_etag(value: str | None) -> str:
+    """Compare ETags across providers without confusing presentation quotes.
+
+    S3 inventory commonly returns an unquoted ETag whereas the Fujin cloud
+    contract, like OCI's HTTP APIs, presents it with RFC-style quotes.  The
+    immutable value is the token inside those quotes, not the display form.
+    """
+    return (value or "").strip().strip('"')
+
+
+def simulated_destination_provenance_matches(obj: ObjectRecord, descriptor: object | None) -> bool:
+    """Reconcile Fujin destination evidence with the discovered source row."""
+    if descriptor is None:
+        return False
+    metadata = json.loads(obj.metadata_json or "{}")
+    return (
+        (not obj.etag or normalized_etag(getattr(descriptor, "etag", None)) == normalized_etag(obj.etag))
+        and getattr(descriptor, "metadata", {}) == metadata
+    )
+
+
 @app.get("/api/readiness")
 def oci_readiness(session: Session = Depends(get_session)) -> dict:
     """Explicit OCI pre-check. It returns only readiness states, never secret values."""
@@ -5467,9 +5488,17 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
                         break
     except Exception as error:
         source.destination_validation_at, source.destination_validation_status = utcnow(), "FAILED"
-        record_event(session, "DESTINATION_VALIDATION_FAILED", f"OCI destination validation failed: {type(error).__name__}", source_id=source.id)
+        target = "Simulated destination" if source.backend_kind == "SIMULATED" else "OCI destination"
+        # Keep the API response actionable without exposing a traceback or
+        # credentials. The event preserves the same bounded diagnostic for
+        # the operator's audit trail.
+        diagnostic = str(error).replace("\n", " ").strip()[:500]
+        detail = f"{target} validation failed: {type(error).__name__}"
+        if diagnostic:
+            detail += f" — {diagnostic}"
+        record_event(session, "DESTINATION_VALIDATION_FAILED", detail, source_id=source.id)
         session.commit()
-        raise HTTPException(status_code=502, detail=f"OCI destination validation failed: {type(error).__name__}") from error
+        raise HTTPException(status_code=502, detail=detail) from error
     missing = sorted(key for key in expected if key not in found)
     mismatched = sorted(key for key, obj in expected.items() if key in found and found[key] != obj.size_bytes)
     # The listing establishes coverage cheaply.  HeadObject is performed only
@@ -5481,9 +5510,7 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
             continue
         if source.backend_kind == "SIMULATED":
             descriptor = descriptors.get(key)
-            metadata = json.loads(obj.metadata_json or "{}")
-            if (descriptor is None or descriptor.etag != obj.etag or
-                    descriptor.metadata != metadata):
+            if not simulated_destination_provenance_matches(obj, descriptor):
                 metadata_mismatched.append(key)
             continue
         try:
