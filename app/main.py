@@ -4010,14 +4010,12 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         if queued:
             phases.append(queued)
         restore_start = request_at or wave.planned_restore_at
-        restore_complete_forecast_seconds = int(
-            wave.predicted_restore_complete_seconds
-            or restore_forecast_seconds(wave.restore_tier, settings, source=row_source)[1]
-        )
+        # The board intentionally uses the published tier reference, rather
+        # than an object-count/Fujin precision estimate.  The tier is durable
+        # on the wave, therefore this baseline survives later configuration.
+        restore_complete_forecast_seconds = restore_service_window_seconds(wave.restore_tier)
         expected_first_available_at = (
-            restore_start + timedelta(seconds=(wave.predicted_restore_first_seconds or restore_forecast_seconds(
-                wave.restore_tier, settings, source=row_source
-            )[0]))
+            restore_start + timedelta(seconds=restore_complete_forecast_seconds)
             if restore_start else None
         )
         expected_available_at = (
@@ -4029,11 +4027,25 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         else:
             restore_end = expected_available_at
         restore_progress_seconds = max(0, int((restore_end - restore_start).total_seconds())) if restore_start and restore_end else 0
-        restore = phase("RESTORE", restore_start, restore_end, planned=not bool(request_at),
+        baseline_end = expected_available_at
+        normal_restore_end = min(restore_end, baseline_end) if restore_end and baseline_end else restore_end
+        restore = phase("RESTORE", restore_start, normal_restore_end, planned=not bool(request_at),
                         expected_seconds=restore_complete_forecast_seconds,
                         elapsed_seconds=restore_progress_seconds)
         if restore:
+            restore["restore_tier"] = wave.restore_tier
+            restore["reference_seconds"] = restore_complete_forecast_seconds
             phases.append(restore)
+        # Once the documented reference has elapsed, render the known excess
+        # in purple.  It is an extended forecast/observation, not an error.
+        if request_at and baseline_end and restore_end and restore_end > baseline_end:
+            extension = phase("RESTORE", baseline_end, restore_end, planned=True,
+                              expected_seconds=restore_complete_forecast_seconds,
+                              elapsed_seconds=restore_progress_seconds)
+            if extension:
+                extension.update({"forecast_extension": True, "restore_tier": wave.restore_tier,
+                                  "reference_seconds": restore_complete_forecast_seconds})
+                phases.append(extension)
         # The orange forecast ends at the tier service window. Safety and
         # transfer-lane serialization are not restore time. If they create a
         # gap, expose it separately as readiness/waiting time.
@@ -4042,6 +4054,8 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                                      expected_seconds=restore_complete_forecast_seconds,
                                      elapsed_seconds=restore_progress_seconds)
             if forecast_restore:
+                forecast_restore.update({"restore_tier": wave.restore_tier,
+                                         "reference_seconds": restore_complete_forecast_seconds})
                 phases.append(forecast_restore)
         # The continuous lane is event driven.  A future transfer window is
         # not a meaningful forecast: files are admitted as soon as they are
@@ -6316,38 +6330,16 @@ def _fujin_restore_profile(source: Source | None) -> dict:
 def restore_forecast_seconds(tier: str | None, settings: RuntimeSettings | None = None,
                              *, source: Source | None = None, object_count: int = 0,
                              total_bytes: int = 0) -> tuple[int, int]:
-    """Return first/complete availability forecasts for a restore tier.
+    """Return the documented reference window for the selected archive tier.
 
-    The former single 48h/12h value incorrectly presented the first restored
-    object as if it meant a whole wave was available.  The tail is the safety
-    boundary; first availability is what warms the continuous lane.
+    This is deliberately not a Fujin-derived completion guess.  AWS documents
+    BULK Deep Archive as *typically within 48h* and STANDARD as *within 12h*;
+    the UI must not present a fabricated intermediate precision as a promise.
+    Object availability itself remains event-driven and can warm the lane
+    before this reference window ends.
     """
-    if settings is None:
-        first, complete = ((30 * 3600, 48 * 3600) if tier == "BULK" else (4 * 3600, 18 * 3600))
-    elif tier == "BULK":
-        first, complete = (int(settings.restore_forecast_bulk_first_seconds),
-                           int(settings.restore_forecast_bulk_complete_seconds))
-    else:
-        first, complete = (int(settings.restore_forecast_standard_first_seconds),
-                           int(settings.restore_forecast_standard_complete_seconds))
-    profile = _fujin_restore_profile(source)
-    name = str(tier or "STANDARD").lower()
-    # Fujin assigns each object a deterministic uniform availability point.
-    # For n objects, the expected earliest/latest order statistics are
-    # min + span/(n+1) and min + span*n/(n+1). This is faithful to the
-    # simulator, makes object count meaningful, and avoids treating the
-    # configured maximum as a rigid prediction.
-    if profile and f"{name}_restore_min_hours" in profile:
-        lower = max(0.0, float(profile.get(f"{name}_restore_min_hours", 0))) * 3600
-        upper = max(lower, float(profile.get(f"{name}_restore_max_hours", lower / 3600)) * 3600)
-        count = max(1, int(object_count or 1))
-        span = upper - lower
-        first, complete = lower + span / (count + 1), lower + span * count / (count + 1)
-        # Optional scenario field: large waves can add a deterministic tail
-        # without inventing size sensitivity for the default Fujin model.
-        tail_per_tib = max(0.0, float(profile.get(f"{name}_restore_tail_hours_per_tib", 0)))
-        complete += tail_per_tib * (max(0, int(total_bytes)) / 1024**4) * 3600
-    return int(first), max(int(first), int(complete))
+    reference = 48 * 3600 if str(tier or "STANDARD").upper() == "BULK" else 12 * 3600
+    return reference, reference
 
 
 def restore_service_window_seconds(tier: str | None) -> int:
@@ -7092,15 +7084,10 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             elif wave.first_restore_available_virtual_at:
                 lane_start = wave.first_restore_available_virtual_at
             elif wave.restore_requested_virtual_at:
-                # The immutable per-wave Fujin forecast is more precise than
-                # the global fallback.  Replanning a submitted restore from a
-                # generic service window was stretching this source's 36h
-                # BULK profile to 72h and made the board invent a distant
-                # horizon.
-                restore_complete_seconds = int(
-                    wave.predicted_restore_complete_seconds
-                    or restore_forecast_seconds(wave.restore_tier, settings, source=run.source)[1]
-                )
+                # The public tier reference is deliberately stable.  Fujin
+                # timing remains observed evidence, never a completion promise
+                # used to place a later restore on the calendar.
+                restore_complete_seconds = restore_service_window_seconds(wave.restore_tier)
                 lane_start = wave.restore_requested_virtual_at + timedelta(
                     seconds=restore_complete_seconds
                 )

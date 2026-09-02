@@ -47,7 +47,7 @@ def test_transfer_queue_keeps_virtual_availability_separate_from_lease_clock():
     assert "available_virtual_at" in TransferQueueItem.__table__.columns
 
 
-def test_fujin_restore_forecast_uses_immutable_profile_and_object_count(monkeypatch):
+def test_restore_forecast_uses_the_documented_bulk_reference_not_fujin_precision(monkeypatch):
     import app.main as main
     source = Source(name="forecast", s3_bucket="source", aws_region="us-east-1",
                     destination_bucket="destination", backend_kind="SIMULATED")
@@ -55,10 +55,10 @@ def test_fujin_restore_forecast_uses_immutable_profile_and_object_count(monkeypa
         "bulk_restore_min_hours": 30, "bulk_restore_max_hours": 36,
     })
     first, complete = restore_forecast_seconds("BULK", source=source, object_count=2)
-    assert (first, complete) == (32 * 3600, 34 * 3600)
+    assert (first, complete) == (48 * 3600, 48 * 3600)
 
 
-def test_fujin_restore_forecast_stays_inside_the_profile_tolerance(monkeypatch):
+def test_restore_forecast_is_not_rewritten_by_a_fujin_profile(monkeypatch):
     import app.main as main
     source = Source(name="forecast-tolerance", s3_bucket="source", aws_region="us-east-1",
                     destination_bucket="destination", backend_kind="SIMULATED")
@@ -66,12 +66,12 @@ def test_fujin_restore_forecast_stays_inside_the_profile_tolerance(monkeypatch):
         "bulk_restore_min_hours": 30, "bulk_restore_max_hours": 36,
     })
     first, complete = restore_forecast_seconds("BULK", source=source, object_count=100)
-    assert 30 * 3600 <= first <= complete <= 36 * 3600
+    assert (first, complete) == (48 * 3600, 48 * 3600)
 
 
 def test_bulk_restore_fallback_is_48_hours():
-    """The conservative fallback is policy, while Fujin may be tighter."""
-    assert restore_forecast_seconds("BULK") == (30 * 3600, 48 * 3600)
+    assert restore_forecast_seconds("BULK") == (48 * 3600, 48 * 3600)
+    assert restore_forecast_seconds("STANDARD") == (12 * 3600, 12 * 3600)
 
 
 def test_runtime_clock_reports_simulator_timeout_without_a_500(monkeypatch):
@@ -1381,9 +1381,9 @@ def test_dynamic_replan_anchors_submitted_restore_to_its_actual_service_window()
         session.add(Task(wave_id=restoring.id, kind="SUBMIT_BATCH_RESTORE", state=TaskState.SUCCEEDED))
         session.flush()
         assert replan_dynamic_pipeline(session, settings, now=initial) == 1
-    # A submitted simulation restore retains its per-wave Fujin forecast;
-    # the conservative global 48h fallback must not replace this 36h profile.
-    assert restoring.planned_transfer_start_at == initial + timedelta(hours=36)
+    # The published BULK reference is stable even when the simulator has a
+    # more precise scenario profile.
+    assert restoring.planned_transfer_start_at == initial + timedelta(hours=48)
 
 
 def test_connection_api_limits_are_durable_and_used_by_workers():
