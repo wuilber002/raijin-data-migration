@@ -1033,6 +1033,9 @@ def test_flight_board_marks_unused_completed_restore_window_as_time_saved():
         assert saving["start_at"] == now + timedelta(hours=36)
         assert saving["end_at"] == now + timedelta(hours=48)
         assert saving["elapsed_seconds"] == 12 * 3600
+        restore = next(phase for phase in board["waves"][0]["phases"] if phase["kind"] == "RESTORE")
+        assert restore["continues_to_time_saved"] is True
+        assert saving["continues_from_restore"] is True
 
 
 def test_flight_board_projects_only_durable_ready_backlog_and_recovers_zero_width_segments():

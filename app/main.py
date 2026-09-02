@@ -4083,6 +4083,12 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                            expected_seconds=restore_complete_forecast_seconds,
                            elapsed_seconds=int((baseline_end - available_at).total_seconds()))
             if saving:
+                # These are two colors of one contracted restore window.  The
+                # renderer uses the adjacency flags to keep their shared edge
+                # square, with no visual gap between orange and green.
+                if restore:
+                    restore["continues_to_time_saved"] = True
+                saving["continues_from_restore"] = True
                 saving.update({"time_saved": True, "restore_tier": wave.restore_tier,
                                "reference_seconds": restore_complete_forecast_seconds})
                 phases.append(saving)
