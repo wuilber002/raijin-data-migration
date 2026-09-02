@@ -562,6 +562,7 @@ def test_flight_board_supports_manual_refresh_and_bounded_loading():
     assert ".flight-board-phase.restore-saving" in page
     assert "continues-to-saving" in page
     assert "continues-from-restore" in page
+    assert ".flight-board-restore-row .flight-board-phase.restore-saving{top:11px}" in page
 
 
 def test_refresh_restores_the_current_view_and_selected_source_without_duplicate_loads():
