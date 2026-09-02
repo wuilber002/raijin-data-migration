@@ -4284,9 +4284,11 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             source_id: max(board_timestamp(source_clock_now.get(source_id, now)), lane_end)
             for source_id, lane_end in dispatched_lane_end_by_source.items()
         }
-        # The frozen configured link is the blue baseline.  Once the lane has
-        # durable evidence of a lower effective capacity, the extra forecast
-        # is drawn separately in purple instead of silently stretching blue.
+        # The configured link is the reference baseline.  A lower effective
+        # capacity may lengthen the forecast, but that alone is not an
+        # overrun: rates naturally settle as a lane warms up. Purple is
+        # reserved for a reference deadline the source clock has actually
+        # passed while durable ready backlog still remains.
         baseline_rate_bps = max(1.0, float(settings.max_throughput_mbps) * 1_000_000 / 8)
         rate_bps_by_source: dict[int, float] = {}
         for item in queued_items:
@@ -4333,10 +4335,13 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                 int(projection["bytes_transferred"] or 0) / baseline_rate_bps
             ))
             baseline_end = projection["start_at"] + timedelta(seconds=baseline_seconds)
-            if baseline_end < projection["end_at"]:
+            source_now = board_timestamp(source_clock_now.get(
+                wave_by_id[wave_id].source_id, now
+            ))
+            if baseline_end < projection["end_at"] and source_now >= baseline_end:
                 extension = dict(projection)
                 extension.update({"start_at": baseline_end, "forecast_extension": True,
-                                  "entry_reason": "extensão da projeção além da capacidade configurada"})
+                                  "entry_reason": "prazo de referência já ultrapassado; backlog ainda pendente"})
                 lane_extensions.append(extension)
                 projection["end_at"] = baseline_end
                 projection["expected_seconds"] = baseline_seconds

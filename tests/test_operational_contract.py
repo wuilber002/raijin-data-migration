@@ -1110,6 +1110,12 @@ def test_flight_board_adds_future_horizon_only_while_pipeline_is_active():
         assert completed["timeline_end_at"] == completed["timeline_content_end_at"]
 
 
+def test_lane_forecast_marks_an_overrun_only_after_the_source_clock_passes_baseline():
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    assert "source_now >= baseline_end" in source
+    assert "prazo de referência já ultrapassado; backlog ainda pendente" in source
+
+
 def test_simulation_clock_advances_only_through_durable_decisions():
     worker = Path("app/real_worker.py").read_text(encoding="utf-8")
     store = Path("app/simulator_store.py").read_text(encoding="utf-8")
