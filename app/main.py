@@ -38,8 +38,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, relationship, sessionmaker
 
 from app.cloud_backends import backend_for
+from app.backend_contracts import ExecutionContext, ListObjectsRequest
 from app.runtime_context import RAIJIN_SERVICE_VERSION, SIMULATOR_SERVICE_VERSION, load_runtime_context
 from app.simulator_admin import SimulatorAdminClient, SimulatorAdminError
+from app.simulator_ports import SimulatedSourcePort, SimulatorTransportError
 
 RAIJU_MIN_WORKERS = 5
 # The continuous lane must stay bounded even when a source contains millions
@@ -634,6 +636,9 @@ class TransferQueueItem(Base):
     object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), index=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    # A simulated source has its own virtual clock. This is deliberately
+    # separate from the operational enqueue timestamp used for leases.
+    available_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     restore_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     predicted_transfer_seconds: Mapped[float] = mapped_column(Float, default=0)
     priority_score: Mapped[int] = mapped_column(Integer, default=0, index=True)
@@ -1365,6 +1370,7 @@ def create_schema() -> None:
                 connection.execute(text(f"ALTER TABLE runtime_settings ADD COLUMN {column} {sql_type}"))
         lane_columns = {
             "dispatch_batch_id": "BIGINT",
+            "available_virtual_at": "TIMESTAMP WITH TIME ZONE",
             "preemption_cooldown_until": "TIMESTAMP WITH TIME ZONE",
             "preemption_successor_item_id": "BIGINT",
             "preemption_requested_at": "TIMESTAMP WITH TIME ZONE",
@@ -1727,6 +1733,7 @@ def enqueue_available_transfer_objects(session: Session, wave: Wave,
             object_id=obj.id,
             size_bytes=obj.size_bytes,
             available_at=obj.restored_at or observed_at,
+            available_virtual_at=(observed_at if wave.source.backend_kind == "SIMULATED" else None),
             restore_expires_at=obj.restore_expires_at,
             predicted_transfer_seconds=float(obj.planned_transfer_seconds or 0),
             priority_score=score,
@@ -5395,6 +5402,35 @@ def discovery_queue(limit: int = 100, session: Session = Depends(get_session)) -
     } for job, source in rows]
 
 
+def simulated_destination_listing(source: Source) -> dict[str, object]:
+    """List Fujin's virtual OCI bucket through the same typed listing port."""
+    required = (source.simulation_execution_id, source.simulation_correlation_id,
+                source.simulation_tenant_id, source.simulation_project_id)
+    if source.backend_kind != "SIMULATED" or not runtime_context.simulator_base_url or not all(required):
+        raise RuntimeError("Simulated source has incomplete execution context")
+    context = ExecutionContext(
+        execution_id=uuid.UUID(str(source.simulation_execution_id)),
+        correlation_id=uuid.UUID(str(source.simulation_correlation_id)),
+        tenant_id=uuid.UUID(str(source.simulation_tenant_id)),
+        project_id=uuid.UUID(str(source.simulation_project_id)),
+    )
+    port = SimulatedSourcePort(runtime_context.simulator_base_url)
+    found: dict[str, object] = {}
+    for prefix in source_prefix_values(source):
+        token = None
+        while True:
+            page = port.list_objects(ListObjectsRequest(
+                context=context, bucket=source.destination_bucket, prefix=prefix,
+                continuation_token=token, max_keys=1000,
+            ))
+            for descriptor in page.objects:
+                found[descriptor.key] = descriptor
+            token = page.next_continuation_token
+            if not token:
+                break
+    return found
+
+
 @app.post("/api/sources/{source_id}/validate-destination")
 def validate_destination(source_id: int, session: Session = Depends(get_session)) -> dict:
     """Explicit OCI-only final reconciliation against the durable discovery."""
@@ -5404,25 +5440,31 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
     )}
     if not expected:
         raise HTTPException(status_code=409, detail="Run discovery before validating the destination")
+    descriptors: dict[str, object] = {}
+    client = namespace = None
     try:
-        import oci
-        namespace = read_oci_runtime_config().get("object_storage_namespace", "").strip()
-        if not namespace:
-            raise RuntimeError("OCI namespace is not configured")
-        client = oci.object_storage.ObjectStorageClient({}, signer=oci.auth.signers.InstancePrincipalsSecurityTokenSigner())
-        found: dict[str, int] = {}
-        for prefix in source_prefix_values(source):
-            start = None
-            while True:
-                arguments = {"prefix": prefix, "limit": 1000, "fields": "name,size"}
-                if start:
-                    arguments["start"] = start
-                response = client.list_objects(namespace, source.destination_bucket, **arguments).data
-                for item in response.objects:
-                    found[item.name] = int(item.size)
-                start = response.next_start_with
-                if not start:
-                    break
+        if source.backend_kind == "SIMULATED":
+            descriptors = simulated_destination_listing(source)
+            found = {key: int(descriptor.size_bytes) for key, descriptor in descriptors.items()}
+        else:
+            import oci
+            namespace = read_oci_runtime_config().get("object_storage_namespace", "").strip()
+            if not namespace:
+                raise RuntimeError("OCI namespace is not configured")
+            client = oci.object_storage.ObjectStorageClient({}, signer=oci.auth.signers.InstancePrincipalsSecurityTokenSigner())
+            found: dict[str, int] = {}
+            for prefix in source_prefix_values(source):
+                start = None
+                while True:
+                    arguments = {"prefix": prefix, "limit": 1000, "fields": "name,size"}
+                    if start:
+                        arguments["start"] = start
+                    response = client.list_objects(namespace, source.destination_bucket, **arguments).data
+                    for item in response.objects:
+                        found[item.name] = int(item.size)
+                    start = response.next_start_with
+                    if not start:
+                        break
     except Exception as error:
         source.destination_validation_at, source.destination_validation_status = utcnow(), "FAILED"
         record_event(session, "DESTINATION_VALIDATION_FAILED", f"OCI destination validation failed: {type(error).__name__}", source_id=source.id)
@@ -5437,7 +5479,15 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
     for key, obj in expected.items():
         if key not in found or found[key] != obj.size_bytes or not obj.etag:
             continue
+        if source.backend_kind == "SIMULATED":
+            descriptor = descriptors.get(key)
+            metadata = json.loads(obj.metadata_json or "{}")
+            if (descriptor is None or descriptor.etag != obj.etag or
+                    descriptor.metadata != metadata):
+                metadata_mismatched.append(key)
+            continue
         try:
+            assert client is not None and namespace is not None
             headers = client.head_object(namespace, source.destination_bucket, key).headers
             if not destination_provenance_matches(obj, headers):
                 metadata_mismatched.append(key)
@@ -5589,7 +5639,8 @@ def assign_wave(session: Session, source_id: int, name: str, max_bytes: int, res
                 transfer_release_policy: str = "AFTER_ALL_RESTORED") -> Wave:
     assigned_bytes = sum(obj.size_bytes for obj in objects)
     restore_first, restore_complete = restore_forecast_seconds(
-        restore_tier, runtime_settings(session)
+        restore_tier, runtime_settings(session), source=session.get(Source, source_id),
+        object_count=len(objects), total_bytes=assigned_bytes,
     )
     wave = Wave(source_id=source_id, name=name, max_bytes=max_bytes, restore_days=restore_days,
                 restore_tier=restore_tier, status="PLANNED", planner_mode=planner_mode,
@@ -5859,12 +5910,13 @@ def next_dynamic_wave_plan(session: Session, source_id: int, max_bytes: int,
 
 def dynamic_wave_schedule(run: DynamicPipelineRun, prior_waves: list[Wave],
                           scheduler_now: datetime,
-                          settings: RuntimeSettings | None = None) -> tuple[datetime, datetime]:
+                          settings: RuntimeSettings | None = None,
+                          restore_complete_seconds: int | None = None) -> tuple[datetime, datetime]:
     """Schedule one newly materialized wave after the current transfer lane."""
     # The tail, not the first available object, is the conservative boundary
     # used to reserve restore capacity.  Keep the exact value on each wave so
     # later settings changes cannot rewrite an already-published forecast.
-    service_window = restore_forecast_seconds(run.restore_tier, settings)[1]
+    service_window = int(restore_complete_seconds or restore_forecast_seconds(run.restore_tier, settings)[1])
     if prior_waves:
         predecessor = prior_waves[-1]
         predecessor_start = predecessor.planned_transfer_start_at or scheduler_now
@@ -5987,10 +6039,16 @@ def materialize_dynamic_pipeline_horizon(session: Session, settings: RuntimeSett
         )
         if not plan:
             break
-        restore_at, transfer_at = dynamic_wave_schedule(run, existing, scheduler_now, settings)
+        restore_first, restore_complete = restore_forecast_seconds(
+            run.restore_tier, settings, source=source,
+            object_count=plan["object_count"], total_bytes=plan["bytes"],
+        )
+        restore_at, transfer_at = dynamic_wave_schedule(
+            run, existing, scheduler_now, settings,
+            restore_complete_seconds=restore_complete,
+        )
         name = automatic_wave_name(session, source, run.selection_prefix, run.next_sequence)
         run.next_sequence += 1
-        restore_first, restore_complete = restore_forecast_seconds(run.restore_tier, settings)
         wave = Wave(
             source_id=source.id, name=name, max_bytes=run.target_max_bytes,
             restore_days=run.restore_days, restore_tier=run.restore_tier,
@@ -6150,7 +6208,31 @@ def dynamic_schedule_times(now: datetime, plans: list[dict], safety_seconds: int
     return times
 
 
-def restore_forecast_seconds(tier: str | None, settings: RuntimeSettings | None = None) -> tuple[int, int]:
+def _fujin_restore_profile(source: Source | None) -> dict:
+    """Read the immutable Fujin execution profile when it is locally usable.
+
+    The control plane must remain available when Fujin is temporarily down,
+    therefore a missing/unreachable simulator simply falls back to the
+    configured conservative profile. Executions retain their immutable
+    scenario snapshot, so template edits never change an active source.
+    """
+    if (source is None or source.backend_kind != "SIMULATED" or
+            not source.simulation_scenario_id or not runtime_context.simulator_base_url):
+        return {}
+    try:
+        executions = SimulatorAdminClient(runtime_context.simulator_base_url).list_scenario_executions(
+            source.simulation_scenario_id
+        )
+        execution = next((item for item in executions
+                          if item.get("id") == source.simulation_execution_id), None)
+        return dict(((execution or {}).get("snapshot") or {}).get("configuration") or {})
+    except (SimulatorAdminError, OSError, TimeoutError, ValueError):
+        return {}
+
+
+def restore_forecast_seconds(tier: str | None, settings: RuntimeSettings | None = None,
+                             *, source: Source | None = None, object_count: int = 0,
+                             total_bytes: int = 0) -> tuple[int, int]:
     """Return first/complete availability forecasts for a restore tier.
 
     The former single 48h/12h value incorrectly presented the first restored
@@ -6158,12 +6240,31 @@ def restore_forecast_seconds(tier: str | None, settings: RuntimeSettings | None 
     boundary; first availability is what warms the continuous lane.
     """
     if settings is None:
-        return ((30 * 3600, 72 * 3600) if tier == "BULK" else (4 * 3600, 18 * 3600))
-    if tier == "BULK":
-        return (int(settings.restore_forecast_bulk_first_seconds),
-                max(int(settings.restore_forecast_bulk_first_seconds), int(settings.restore_forecast_bulk_complete_seconds)))
-    return (int(settings.restore_forecast_standard_first_seconds),
-            max(int(settings.restore_forecast_standard_first_seconds), int(settings.restore_forecast_standard_complete_seconds)))
+        first, complete = ((30 * 3600, 72 * 3600) if tier == "BULK" else (4 * 3600, 18 * 3600))
+    elif tier == "BULK":
+        first, complete = (int(settings.restore_forecast_bulk_first_seconds),
+                           int(settings.restore_forecast_bulk_complete_seconds))
+    else:
+        first, complete = (int(settings.restore_forecast_standard_first_seconds),
+                           int(settings.restore_forecast_standard_complete_seconds))
+    profile = _fujin_restore_profile(source)
+    name = str(tier or "STANDARD").lower()
+    # Fujin assigns each object a deterministic uniform availability point.
+    # For n objects, the expected earliest/latest order statistics are
+    # min + span/(n+1) and min + span*n/(n+1). This is faithful to the
+    # simulator, makes object count meaningful, and avoids treating the
+    # configured maximum as a rigid prediction.
+    if profile and f"{name}_restore_min_hours" in profile:
+        lower = max(0.0, float(profile.get(f"{name}_restore_min_hours", 0))) * 3600
+        upper = max(lower, float(profile.get(f"{name}_restore_max_hours", lower / 3600)) * 3600)
+        count = max(1, int(object_count or 1))
+        span = upper - lower
+        first, complete = lower + span / (count + 1), lower + span * count / (count + 1)
+        # Optional scenario field: large waves can add a deterministic tail
+        # without inventing size sensitivity for the default Fujin model.
+        tail_per_tib = max(0.0, float(profile.get(f"{name}_restore_tail_hours_per_tib", 0)))
+        complete += tail_per_tib * (max(0, int(total_bytes)) / 1024**4) * 3600
+    return int(first), max(int(first), int(complete))
 
 
 def restore_service_window_seconds(tier: str | None) -> int:
@@ -6217,7 +6318,12 @@ def _completion_lane_idle_breakdown(session: Session, source: Source,
               "dispatch_or_lease_seconds": 0, "unknown_seconds": 0}
     if not windows:
         return result
-    first_available = session.scalar(select(func.min(TransferQueueItem.available_at)).where(
+    simulated = source.backend_kind == "SIMULATED"
+    availability_column = (
+        TransferQueueItem.available_virtual_at if simulated
+        else TransferQueueItem.available_at
+    )
+    first_available = session.scalar(select(func.min(availability_column)).where(
         TransferQueueItem.source_id == source.id
     ))
     if first_available:
@@ -6228,10 +6334,16 @@ def _completion_lane_idle_breakdown(session: Session, source: Source,
         gap = int(max(0, (right[0] - left[1]).total_seconds()))
         if not gap:
             continue
-        pending = session.scalar(select(func.count(TransferQueueItem.id)).where(
+        # Do not compare the simulator's virtual lane to ``transferred_at``:
+        # that is a real wall-clock durability timestamp. A segment beginning
+        # after this gap is durable proof that the object was still pending.
+        pending = session.scalar(select(func.count(TransferQueueItem.id)).join(
+            TransferLaneSegment,
+            TransferLaneSegment.queue_item_id == TransferQueueItem.id,
+        ).where(
             TransferQueueItem.source_id == source.id,
-            TransferQueueItem.available_at <= left[1],
-            or_(TransferQueueItem.transferred_at.is_(None), TransferQueueItem.transferred_at >= right[0]),
+            availability_column.is_not(None), availability_column <= left[1],
+            TransferLaneSegment.started_at >= right[0],
         )) or 0
         if pending:
             result["dispatch_or_lease_seconds"] += gap
@@ -6256,6 +6368,7 @@ def capture_source_completion_estimate(session: Session, source: Source,
     bits_per_second = max(1.0, float(settings.max_throughput_mbps or 1) * 1_000_000)
     source.completion_estimated_transfer_seconds = float(total_bytes) * 8 / bits_per_second
     source.completion_estimate_created_at = utcnow()
+    fujin_profile = _fujin_restore_profile(source)
     source.completion_estimate_json = json.dumps({
         "schema": 2,
         "link_mbps": int(settings.max_throughput_mbps),
@@ -6267,6 +6380,7 @@ def capture_source_completion_estimate(session: Session, source: Source,
         },
         "restore_max_slots": int(settings.dynamic_restore_max_slots),
         "restore_confidence": "±25% da distância entre primeiro e último arquivo previsto por wave",
+        "fujin_profile": fujin_profile,
         "planner": "v9-forecast-evidence",
     }, sort_keys=True)
 
@@ -6354,9 +6468,10 @@ def source_completion_statistics(session: Session, source: Source,
     recovery_events = session.scalar(select(func.count(Event.id)).where(
         Event.source_id == source.id, Event.kind == "CONTINUOUS_TRANSFER_LEASES_RECOVERED",
     )) or 0
-    segments_total, empty_segments = session.execute(select(
+    segments_total, empty_segments, segment_bytes = session.execute(select(
         func.count(TransferLaneSegment.id),
         func.count(case((TransferLaneSegment.bytes_transferred <= 0, TransferLaneSegment.id))),
+        func.coalesce(func.sum(TransferLaneSegment.bytes_transferred), 0),
     ).where(TransferLaneSegment.source_id == source.id)).one()
     return {
         "available": True,
@@ -6390,7 +6505,8 @@ def source_completion_statistics(session: Session, source: Source,
         "telemetry": {"items_with_retry": int(retry_items or 0),
                       "lease_recovery_events": int(recovery_events or 0),
                       "lane_segments": int(segments_total or 0),
-                      "empty_lane_segments": int(empty_segments or 0)},
+                      "empty_lane_segments": int(empty_segments or 0),
+                      "repeated_payload_bytes": max(0, int(segment_bytes or 0) - int(total_bytes))},
         "evidence": {"restore_windows": len(actual_restore_windows), "transfer_windows": len(actual_lane_windows),
                      "waves": len(waves)},
     }
@@ -6586,7 +6702,10 @@ def repackage_unsubmitted_dynamic_waves(session: Session, settings: RuntimeSetti
             # planned wave. Keep it empty and let the next governance cycle
             # resolve it with the durable inventory state.
             continue
-        restore_at, transfer_at = dynamic_wave_schedule(run, preceding, scheduler_now, settings)
+        restore_at, transfer_at = dynamic_wave_schedule(
+            run, preceding, scheduler_now, settings,
+            restore_complete_seconds=int(wave.predicted_restore_complete_seconds or 0) or None,
+        )
         wave.max_bytes = run.target_max_bytes
         wave.predicted_transfer_seconds = plan["predicted_transfer_seconds"]
         wave.prediction_samples = plan["prediction_samples"]
