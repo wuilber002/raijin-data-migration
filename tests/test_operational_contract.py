@@ -1330,6 +1330,36 @@ def test_dynamic_replan_does_not_pin_unsubmitted_wave_to_an_old_calendar_slot():
         assert future.planned_restore_at == initial
 
 
+def test_dynamic_replan_does_not_delay_restore_eligibility_behind_lane_forecast():
+    """The transfer cursor forecasts consumption; it must not reserve Raikou."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    initial = datetime(2026, 8, 25, 12, 0)
+    with Session() as session:
+        source = Source(id=984, name="independent-restore-lane", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", backend_kind="SIMULATED", simulation_fidelity="CONTROL")
+        settings = RuntimeSettings(id=1, max_throughput_mbps=1100)
+        run = DynamicPipelineRun(id=985, source_id=source.id, status="SCHEDULED", scheduled_restores=True,
+                                 restore_safety_seconds=0)
+        completed = Wave(id=986, source_id=source.id, pipeline_run_id=run.id, name="lane-work", max_bytes=1,
+                         restore_days=1, restore_tier="BULK", status="COMPLETED", planner_mode="DYNAMIC",
+                         predicted_transfer_seconds=24 * 3600, planned_transfer_start_at=initial,
+                         transfer_started_virtual_at=initial,
+                         transfer_completed_virtual_at=initial + timedelta(hours=24))
+        future = Wave(id=987, source_id=source.id, pipeline_run_id=run.id, name="next-restore", max_bytes=1,
+                      restore_days=1, restore_tier="BULK", status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
+                      predicted_transfer_seconds=60, predicted_restore_complete_seconds=60,
+                      planned_restore_at=initial + timedelta(days=7),
+                      planned_transfer_start_at=initial + timedelta(days=7))
+        session.add_all([source, settings, run, completed, future]); session.flush()
+
+        assert replan_dynamic_pipeline(session, settings, now=initial) == 1
+        assert future.planned_transfer_start_at == initial + timedelta(hours=24)
+        # The horizon function decides when a physical restore slot is free.
+        assert future.planned_restore_at == initial
+
+
 def test_dynamic_replan_anchors_submitted_restore_to_its_actual_service_window():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

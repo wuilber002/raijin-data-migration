@@ -6677,14 +6677,14 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
     Only the adaptive horizon is materialized. Charged S3 Batch jobs are then
     emitted gradually within that horizon. A restore slot is occupied from
     submission until all of that wave's objects are available. The transfer
-    lane remains independent and serial, which avoids restoring an unbounded
+    lane remains independent and continuous, which avoids restoring an unbounded
     set of temporary copies while preserving a warm transfer pipeline.
     """
     queue_now = utcnow()
     released = 0
     # Restore and transfer are separate lanes. A wave frees an expensive
     # restore slot when all of its objects are available, even while the
-    # single global transfer lane is still copying it.
+    # continuous transfer lane is still copying it.
     active_statuses = {"RESTORE_REQUESTED", "RESTORE_REQUEST_ACCEPTED", "RESTORING"}
     runs = list(session.scalars(select(DynamicPipelineRun).where(
         DynamicPipelineRun.scheduled_restores.is_(True),
@@ -7139,7 +7139,18 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                 wave.predicted_restore_complete_seconds
                 or restore_forecast_seconds(wave.restore_tier, settings, source=run.source)[1]
             ) + int(run.restore_safety_seconds or settings.dynamic_restore_safety_seconds)
-            new_restore_at = max(scheduler_now, start - timedelta(seconds=restore_lead))
+            # ``start`` may be constrained by the source-wide transfer cursor
+            # so that the lane forecast does not double-count parallel work.
+            # It must never, however, reserve the restore lane.  Future
+            # restore waves become eligible immediately; the durable restore
+            # horizon is solely responsible for holding them while its bounded
+            # slots are occupied.  Coupling this timestamp to ``start`` made
+            # the board falsely place restores after all transfer work.
+            new_restore_at = (
+                scheduler_now
+                if not has_batch_task and wave.status == "RESTORE_SCHEDULED"
+                else max(scheduler_now, start - timedelta(seconds=restore_lead))
+            )
             shifted = abs((wave.planned_transfer_start_at - start).total_seconds()) if wave.planned_transfer_start_at else float("inf")
             if shifted >= 60:
                 prior_transfer_at = wave.planned_transfer_start_at
