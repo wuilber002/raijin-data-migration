@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DiscoverUsEastValidationPrefixes",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Resource": "arn:aws:s3:::s3-raijin-us-east-validation-056033527878-20260824",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "Smoke_test/", "Smoke_test/*",
+            "Operational_test/", "Operational_test/*",
+            "Resilience_test/", "Resilience_test/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReadUsEastValidationObjectsAndTags",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectTagging", "s3:GetObjectVersionTagging"],
+      "Resource": [
+        "arn:aws:s3:::s3-raijin-us-east-validation-056033527878-20260824/Smoke_test/*",
+        "arn:aws:s3:::s3-raijin-us-east-validation-056033527878-20260824/Operational_test/*",
+        "arn:aws:s3:::s3-raijin-us-east-validation-056033527878-20260824/Resilience_test/*"
+      ]
+    }
+  ]
+}

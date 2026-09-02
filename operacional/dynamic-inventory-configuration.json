@@ -1,0 +1,17 @@
+{
+  "Destination": {
+    "S3BucketDestination": {
+      "AccountId": "056033527878",
+      "Bucket": "arn:aws:s3:::s3-raijin-dynamic-archive-20260820",
+      "Format": "CSV",
+      "Prefix": "raijin-inventory",
+      "Encryption": {"SSES3": {}}
+    }
+  },
+  "IsEnabled": true,
+  "Filter": {"Prefix": "linux-2.6.12-rc2/"},
+  "Id": "raijin-dynamic-deep-archive-csv",
+  "IncludedObjectVersions": "Current",
+  "OptionalFields": ["Size", "LastModifiedDate", "StorageClass", "ETag", "ChecksumAlgorithm"],
+  "Schedule": {"Frequency": "Daily"}
+}

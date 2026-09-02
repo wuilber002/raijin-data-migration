@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RestoreDynamicArchiveTestPrefix",
+      "Effect": "Allow",
+      "Action": "s3:RestoreObject",
+      "Resource": "arn:aws:s3:::s3-raijin-dynamic-archive-20260820/linux-2.6.12-rc2/*"
+    }
+  ]
+}

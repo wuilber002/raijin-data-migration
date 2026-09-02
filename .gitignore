@@ -8,7 +8,6 @@ crash.log
 *.pem
 *.key
 releases/
-operational/
 .s3-data-bucket/
 .tools/
 __pycache__/
