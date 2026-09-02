@@ -1007,6 +1007,34 @@ def test_flight_board_continuous_lane_uses_only_observed_transfer_segments():
         assert "restore_elapsed_seconds" in by_name["observed"]
 
 
+def test_flight_board_marks_unused_completed_restore_window_as_time_saved():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session() as session:
+        source = Source(name="early-restore", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="finished-early", max_bytes=1024,
+                    restore_days=1, restore_tier="BULK", planner_mode="DYNAMIC",
+                    status="RESTORED", planned_restore_at=now)
+        session.add(wave); session.flush()
+        session.add(ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="ready.bin",
+                                 size_bytes=1024, state=ObjectState.RESTORED,
+                                 restore_requested_at=now, restored_at=now + timedelta(hours=36)))
+        session.commit()
+
+        board = flight_board(source_id=source.id, run_id=None, session=session)
+
+        saving = next(phase for phase in board["waves"][0]["phases"]
+                      if phase["kind"] == "RESTORE_SAVING")
+        assert saving["time_saved"] is True
+        assert saving["start_at"] == now + timedelta(hours=36)
+        assert saving["end_at"] == now + timedelta(hours=48)
+        assert saving["elapsed_seconds"] == 12 * 3600
+
+
 def test_flight_board_projects_only_durable_ready_backlog_and_recovers_zero_width_segments():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

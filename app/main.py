@@ -4074,6 +4074,18 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                 extension.update({"forecast_extension": True, "restore_tier": wave.restore_tier,
                                   "reference_seconds": restore_complete_forecast_seconds})
                 phases.append(extension)
+        # A completed restore that finishes before its documented tier window
+        # preserves the unused part of that window as a positive outcome.  It
+        # is not a work phase and must not be mistaken for a new forecast: the
+        # green interval is emitted only after all objects are available.
+        if request_at and available_at and baseline_end and available_at < baseline_end:
+            saving = phase("RESTORE_SAVING", available_at, baseline_end,
+                           expected_seconds=restore_complete_forecast_seconds,
+                           elapsed_seconds=int((baseline_end - available_at).total_seconds()))
+            if saving:
+                saving.update({"time_saved": True, "restore_tier": wave.restore_tier,
+                               "reference_seconds": restore_complete_forecast_seconds})
+                phases.append(saving)
         # The orange forecast ends at the tier service window. Safety and
         # transfer-lane serialization are not restore time. If they create a
         # gap, expose it separately as readiness/waiting time.
@@ -4273,11 +4285,17 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         rate_bps_by_source: dict[int, float] = {}
         for item in queued_items:
             item_source_id = wave_by_id[item.wave_id].source_id
-            rate_bps = rate_bps_by_source.setdefault(item_source_id, max(
-                1.0, continuous_lane_capacity_profile(
+            # ``dict.setdefault`` evaluates its default eagerly.  On a large
+            # ready backlog that used to recalculate the expensive capacity
+            # profile once per object, even though the rate is source-wide.
+            # Keep the flight board a compact read model: one profile lookup
+            # per source is enough for the whole projection.
+            rate_bps = rate_bps_by_source.get(item_source_id)
+            if rate_bps is None:
+                rate_bps = max(1.0, continuous_lane_capacity_profile(
                     session, item_source_id, settings.max_throughput_mbps
-                )["effective_mbps"] * 1_000_000 / 8,
-            ))
+                )["effective_mbps"] * 1_000_000 / 8)
+                rate_bps_by_source[item_source_id] = rate_bps
             cursor = cursors_by_source.get(
                 item_source_id, board_timestamp(source_clock_now.get(item_source_id, now))
             )

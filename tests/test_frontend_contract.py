@@ -551,6 +551,17 @@ def test_flight_board_modal_has_only_one_vertical_scroll_container():
     assert "filter(phase=>phase.kind!=='TRANSFER')" in page
 
 
+def test_flight_board_supports_manual_refresh_and_bounded_loading():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert 'id="flight-board-refresh"' in page
+    assert 'onclick="refreshFlightBoard()"' in page
+    assert "const flightBoardTimeoutMs=45000" in page
+    assert "flightBoardRequestController?.abort()" in page
+    assert "RESTORE_SAVING:['restore-saving','Tempo economizado no restore']" in page
+    assert ".flight-board-phase.restore-saving" in page
+
+
 def test_refresh_restores_the_current_view_and_selected_source_without_duplicate_loads():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
 
