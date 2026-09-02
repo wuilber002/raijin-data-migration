@@ -2380,7 +2380,8 @@ def _raiju_host_capacity_factor() -> tuple[float, str]:
 
 
 def _continuous_raiju_worker_count(session, source: Source, available_objects: int,
-                                   max_throughput_mbps: int) -> int:
+                                   max_throughput_mbps: int, *, settings=None,
+                                   details: bool = False):
     """Allocate Raiju concurrency from source evidence, never below the floor.
 
     The continuous lane is deliberately source-scoped today.  Its queue rows
@@ -2388,7 +2389,10 @@ def _continuous_raiju_worker_count(session, source: Source, available_objects: i
     project-scoped without changing item identity or recovery semantics.
     """
     if available_objects <= 0:
-        return 0
+        empty = {"target": 0, "observed_lane_mbps": 0.0, "observed_per_raiju_mbps": 0.0,
+                 "host_capacity_factor": 1.0, "host_capacity_reason": "no eligible backlog",
+                 "marginal_gain_mbps": 0.0, "reason": "no eligible backlog"}
+        return empty if details else 0
     floor = min(RAIJU_MIN_WORKERS, available_objects)
     samples = list(session.scalars(
         select(ObjectRecord)
@@ -2405,7 +2409,10 @@ def _continuous_raiju_worker_count(session, source: Source, available_objects: i
         for obj in samples if obj.size_bytes > 0
     ]
     if not rates:
-        return floor
+        cold = {"target": floor, "observed_lane_mbps": 0.0, "observed_per_raiju_mbps": 0.0,
+                "host_capacity_factor": 1.0, "host_capacity_reason": "cold-start evidence",
+                "marginal_gain_mbps": float(max_throughput_mbps), "reason": "cold-start floor"}
+        return cold if details else floor
     # The mean is distorted by the tail of small objects and transient slow
     # calls, which drove CONTROL runs to 64 logical slots without a matching
     # aggregate throughput gain. Use a robust upper-quartile worker sample.
@@ -2428,6 +2435,18 @@ def _continuous_raiju_worker_count(session, source: Source, available_objects: i
             chosen = min(chosen, int(previous) + step)
         elif available_objects < int(previous):
             chosen = max(floor, chosen, int(previous) - step)
+    previous_target = int(previous or 0)
+    observed_lane = min(float(max_throughput_mbps), observed_per_raiju * max(1, previous_target))
+    marginal_gain = max(0.0, min(observed_per_raiju, float(max_throughput_mbps) - observed_lane))
+    min_gain = float(getattr(settings, "continuous_transfer_min_marginal_gain_mbps", 5) or 0)
+    autoscale_reason = "observed per-Raiju rate and link ceiling"
+    if chosen > previous_target and previous_target and marginal_gain < min_gain:
+        chosen = previous_target
+        autoscale_reason = f"scale-up held: marginal gain {marginal_gain:.2f} Mbps below configured {min_gain:.2f} Mbps"
+    elif chosen > previous_target:
+        autoscale_reason = f"scale-up accepted: marginal gain {marginal_gain:.2f} Mbps meets configured {min_gain:.2f} Mbps"
+    elif chosen < previous_target:
+        autoscale_reason = "scale-down: backlog or guarded capacity no longer justifies prior slots"
     if capacity_factor < 1:
         message = f"Raikou limited Raiju expansion to {chosen}/{requested}: {capacity_reason}"
         # This decision is evaluated on every dispatcher heartbeat.  Keep the
@@ -2443,7 +2462,11 @@ def _continuous_raiju_worker_count(session, source: Source, available_objects: i
         if (latest is None or latest.message != message or
                 (now - latest.created_at).total_seconds() >= 300):
             event(session, "RAIJU_AUTOSCALE_HOST_GUARD", message, source_id=source.id)
-    return chosen
+    result = {"target": chosen, "observed_lane_mbps": observed_lane,
+              "observed_per_raiju_mbps": observed_per_raiju,
+              "host_capacity_factor": capacity_factor, "host_capacity_reason": capacity_reason,
+              "marginal_gain_mbps": marginal_gain, "reason": autoscale_reason}
+    return result if details else chosen
 
 
 def _continuous_item_query(source_id: int, now: datetime,
@@ -2858,6 +2881,18 @@ def transfer_continuous(session, task: Task, settings) -> None:
         session.commit()
         return
     with simulation_phase_clock_hold(source, "continuous-transfer"):
+        def record_allocation(batch: TransferDispatchBatch | None, allocation: dict) -> None:
+            """Persist the exact Raikou decision with its capacity evidence."""
+            if batch is None:
+                return
+            batch.worker_target = int(allocation["target"])
+            batch.observed_lane_mbps = float(allocation["observed_lane_mbps"])
+            batch.observed_per_raiju_mbps = float(allocation["observed_per_raiju_mbps"])
+            batch.host_capacity_factor = float(allocation["host_capacity_factor"])
+            batch.host_capacity_reason = str(allocation["host_capacity_reason"])
+            batch.marginal_gain_mbps = float(allocation["marginal_gain_mbps"])
+            batch.autoscale_reason = str(allocation["reason"])
+
         initial = claim_continuous_transfer_batch(session, source, settings, task)
         if not initial:
             reconcile_continuous_source_waves(session, source)
@@ -2870,13 +2905,14 @@ def transfer_continuous(session, task: Task, settings) -> None:
         # Raiju slots that can start immediately retain a lease; every other
         # selected object goes back to READY so a newly-restored critical item
         # can take the next free slot without interrupting active I/O.
-        worker_ceiling = _continuous_raiju_worker_count(
-            session, source, len(initial), int(settings.max_throughput_mbps)
+        allocation = _continuous_raiju_worker_count(
+            session, source, len(initial), int(settings.max_throughput_mbps),
+            settings=settings, details=True,
         )
+        worker_ceiling = allocation["target"]
         for batch_id in {item.dispatch_batch_id for item in initial if item.dispatch_batch_id}:
             batch = session.get(TransferDispatchBatch, batch_id)
-            if batch:
-                batch.worker_target = worker_ceiling
+            record_allocation(batch, allocation)
         active, deferred = initial[:worker_ceiling], initial[worker_ceiling:]
         _return_unstarted_queue_items(session, deferred, "returned before execution; next priority evaluation")
         multipart_part_size = int(settings.multipart_part_size_mib) * 1024 * 1024
@@ -3107,9 +3143,11 @@ def transfer_continuous(session, task: Task, settings) -> None:
                 if not done:
                     refresh_transfer_queue_priorities(session, source.id, now=_continuous_source_now(source))
                     ready_count = _continuous_ready_item_count(session, source.id, utcnow())
-                    desired_workers = _continuous_raiju_worker_count(
-                        session, source, len(futures) + ready_count, int(settings.max_throughput_mbps)
+                    allocation = _continuous_raiju_worker_count(
+                        session, source, len(futures) + ready_count, int(settings.max_throughput_mbps), settings=settings
+                        , details=True
                     )
+                    desired_workers = allocation["target"]
                     occupied_slots = {entry[2] for entry in futures.values()}
                     free_slots = [slot for slot in range(1, desired_workers + 1) if slot not in occupied_slots]
                     # Prefer ordinary immediate admission when capacity exists.
@@ -3118,6 +3156,7 @@ def transfer_continuous(session, task: Task, settings) -> None:
                         if not replacement:
                             break
                         item = replacement[0]
+                        record_allocation(session.get(TransferDispatchBatch, item.dispatch_batch_id), allocation)
                         occupied_rate = sum(entry[3] for entry in futures.values())
                         rate = max(1.0, float(settings.max_throughput_mbps) * 125000 - occupied_rate)
                         submit(executor, item, slot, rate, max(desired_workers, len(futures) + 1))
@@ -3151,9 +3190,11 @@ def transfer_continuous(session, task: Task, settings) -> None:
                 # That makes expansion safe without interrupting an object or
                 # a multipart part already in progress.
                 ready_count = _continuous_ready_item_count(session, source.id, utcnow())
-                desired_workers = _continuous_raiju_worker_count(
-                    session, source, len(futures) + ready_count, int(settings.max_throughput_mbps)
+                allocation = _continuous_raiju_worker_count(
+                    session, source, len(futures) + ready_count, int(settings.max_throughput_mbps), settings=settings
+                    , details=True
                 )
+                desired_workers = allocation["target"]
                 # A reserved critical successor owns the selected normal
                 # Raiju's newly released slot. Start it first; this is the
                 # actual handoff rather than an advisory preemption event.
@@ -3163,8 +3204,7 @@ def transfer_continuous(session, task: Task, settings) -> None:
                     if successor is None or successor.state != TransferQueueState.LEASED:
                         continue
                     batch = session.get(TransferDispatchBatch, successor.dispatch_batch_id)
-                    if batch:
-                        batch.worker_target = max(desired_workers, len(futures) + 1)
+                    record_allocation(batch, {**allocation, "target": max(desired_workers, len(futures) + 1)})
                     occupied_rate = sum(entry[3] for entry in futures.values())
                     rate = max(1.0, float(settings.max_throughput_mbps) * 125000 - occupied_rate)
                     submit(executor, successor, slot, rate, max(desired_workers, len(futures) + 1))
@@ -3187,8 +3227,7 @@ def transfer_continuous(session, task: Task, settings) -> None:
                         continue
                     item = replacement[0]
                     batch = session.get(TransferDispatchBatch, item.dispatch_batch_id)
-                    if batch:
-                        batch.worker_target = desired_workers
+                    record_allocation(batch, allocation)
                     occupied_rate = sum(entry[3] for entry in futures.values())
                     remaining_starts = max(1, starts - free_slots.index(slot))
                     rate = max(1.0, (float(settings.max_throughput_mbps) * 125000 - occupied_rate) / remaining_starts)

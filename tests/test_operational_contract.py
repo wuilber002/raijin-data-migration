@@ -58,6 +58,17 @@ def test_fujin_restore_forecast_uses_immutable_profile_and_object_count(monkeypa
     assert (first, complete) == (32 * 3600, 34 * 3600)
 
 
+def test_fujin_restore_forecast_stays_inside_the_profile_tolerance(monkeypatch):
+    import app.main as main
+    source = Source(name="forecast-tolerance", s3_bucket="source", aws_region="us-east-1",
+                    destination_bucket="destination", backend_kind="SIMULATED")
+    monkeypatch.setattr(main, "_fujin_restore_profile", lambda _source: {
+        "bulk_restore_min_hours": 30, "bulk_restore_max_hours": 36,
+    })
+    first, complete = restore_forecast_seconds("BULK", source=source, object_count=100)
+    assert 30 * 3600 <= first <= complete <= 36 * 3600
+
+
 def test_simulated_destination_provenance_accepts_quoted_contract_etag():
     class Descriptor:
         etag = '"sim-content-identity"'
@@ -70,6 +81,57 @@ def test_simulated_destination_provenance_accepts_quoted_contract_etag():
     assert simulated_destination_provenance_matches(obj, Descriptor())
     Descriptor.metadata = {}
     assert not simulated_destination_provenance_matches(obj, Descriptor())
+
+
+def test_completion_report_keeps_retry_evidence_without_repeated_payload():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc)
+    with Session() as session:
+        settings = RuntimeSettings(id=1, max_throughput_mbps=100)
+        source = Source(id=201, name="retry-evidence", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", status="DISCOVERED")
+        wave = Wave(id=202, source_id=source.id, name="wave", max_bytes=100, restore_days=1,
+                    restore_tier="BULK", status="COMPLETED", restore_requested_virtual_at=now,
+                    last_restore_available_virtual_at=now + timedelta(seconds=10),
+                    predicted_restore_complete_seconds=10)
+        obj = ObjectRecord(id=203, source_id=source.id, wave_id=wave.id, object_key="one", size_bytes=100,
+                           state=ObjectState.VERIFIED, transferred_at=now + timedelta(seconds=20),
+                           delivery_integrity_status="OCI_ACCEPTED")
+        item = TransferQueueItem(id=204, source_id=source.id, wave_id=wave.id, object_id=obj.id,
+                                 size_bytes=100, state=TransferQueueState.TRANSFERRED, attempts=2,
+                                 transferred_at=now + timedelta(seconds=20), available_at=now + timedelta(seconds=10))
+        segment = TransferLaneSegment(id=205, source_id=source.id, wave_id=wave.id, queue_item_id=item.id,
+                                      started_at=now + timedelta(seconds=10), completed_at=now + timedelta(seconds=20),
+                                      bytes_transferred=100)
+        session.add_all([settings, source, wave, obj, item, segment]); session.commit()
+        report = source_completion_statistics(session, source, completed=True)
+        assert report["telemetry"]["items_with_retry"] == 1
+        assert report["telemetry"]["repeated_payload_bytes"] == 0
+
+
+def test_raikou_holds_scale_up_below_configured_marginal_gain():
+    from app.real_worker import _continuous_raiju_worker_count
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(id=211, name="marginal", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+        settings = RuntimeSettings(id=1, continuous_transfer_min_marginal_gain_mbps=15)
+        session.add_all([source, settings])
+        session.add(TransferDispatchBatch(source_id=source.id, worker_target=5))
+        session.add_all([
+            ObjectRecord(source_id=source.id, object_key=f"object-{index}", size_bytes=20_000_000,
+                         state=ObjectState.VERIFIED, transfer_elapsed_seconds=8,
+                         transferred_at=datetime.now(timezone.utc))
+            for index in range(5)
+        ])
+        session.commit()
+        decision = _continuous_raiju_worker_count(session, source, 20, 110, settings=settings, details=True)
+        assert decision["target"] == 5
+        assert "scale-up held" in decision["reason"]
 
 
 def test_wave_transfer_release_policy_is_durable_and_only_accepts_known_modes():
@@ -810,7 +872,8 @@ def test_dynamic_flight_board_uses_local_planned_and_actual_wave_timing():
     assert '"planned_lookahead": planned' in source
     assert 'observed_virtual_start = wave.transfer_started_virtual_at if simulated else None' in source
     assert 'lane_start = max(lane_start, restore_floor)' in source
-    assert '"transfer_lane": {"enabled": True, "phases": transfer_lane_phases}' in source
+    assert '"transfer_lane": {"enabled": True, "phases": transfer_lane_phases,' in source
+    assert '"idle_breakdown": lane_idle' in source
     assert 'transfer_lane_phases.append({' in source
     assert 'Only the durable TransferLaneSegment records created at' in source
     assert 'transfer = phase("TRANSFER", transfer_start, transfer_end,' not in source

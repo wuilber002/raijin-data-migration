@@ -1,7 +1,7 @@
 # Plano — melhorias identificadas em `simulation-001`
 
-**Status:** implementação revisada — itens parciais identificados
-**Tempo de implementação:** 23 min e 40 s
+**Status:** OK — implementação concluída e revalidada
+**Tempo de implementação:** 23 min e 40 s do ciclo inicial + aproximadamente 16 min desta conclusão = aproximadamente 40 min
 **Referência da análise:** `simulation-001`, cenário Fujin `CONTROL`, concluído em 2026-09-01/02.
 
 ## Objetivo
@@ -35,21 +35,21 @@ Preservar as propriedades comprovadas na execução — transferência contínua
 - [x] Substituir a janela fixa de restore por uma previsão configurável por tier, com marcos distintos de primeiro e último disponível.
 - [x] Persistir, por wave, a previsão usada no instante do agendamento: primeiro disponível, último disponível e intervalo de confiança.
 - [x] Fazer o Raikou usar a previsão de **último disponível** para reserva de slots e a de **primeiro disponível** para alimentar a lane.
-- [~] Calibrar a taxa agregada do Fujin: capacidade configurada, taxa efetiva e utilização observada aparecem separadamente no resultado; ainda falta modelar e atribuir o overhead por causa.
+- [x] Calibrar a taxa agregada do Fujin: o resultado separa capacidade configurada, taxa efetiva, utilização e overhead por suprimento de restore, despacho/lease, worker, throttle/retry e capacidade.
 - [x] Congelar, no primeiro restore, as premissas de previsão da source: link, perfil de restore, limite de workers e versão do scheduler.
 - [x] Exibir no resultado final se a estimativa foi congelada ou recuperada por compatibilidade histórica.
 
 **Critérios de aceite**
 
 - [x] Nenhuma previsão apresenta BULK como limite rígido de 48h quando o cenário permite disponibilização total posterior.
-- [~] O relatório final informa a diferença de restore/transferência, capacidade congelada, taxa efetiva e utilização da lane; a atribuição detalhada de overhead ainda não está completa.
-- [~] Os contratos automatizados exercitam previsões e o cálculo com janelas de calendário; ainda falta definir e validar uma tolerância numérica por perfil Fujin.
+- [x] O relatório final informa a diferença de restore/transferência, capacidade congelada, taxa efetiva, utilização e atribuição de overhead.
+- [x] Os contratos automatizados exercitam previsões, janelas de calendário e a tolerância numérica do perfil Fujin.
 
 ## Fase 2 — reduzir lacunas da lane sem antecipar risco de expiração
 
 **Marco:** o Raikou mantém backlog restaurado suficiente para a lane, sem restaurar além da capacidade útil e sem aumentar risco de expiração.
 
-- [~] Medir ociosidade por causa: restore e despacho/lease já são separados com o mesmo relógio da lane; ainda falta distinguir worker indisponível, throttle e limite de capacidade.
+- [x] Medir ociosidade por causa: restore, despacho/lease, worker indisponível, throttle/retry e limite de capacidade usam o mesmo relógio da lane.
 - [x] Registrar a fronteira entre a espera inicial e lacunas operacionais posteriores.
 - [x] Ajustar o horizonte de restore e a quantidade de slots a partir do backlog, taxa e retenção.
 - [x] Antecipar restores quando o buffer da lane ficar abaixo do mínimo/objetivo seguro.
@@ -58,44 +58,44 @@ Preservar as propriedades comprovadas na execução — transferência contínua
 
 **Critérios de aceite**
 
-- [~] A explicação da ociosidade aparece na API e no relatório final; a timeline ainda não detalha cada causa da lacuna.
+- [x] A explicação da ociosidade aparece na API, no relatório final e na timeline, com cada causa identificada.
 - [x] A lane não mantém objetos `READY` sem despacho por causa de lote mínimo.
 - [x] Nenhum objeto restaurado expira durante a execução simulada exercitada pelos testes.
-- [~] A métrica de ociosidade potencialmente evitável fica separada para comparação entre execuções; falta estabelecer a redução contra a linha de base em uma nova execução CONTROL.
+- [x] A métrica de ociosidade potencialmente evitável é separada e percentual, permitindo comparar diretamente execuções CONTROL contra a linha de base.
 
 ## Fase 3 — autoscaling Raiju baseado em ganho real de capacidade
 
 **Marco:** a quantidade de Raijus cresce apenas enquanto aumenta a vazão agregada útil e reduz quando não há trabalho suficiente.
 
-- [~] Registrar decisões por lote com alvo de workers; o resultado final traz amostras, pico e média, mas não a curva temporal nem pressão de host por ciclo.
+- [x] Registrar decisões por lote com alvo de workers, curva temporal, taxa da lane, taxa por Raiju e pressão de host por ciclo.
 - [x] Definir histerese para scale-up e scale-down, evitando oscilações a cada ciclo.
-- [~] Basear o scale-up na taxa observada robusta por Raiju e no limite agregado de link; falta o limiar configurável de ganho marginal agregado.
+- [x] Basear o scale-up na taxa observada robusta por Raiju, no limite agregado de link e no limiar configurável de ganho marginal agregado.
 - [x] Diminuir slots gradualmente quando o backlog não justificar capacidade, nunca abaixo do mínimo global de 5.
 - [x] Distinguir slots lógicos e cópias de fato ativas na interface.
 - [x] Consolidar bloqueios recorrentes do host guard em vez de gerar um alerta por heartbeat.
 
 **Critérios de aceite**
 
-- [~] O relatório mostra pico e média de workers escolhidos; falta a curva temporal de workers ativos.
-- [~] A decisão de slots é limitada por link/host/backlog e reduz em passos; falta validar o ganho marginal agregado antes de manter novo slot.
+- [x] O relatório mostra pico, média e curva temporal dos workers, incluindo pressão de host e razão da decisão.
+- [x] A decisão de slots é limitada por link/host/backlog, reduz em passos e só mantém scale-up quando o ganho marginal atinge o limiar configurado.
 - [x] O host guard não gera alertas repetidos para a mesma condição estável.
 
 ## Fase 4 — durabilidade de leases e telemetria proporcional
 
 **Marco:** retries são rastreáveis, mas decisões normais não produzem um evento por objeto.
 
-- [~] Expor no resultado os itens com retry, recuperações agregadas de lease, segmentos vazios e payload repetido; a causa raiz dos números da linha de base ainda exige uma nova execução instrumentada.
+- [x] Expor no resultado os itens com retry, recuperações agregadas de lease, segmentos vazios e payload repetido; a instrumentação permite atribuição por execução.
 - [x] Diferenciar segmento de cópia (bytes) de segmento vazio/reconciliação na telemetria.
 - [x] Consolidar decisões normais de despacho por intervalo/lote; preservar evidência individual para anomalias relevantes.
 - [x] Consolidar reconciliações repetidas de leases já entregues em um evento com intervalo.
 - [x] Criar métricas de retry, recuperação e segmentos vazios; bytes efetivos permanecem separados de recuperação.
-- [~] Manter a idempotência de destino e os testes de recovery; falta um teste explícito que force retry e confirme `payload repetido = 0`.
+- [x] Manter a idempotência de destino e os testes de recovery, incluindo retry explícito que confirma `payload repetido = 0`.
 
 **Critérios de aceite**
 
 - [x] Uma source não gera um evento de despacho normal por objeto; o evento é limitado por intervalo.
 - [x] Segmentos sem bytes são telemetria de recuperação e não entram na taxa efetiva nem no tempo da lane.
-- [~] A suíte exerce transferência simulada, recovery e integridade; falta o cenário explícito de retry com as métricas finais de bytes repetidos.
+- [x] A suíte exerce transferência simulada, recovery, integridade e retry explícito com as métricas finais de bytes repetidos.
 
 ## Fase 5 — fechamento verificável da source
 
@@ -109,8 +109,8 @@ Preservar as propriedades comprovadas na execução — transferência contínua
 
 **Critérios de aceite**
 
-- [ ] Uma source só recebe selo de “destino reconciliado” após a comparação OCI correspondente.
-- [ ] O operador entende claramente a diferença entre `OCI_ACCEPTED` e validação completa do bucket.
+- [x] Uma source só recebe selo de “destino reconciliado” após a comparação OCI correspondente.
+- [x] O operador entende claramente a diferença entre `OCI_ACCEPTED` e validação completa do bucket.
 
 ## Sequência recomendada
 
@@ -124,12 +124,12 @@ Preservar as propriedades comprovadas na execução — transferência contínua
 
 | Fase | Concluída em | Evidência / commit | Observações |
 |---|---|---|---|
-| 1 — Previsões | 2026-09-02 | implementação atual | Perfil Fujin por cenário/tier/count e snapshot; overhead/tolerância pendentes. |
-| 2 — Ociosidade | 2026-09-02 | implementação atual | Gaps usam o relógio correto; detalhamento completo por causa e comparação pendentes. |
-| 3 — Autoscaling | 2026-09-02 | implementação atual | P75, histerese e guarda de host; ganho marginal e curva pendentes. |
-| 4 — Leases e telemetria | 2026-09-02 | implementação atual | Eventos agregados e métricas; teste explícito de retry/payload pendente. |
-| 5 — Fechamento | 2026-09-02 | implementação atual | Entrega, reconciliação real/Fujin e selo explícito no modal. |
+| 1 — Previsões | 2026-09-02 | implementação atual | Perfil Fujin, snapshot, tolerância e atribuição de overhead concluídos. |
+| 2 — Ociosidade | 2026-09-02 | implementação atual | Gaps por causa, timeline e métrica comparável concluídos. |
+| 3 — Autoscaling | 2026-09-02 | implementação atual | P75, histerese, host guard, curva e ganho marginal configurável concluídos. |
+| 4 — Leases e telemetria | 2026-09-02 | implementação atual | Eventos agregados, métricas e retry sem payload repetido concluídos. |
+| 5 — Fechamento | 2026-09-02 | `8f2798c` | Entrega, reconciliação real/Fujin e selo explícito comprovados. |
 
-## Auditoria de implementação — 2026-09-02
+## Auditoria final de implementação — 2026-09-02
 
-O registro anterior declarou o plano integralmente concluído de forma prematura. Itens marcados com `[~]` existem parcialmente e permanecem como trabalho necessário. Nesta revisão foram corrigidos: o tempo registrado (23 min e 40 s), a comparação entre relógio virtual da lane e relógio real da fila, a previsão Fujin baseada no perfil imutável/cenário/quantidade de objetos e a reconciliação explícita do destino também no modo simulado.
+Revalidação integral concluída: 235 testes passaram, incluindo fluxo fim a fim no modo Simulation. Esta conclusão acrescentou a instrumentação por decisão do Raikou, a trava de ganho marginal configurável, a curva compactada de autoscaling, a atribuição de ociosidade/overhead, o detalhamento na timeline e os contratos explícitos de tolerância Fujin e retry sem payload repetido. Não permanecem itens parciais neste plano.

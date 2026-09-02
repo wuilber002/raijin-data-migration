@@ -690,6 +690,14 @@ class TransferDispatchBatch(Base):
     object_count: Mapped[int] = mapped_column(Integer, default=0)
     bytes_planned: Mapped[int] = mapped_column(BigInteger, default=0)
     worker_target: Mapped[int] = mapped_column(Integer, default=0)
+    # One compact sample per Raikou dispatch makes the autoscaling curve and
+    # its guardrails auditable without emitting an event per object.
+    observed_lane_mbps: Mapped[float] = mapped_column(Float, default=0)
+    observed_per_raiju_mbps: Mapped[float] = mapped_column(Float, default=0)
+    host_capacity_factor: Mapped[float] = mapped_column(Float, default=1)
+    host_capacity_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    marginal_gain_mbps: Mapped[float] = mapped_column(Float, default=0)
+    autoscale_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     state: Mapped[str] = mapped_column(String(24), default="CLAIMED", index=True)
     reason: Mapped[str] = mapped_column(Text, default="continuous lane dispatch")
     preempted_batch_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
@@ -900,6 +908,7 @@ class RuntimeSettings(Base):
     continuous_transfer_critical_batch_max_objects: Mapped[int] = mapped_column(Integer, default=20)
     continuous_transfer_critical_batch_max_bytes: Mapped[int] = mapped_column(BigInteger, default=256 * 1024**2)
     continuous_transfer_critical_priority: Mapped[int] = mapped_column(Integer, default=90)
+    continuous_transfer_min_marginal_gain_mbps: Mapped[float] = mapped_column(Float, default=5)
     restore_forecast_bulk_first_seconds: Mapped[int] = mapped_column(Integer, default=30 * 3600)
     restore_forecast_bulk_complete_seconds: Mapped[int] = mapped_column(Integer, default=72 * 3600)
     restore_forecast_standard_first_seconds: Mapped[int] = mapped_column(Integer, default=4 * 3600)
@@ -1192,6 +1201,7 @@ class RuntimeSettingsUpdate(BaseModel):
     continuous_transfer_critical_batch_max_objects: int = Field(default=20, ge=1, le=1_000)
     continuous_transfer_critical_batch_max_bytes: int = Field(default=256 * 1024**2, ge=1024**2, le=10 * 1024**3)
     continuous_transfer_critical_priority: int = Field(default=90, ge=1, le=100)
+    continuous_transfer_min_marginal_gain_mbps: float = Field(default=5, ge=0, le=1200)
     restore_forecast_bulk_first_seconds: int = Field(default=30 * 3600, ge=300, le=7 * 24 * 3600)
     restore_forecast_bulk_complete_seconds: int = Field(default=72 * 3600, ge=300, le=14 * 24 * 3600)
     restore_forecast_standard_first_seconds: int = Field(default=4 * 3600, ge=300, le=7 * 24 * 3600)
@@ -1339,6 +1349,7 @@ def create_schema() -> None:
         "continuous_transfer_critical_batch_max_objects": "INTEGER NOT NULL DEFAULT 20",
         "continuous_transfer_critical_batch_max_bytes": "BIGINT NOT NULL DEFAULT 268435456",
         "continuous_transfer_critical_priority": "INTEGER NOT NULL DEFAULT 90",
+        "continuous_transfer_min_marginal_gain_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 5",
         "restore_forecast_bulk_first_seconds": "INTEGER NOT NULL DEFAULT 108000",
         "restore_forecast_bulk_complete_seconds": "INTEGER NOT NULL DEFAULT 259200",
         "restore_forecast_standard_first_seconds": "INTEGER NOT NULL DEFAULT 14400",
@@ -1358,6 +1369,7 @@ def create_schema() -> None:
     existing_run_columns = {column["name"] for column in inspect(engine).get_columns("dynamic_pipeline_runs")}
     existing_restore_attempt_columns = {column["name"] for column in inspect(engine).get_columns("restore_attempts")}
     existing_lane_columns = {column["name"] for column in inspect(engine).get_columns("transfer_queue_items")}
+    existing_dispatch_columns = {column["name"] for column in inspect(engine).get_columns("transfer_dispatch_batches")}
     existing_discovery_change_columns = {column["name"] for column in inspect(engine).get_columns("discovery_changes")}
     with engine.begin() as connection:
         if engine.dialect.name == "postgresql" and "simulation_enabled" in existing_runtime_columns:
@@ -1378,6 +1390,16 @@ def create_schema() -> None:
         for column, sql_type in lane_columns.items():
             if column not in existing_lane_columns:
                 connection.execute(text(f"ALTER TABLE transfer_queue_items ADD COLUMN {column} {sql_type}"))
+        for column, sql_type in {
+            "observed_lane_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "observed_per_raiju_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "host_capacity_factor": "DOUBLE PRECISION NOT NULL DEFAULT 1",
+            "host_capacity_reason": "TEXT",
+            "marginal_gain_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "autoscale_reason": "TEXT",
+        }.items():
+            if column not in existing_dispatch_columns:
+                connection.execute(text(f"ALTER TABLE transfer_dispatch_batches ADD COLUMN {column} {sql_type}"))
         for column, sql_type in source_columns.items():
             if column not in existing_source_columns:
                 connection.execute(text(f"ALTER TABLE sources ADD COLUMN {column} {sql_type}"))
@@ -1869,6 +1891,7 @@ def settings_dict(settings: RuntimeSettings) -> dict:
             "continuous_transfer_critical_batch_max_objects": settings.continuous_transfer_critical_batch_max_objects,
             "continuous_transfer_critical_batch_max_bytes": settings.continuous_transfer_critical_batch_max_bytes,
             "continuous_transfer_critical_priority": settings.continuous_transfer_critical_priority,
+            "continuous_transfer_min_marginal_gain_mbps": settings.continuous_transfer_min_marginal_gain_mbps,
             "restore_forecast_bulk_first_seconds": settings.restore_forecast_bulk_first_seconds,
             "restore_forecast_bulk_complete_seconds": settings.restore_forecast_bulk_complete_seconds,
             "restore_forecast_standard_first_seconds": settings.restore_forecast_standard_first_seconds,
@@ -4227,8 +4250,16 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         if wave["started_at"] is not None
     ]
     timeline_start = min(submitted_points) if submitted_points else (min(all_timeline_points) if all_timeline_points else now)
+    lane_idle = None
+    if source_id is not None:
+        board_source = source_or_404(session, source_id)
+        observed_windows = _completion_windows([
+            (item["start_at"], item["end_at"]) for item in merged_observed
+        ])
+        lane_idle = _completion_lane_idle_breakdown(session, board_source, observed_windows)
     return {"waves": board_waves,
-            "transfer_lane": {"enabled": True, "phases": transfer_lane_phases},
+            "transfer_lane": {"enabled": True, "phases": transfer_lane_phases,
+                              "idle_breakdown": lane_idle},
             "generated_at": now, "source_id": source_id,
             "source_name": source_name,
             "timeline_start_at": timeline_start,
@@ -6342,7 +6373,9 @@ def _completion_lane_idle_breakdown(session: Session, source: Source,
     instead of inventing a cause from the duration alone.
     """
     result = {"initial_restore_wait_seconds": 0, "awaiting_restore_seconds": 0,
-              "dispatch_or_lease_seconds": 0, "unknown_seconds": 0}
+              "dispatch_or_lease_seconds": 0, "worker_unavailable_seconds": 0,
+              "throttle_retry_seconds": 0, "capacity_limited_seconds": 0,
+              "unknown_seconds": 0}
     if not windows:
         return result
     simulated = source.backend_kind == "SIMULATED"
@@ -6373,7 +6406,27 @@ def _completion_lane_idle_breakdown(session: Session, source: Source,
             TransferLaneSegment.started_at >= right[0],
         )) or 0
         if pending:
-            result["dispatch_or_lease_seconds"] += gap
+            # The batch that resumes work is the durable scheduler decision
+            # nearest to this gap. Its captured allocation evidence lets the
+            # final report distinguish an empty worker pool, a host/link
+            # guard and a normal dispatch/lease transition.
+            batch = session.scalar(select(TransferDispatchBatch).where(
+                TransferDispatchBatch.source_id == source.id,
+                TransferDispatchBatch.started_at >= right[0],
+            ).order_by(TransferDispatchBatch.started_at, TransferDispatchBatch.id).limit(1))
+            reason = " ".join(filter(None, [
+                getattr(batch, "autoscale_reason", None),
+                getattr(batch, "host_capacity_reason", None),
+                getattr(batch, "reason", None),
+            ])).lower()
+            if batch is not None and int(batch.worker_target or 0) <= 0:
+                result["worker_unavailable_seconds"] += gap
+            elif "throttl" in reason or "retry" in reason:
+                result["throttle_retry_seconds"] += gap
+            elif batch is not None and (float(batch.host_capacity_factor or 1) < 1 or "marginal gain" in reason):
+                result["capacity_limited_seconds"] += gap
+            else:
+                result["dispatch_or_lease_seconds"] += gap
         else:
             result["awaiting_restore_seconds"] += gap
     return result
@@ -6489,6 +6542,37 @@ def source_completion_statistics(session: Session, source: Source,
         TransferDispatchBatch.source_id == source.id,
         TransferDispatchBatch.worker_target > 0,
     ))]
+    autoscale_rows = list(session.execute(select(
+        TransferDispatchBatch.started_at, TransferDispatchBatch.worker_target,
+        TransferDispatchBatch.observed_lane_mbps, TransferDispatchBatch.observed_per_raiju_mbps,
+        TransferDispatchBatch.host_capacity_factor, TransferDispatchBatch.host_capacity_reason,
+        TransferDispatchBatch.marginal_gain_mbps, TransferDispatchBatch.autoscale_reason,
+    ).where(TransferDispatchBatch.source_id == source.id).order_by(
+        TransferDispatchBatch.started_at, TransferDispatchBatch.id
+    )))
+    # A completed source can have tens of thousands of dispatch decisions.
+    # The modal needs a representative time series, not another unbounded
+    # object list. Keep chronological samples and always retain the terminal
+    # decision.
+    if len(autoscale_rows) > 120:
+        stride = math.ceil(len(autoscale_rows) / 120)
+        autoscale_rows = autoscale_rows[::stride]
+        if autoscale_rows[-1] != session.execute(select(
+            TransferDispatchBatch.started_at, TransferDispatchBatch.worker_target,
+            TransferDispatchBatch.observed_lane_mbps, TransferDispatchBatch.observed_per_raiju_mbps,
+            TransferDispatchBatch.host_capacity_factor, TransferDispatchBatch.host_capacity_reason,
+            TransferDispatchBatch.marginal_gain_mbps, TransferDispatchBatch.autoscale_reason,
+        ).where(TransferDispatchBatch.source_id == source.id).order_by(
+            TransferDispatchBatch.started_at.desc(), TransferDispatchBatch.id.desc()
+        ).limit(1)).one():
+            autoscale_rows.append(session.execute(select(
+                TransferDispatchBatch.started_at, TransferDispatchBatch.worker_target,
+                TransferDispatchBatch.observed_lane_mbps, TransferDispatchBatch.observed_per_raiju_mbps,
+                TransferDispatchBatch.host_capacity_factor, TransferDispatchBatch.host_capacity_reason,
+                TransferDispatchBatch.marginal_gain_mbps, TransferDispatchBatch.autoscale_reason,
+            ).where(TransferDispatchBatch.source_id == source.id).order_by(
+                TransferDispatchBatch.started_at.desc(), TransferDispatchBatch.id.desc()
+            ).limit(1)).one())
     retry_items = session.scalar(select(func.count(TransferQueueItem.id)).where(
         TransferQueueItem.source_id == source.id, TransferQueueItem.attempts > 1,
     )) or 0
@@ -6500,6 +6584,10 @@ def source_completion_statistics(session: Session, source: Source,
         func.count(case((TransferLaneSegment.bytes_transferred <= 0, TransferLaneSegment.id))),
         func.coalesce(func.sum(TransferLaneSegment.bytes_transferred), 0),
     ).where(TransferLaneSegment.source_id == source.id)).one()
+    potentially_avoidable_idle = sum(int(lane_idle.get(key, 0) or 0) for key in (
+        "dispatch_or_lease_seconds", "worker_unavailable_seconds",
+        "throttle_retry_seconds", "capacity_limited_seconds",
+    ))
     return {
         "available": True,
         "estimate_created_at": source.completion_estimate_created_at,
@@ -6509,11 +6597,22 @@ def source_completion_statistics(session: Session, source: Source,
                      "difference_seconds": actual_transfer_seconds - int(estimated_transfer),
                      "effective_mbps": round(effective_mbps, 2),
                      "configured_mbps": frozen_link_mbps,
-                     "utilization_percent": round(100 * effective_mbps / max(1, frozen_link_mbps), 1)},
+                     "utilization_percent": round(100 * effective_mbps / max(1, frozen_link_mbps), 1),
+                     "overhead": {
+                         "link_model_seconds": int(configured_estimate),
+                         "above_link_model_seconds": max(0, actual_transfer_seconds - int(configured_estimate)),
+                         "idle_restore_supply_seconds": int(lane_idle.get("awaiting_restore_seconds", 0)),
+                         "idle_dispatch_or_lease_seconds": int(lane_idle.get("dispatch_or_lease_seconds", 0)),
+                         "idle_worker_unavailable_seconds": int(lane_idle.get("worker_unavailable_seconds", 0)),
+                         "idle_throttle_retry_seconds": int(lane_idle.get("throttle_retry_seconds", 0)),
+                         "idle_capacity_limited_seconds": int(lane_idle.get("capacity_limited_seconds", 0)),
+                     }},
         "restore": {"estimated_seconds": estimated_restore_seconds, "actual_seconds": actual_restore_seconds,
                     "difference_seconds": actual_restore_seconds - estimated_restore_seconds},
         "idle": {"transfer_lane_seconds": _completion_gap_seconds(actual_lane_windows),
                  "restore_queue_seconds": _completion_gap_seconds(actual_restore_windows),
+                 "potentially_avoidable_seconds": potentially_avoidable_idle,
+                 "potentially_avoidable_percent": round(100 * potentially_avoidable_idle / max(1, _completion_gap_seconds(actual_lane_windows)), 1),
                  **lane_idle},
         "closure": {
             "delivery_accepted_objects": int(delivery_accepted),
@@ -6528,7 +6627,15 @@ def source_completion_statistics(session: Session, source: Source,
             "deep_audited_objects": int(deep_verified),
         },
         "autoscaling": {"samples": len(worker_targets), "peak_workers": max(worker_targets, default=0),
-                        "average_workers": round(sum(worker_targets) / len(worker_targets), 1) if worker_targets else 0},
+                        "average_workers": round(sum(worker_targets) / len(worker_targets), 1) if worker_targets else 0,
+                        "minimum_marginal_gain_mbps": float(settings.continuous_transfer_min_marginal_gain_mbps or 0),
+                        "curve": [{"at": at, "workers": int(workers or 0),
+                                   "lane_mbps": round(float(lane_mbps or 0), 2),
+                                   "per_raiju_mbps": round(float(per_raiju or 0), 2),
+                                   "host_capacity_factor": round(float(host_factor or 1), 2),
+                                   "host_reason": host_reason, "marginal_gain_mbps": round(float(marginal or 0), 2),
+                                   "reason": reason}
+                                  for at, workers, lane_mbps, per_raiju, host_factor, host_reason, marginal, reason in autoscale_rows]},
         "telemetry": {"items_with_retry": int(retry_items or 0),
                       "lease_recovery_events": int(recovery_events or 0),
                       "lane_segments": int(segments_total or 0),
