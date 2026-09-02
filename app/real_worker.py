@@ -36,6 +36,7 @@ from app.backend_contracts import (
     DescribeRestoreBatchRequest,
     ExecutionContext,
     HeadObjectRequest,
+    RestoreAvailabilityRequest,
     ListObjectsRequest,
     LogicalTransferRequest,
     MultipartCommitRequest,
@@ -1453,24 +1454,33 @@ def poll_restore_simulated(
     ready_expiries: dict[int, datetime | None] = {}
     recommended_real_delays: list[float] = []
     started = time.monotonic()
-    for index, obj in enumerate(pending_archives, start=1):
-        result = port.head_object(
-            HeadObjectRequest(
+    # FUJIN exposes this bounded, wave-scoped bulk probe only in simulation.
+    # It evaluates the exact same per-object restore/expiry predicates as the
+    # old HeadObject loop, but avoids one HTTP request and DB transaction per
+    # object.  REAL mode intentionally remains below with its AWS-safe
+    # per-object HeadObject polling, rate limiter and retry handling.
+    object_by_identity = {(obj.object_key, obj.version_id): obj for obj in pending_archives}
+    for start in range(0, len(pending_archives), RESTORE_POLL_HEAD_BATCH_SIZE):
+        slice_objects = pending_archives[start:start + RESTORE_POLL_HEAD_BATCH_SIZE]
+        result = port.restore_availability(
+            RestoreAvailabilityRequest(
                 context=context,
-                object=ObjectIdentity(
+                bucket=source.s3_bucket,
+                objects=[ObjectIdentity(
                     bucket=source.s3_bucket,
                     key=obj.object_key,
                     version_id=obj.version_id,
-                ),
+                ) for obj in slice_objects],
             )
         )
-        if result.exists and not result.restore_in_progress and result.restore_expires_at:
-            ready_expiries[obj.id] = result.restore_expires_at
-        elif result.simulator_recommended_real_poll_seconds is not None:
+        for ready in result.ready:
+            obj = object_by_identity.get((ready.key, ready.version_id))
+            if obj is not None:
+                ready_expiries[obj.id] = ready.restore_expires_at
+        if result.simulator_recommended_real_poll_seconds is not None:
             recommended_real_delays.append(result.simulator_recommended_real_poll_seconds)
-        if index % RESTORE_POLL_HEAD_BATCH_SIZE == 0:
-            task.lease_expires_at = utcnow() + timedelta(seconds=settings.task_lease_seconds)
-            session.commit()
+        task.lease_expires_at = utcnow() + timedelta(seconds=settings.task_lease_seconds)
+        session.commit()
     poll_elapsed = time.monotonic() - started
     # A transfer worker can discover a genuine expiry while this polling
     # worker is collecting per-object evidence. Refresh the wave before any
@@ -1482,7 +1492,7 @@ def poll_restore_simulated(
     persist_restore_poll_metrics(
         wave,
         {
-            "requests": len(pending_archives),
+            "requests": math.ceil(len(pending_archives) / RESTORE_POLL_HEAD_BATCH_SIZE),
             "throttle_retries": 0,
             "elapsed_seconds": poll_elapsed,
         },
@@ -3440,6 +3450,26 @@ def task_kinds_for_role(role: str) -> frozenset[str] | None:
     raise RuntimeError("RAIJIN_WORKER_ROLE must be raikou/governance, raiju/transfer, or all")
 
 
+def worker_loop_sleep_seconds(role: str = WORKER_ROLE) -> float:
+    """Keep simulation responsive without turning an idle worker into DB spin.
+
+    A ready simulated task is checked once per second.  With no due task, the
+    normal five-second idle cadence is retained.  REAL workers always retain
+    their established cadence; AWS polling schedules are unchanged.
+    """
+    if not runtime_context.is_simulation:
+        return 5.0
+    allowed_kinds = task_kinds_for_role(role)
+    with SessionLocal() as session:
+        due = (Task.state == TaskState.READY) & (Task.available_at <= utcnow() + timedelta(seconds=1))
+        query = select(Task.id).join(Wave).join(Source).where(
+            due, Wave.status != "PAUSED", Source.archived_at.is_(None)
+        )
+        if allowed_kinds is not None:
+            query = query.where(Task.kind.in_(allowed_kinds))
+        return 1.0 if session.scalar(query.limit(1)) is not None else 5.0
+
+
 def run_once(role: str = WORKER_ROLE) -> None:
     from app.runtime_context import mode_switch_requested
     if mode_switch_requested():
@@ -3596,4 +3626,4 @@ if __name__ == "__main__":
             time.sleep(failure_delay)
             failure_delay = min(60, failure_delay * 2)
             continue
-        time.sleep(5)
+        time.sleep(worker_loop_sleep_seconds())

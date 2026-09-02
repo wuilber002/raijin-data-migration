@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import create_engine, select
 
 from app.simulation_engine import SimulationEngine
+from app.backend_contracts import ObjectIdentity
 from app.simulation_migrations import migrate
 from app.simulation_schema import InjectedFault, SimulationClock, VirtualBucket, VirtualObject
 from app.simulated_data import consume_and_discard
@@ -63,6 +64,25 @@ def test_materialization_preserves_exact_logical_totals(virtual_cloud):
     assert len(objects) == 7
     assert sum(item.size_bytes for item in objects) == 10_001
     assert {item.key.split("/", 1)[0] for item in objects} == {"app", "archive"}
+
+
+def test_bulk_restore_availability_matches_per_object_readiness(virtual_cloud):
+    engine, execution, _materialized = virtual_cloud
+    objects = engine.list_objects(execution.id, "source", "", None, 100).objects
+    for position, item in enumerate(objects):
+        assert engine.restore_object(
+            execution.id, "source", item.key, "BULK", 1, f"bulk-{position}"
+        ).accepted
+
+    observed = engine.restore_availability(
+        execution.id,
+        "source",
+        [ObjectIdentity(bucket="source", key=item.key) for item in objects],
+    )
+
+    assert observed.pending_count == 0
+    assert {item.key for item in observed.ready} == {item.key for item in objects}
+    assert all(item.restore_expires_at for item in observed.ready)
 
 
 def test_phase_hold_freezes_virtual_time_without_pausing_real_task_time(virtual_cloud):

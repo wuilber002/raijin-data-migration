@@ -127,6 +127,31 @@ class HeadObjectResult(BaseModel):
     simulator_recommended_real_poll_seconds: float | None = Field(default=None, ge=0)
 
 
+class RestoreAvailabilityRequest(BaseModel):
+    """Simulator-only bulk availability probe for one bounded wave slice.
+
+    AWS has no equivalent multi-key HeadObject API.  This contract is therefore
+    deliberately not part of ``SourceCloudPort``: production keeps its bounded
+    per-object HeadObject polling and its AWS rate limits.
+    """
+    context: ExecutionContext
+    bucket: str = Field(min_length=1, max_length=255)
+    objects: list[ObjectIdentity] = Field(min_length=1, max_length=1000)
+
+
+class RestoreAvailabilityItem(BaseModel):
+    key: str
+    version_id: str | None = None
+    restore_expires_at: datetime
+
+
+class RestoreAvailabilityResult(BaseModel):
+    ready: list[RestoreAvailabilityItem] = Field(default_factory=list)
+    pending_count: int = Field(ge=0)
+    simulator_virtual_now: datetime
+    simulator_recommended_real_poll_seconds: float | None = Field(default=None, ge=0)
+
+
 class ReadRangeRequest(BaseModel):
     context: ExecutionContext
     object: ObjectIdentity

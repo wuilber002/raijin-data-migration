@@ -13,6 +13,9 @@ from sqlalchemy import and_, func, select, update
 
 from app.backend_contracts import (
     HeadObjectResult,
+    ObjectIdentity,
+    RestoreAvailabilityItem,
+    RestoreAvailabilityResult,
     ListObjectsPage,
     ObjectDescriptor,
     RestoreObjectResult,
@@ -495,6 +498,68 @@ class SimulationEngine:
                     if in_progress and item.restore_available_at
                     else None
                 ),
+            )
+
+    def restore_availability(
+        self, execution_id: str, bucket_name: str, objects: list[ObjectIdentity]
+    ) -> RestoreAvailabilityResult:
+        """Return readiness changes for up to one wave slice in one transaction.
+
+        This is a FUJIN transport optimization, not a simulation shortcut: it
+        evaluates the same per-object restore/expiry predicates as head_object
+        at one coherent virtual timestamp and returns per-object expiry proof.
+        """
+        requested = {(item.key, item.version_id): item for item in objects}
+        keys = {item.key for item in objects}
+        with self.store.sessions() as session:
+            execution, scenario, clock = self._execution_scope(session, execution_id)
+            bucket = session.scalar(select(VirtualBucket).where(
+                VirtualBucket.scenario_id == scenario.id, VirtualBucket.name == bucket_name,
+            ))
+            if bucket is None:
+                raise LookupError(f"Virtual bucket {bucket_name} does not exist")
+            rows = list(session.scalars(select(VirtualObject).where(
+                VirtualObject.bucket_id == bucket.id, VirtualObject.object_key.in_(keys),
+            )))
+            by_key = {row.object_key: row for row in rows}
+            missing = keys - set(by_key)
+            if missing:
+                raise LookupError(f"Virtual object {sorted(missing)[0]} does not exist")
+            now = virtual_now(clock)
+            ready: list[RestoreAvailabilityItem] = []
+            pending_count = 0
+            next_ready_seconds: list[float] = []
+            changed = False
+            for key, version_id in requested:
+                row = by_key[key]
+                expired = _expire_restore_if_needed(row, now)
+                available = _restore_is_available(row, now)
+                if expired:
+                    changed = True
+                elif available:
+                    if row.restore_state != "AVAILABLE":
+                        row.restore_state = "AVAILABLE"
+                        changed = True
+                    if row.restore_expires_at:
+                        ready.append(RestoreAvailabilityItem(
+                            key=key, version_id=version_id,
+                            restore_expires_at=row.restore_expires_at,
+                        ))
+                else:
+                    pending_count += 1
+                    if row.restore_requested_at and row.restore_available_at:
+                        next_ready_seconds.append(max(
+                            0.05,
+                            (aware(row.restore_available_at) - now).total_seconds()
+                            / max(clock.acceleration, 0.001),
+                        ))
+            if changed:
+                session.commit()
+            return RestoreAvailabilityResult(
+                ready=ready,
+                pending_count=pending_count,
+                simulator_virtual_now=now,
+                simulator_recommended_real_poll_seconds=min(next_ready_seconds) if next_ready_seconds else None,
             )
 
     def restore_object(

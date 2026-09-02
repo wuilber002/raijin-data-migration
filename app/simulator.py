@@ -28,6 +28,7 @@ from app.simulator_store import (
 from app.simulation_engine import SimulationEngine, SimulatedNetworkUnavailable
 from app.backend_contracts import (
     HeadObjectRequest,
+    RestoreAvailabilityRequest,
     ListObjectsRequest,
     ReadRangeRequest,
     RestoreObjectRequest,
@@ -223,6 +224,7 @@ def handshake() -> SimulatorHandshake:
                 "logical-transfer-v1",
                 "deep-audit-replay-v1",
                 "virtual-clock-v1",
+                "bulk-restore-availability-v1",
                 "scenario-templates-v1",
                 "editable-template-snapshots-v1",
                 "network-profile-v1",
@@ -481,6 +483,16 @@ def source_head_object(payload: HeadObjectRequest) -> dict:
     try:
         return engine().head_object(
             str(payload.context.execution_id), payload.object.bucket, payload.object.key
+        ).model_dump(mode="json")
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post("/v1/cloud/source/restore-availability")
+def source_restore_availability(payload: RestoreAvailabilityRequest) -> dict:
+    try:
+        return engine().restore_availability(
+            str(payload.context.execution_id), payload.bucket, payload.objects
         ).model_dump(mode="json")
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error

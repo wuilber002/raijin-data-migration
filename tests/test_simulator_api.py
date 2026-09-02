@@ -16,6 +16,7 @@ from app.backend_contracts import (
     PutObjectRequest,
     ReadRangeRequest,
     RestoreObjectRequest,
+    RestoreAvailabilityRequest,
 )
 from app.simulation_migrations import migrate
 from app import simulator
@@ -114,6 +115,14 @@ def test_simulator_api_exposes_versioned_end_to_end_data_path(tmp_path, monkeypa
         ).model_dump(mode="json"),
     )
     assert restore["accepted"] is True
+
+    status, availability = post(
+        "/v1/cloud/source/restore-availability",
+        RestoreAvailabilityRequest(context=context, bucket="source", objects=[item]).model_dump(mode="json"),
+    )
+    assert status == 200
+    assert availability["pending_count"] == 0
+    assert availability["ready"][0]["key"] == item.key
 
     read_request = ReadRangeRequest(
         context=context, object=item, offset=0, length=item.size_bytes

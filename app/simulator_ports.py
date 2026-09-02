@@ -16,6 +16,8 @@ from app.backend_contracts import (
     DestinationCloudPort,
     HeadObjectRequest,
     HeadObjectResult,
+    RestoreAvailabilityRequest,
+    RestoreAvailabilityResult,
     ListObjectsPage,
     ListObjectsRequest,
     MultipartCommitRequest,
@@ -143,6 +145,11 @@ class SimulatedSourcePort(SourceCloudPort):
 
     def head_object(self, request: HeadObjectRequest) -> HeadObjectResult:
         return self.transport.json("/v1/cloud/source/head-object", request, HeadObjectResult)
+
+    def restore_availability(self, request: RestoreAvailabilityRequest) -> RestoreAvailabilityResult:
+        return self.transport.json(
+            "/v1/cloud/source/restore-availability", request, RestoreAvailabilityResult
+        )
 
     def restore_object(self, request: RestoreObjectRequest) -> RestoreObjectResult:
         return self.transport.json(
