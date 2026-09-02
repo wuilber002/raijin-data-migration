@@ -4371,13 +4371,27 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             (item["start_at"], item["end_at"]) for item in merged_observed
         ])
         lane_idle = _completion_lane_idle_breakdown(session, board_source, observed_windows)
+    timeline_content_end = max(all_timeline_points) if all_timeline_points else now + timedelta(hours=1)
+    # While a source is still running, reserve a small, explicit horizon after
+    # the latest known work.  Without it a planned restore or lane forecast
+    # lands on the right border and can be mistaken for the end of the whole
+    # migration.  A completed pipeline intentionally has no such padding: its
+    # final interval then ends at the end of the scale.
+    active_pipeline = source_id is not None and session.scalar(select(DynamicPipelineRun.id).where(
+        DynamicPipelineRun.source_id == source_id,
+        DynamicPipelineRun.status.not_in(["COMPLETED", "HISTORICAL"]),
+    ).limit(1)) is not None
+    timeline_future_padding_seconds = 2 * 24 * 60 * 60 if active_pipeline else 0
+    timeline_end = timeline_content_end + timedelta(seconds=timeline_future_padding_seconds)
     return {"waves": board_waves,
             "transfer_lane": {"enabled": True, "phases": transfer_lane_phases,
                               "idle_breakdown": lane_idle},
             "generated_at": now, "source_id": source_id,
             "source_name": source_name,
             "timeline_start_at": timeline_start,
-            "timeline_end_at": max(all_timeline_points) if all_timeline_points else now + timedelta(hours=1),
+            "timeline_content_end_at": timeline_content_end,
+            "timeline_future_padding_seconds": timeline_future_padding_seconds,
+            "timeline_end_at": timeline_end,
             "truncated": len(rows) >= 500}
 
 

@@ -1082,6 +1082,34 @@ def test_flight_board_projects_only_durable_ready_backlog_and_recovers_zero_widt
         assert board["timeline_end_at"] == projected["end_at"]
 
 
+def test_flight_board_adds_future_horizon_only_while_pipeline_is_active():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session() as session:
+        source = Source(name="timeline-horizon", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        session.add(DynamicPipelineRun(source_id=source.id, status="IN_PROGRESS"))
+        session.add(Wave(source_id=source.id, name="restore", max_bytes=1024, restore_days=1,
+                         restore_tier="BULK", planner_mode="DYNAMIC", status="RESTORE_SCHEDULED",
+                         planned_restore_at=now, planned_transfer_start_at=now + timedelta(hours=48)))
+        session.commit()
+
+        active = flight_board(source_id=source.id, run_id=None, session=session)
+        assert active["timeline_future_padding_seconds"] == 2 * 24 * 60 * 60
+        assert active["timeline_end_at"] == active["timeline_content_end_at"] + timedelta(days=2)
+
+        session.scalar(select(DynamicPipelineRun).where(
+            DynamicPipelineRun.source_id == source.id
+        )).status = "COMPLETED"
+        session.commit()
+        completed = flight_board(source_id=source.id, run_id=None, session=session)
+        assert completed["timeline_future_padding_seconds"] == 0
+        assert completed["timeline_end_at"] == completed["timeline_content_end_at"]
+
+
 def test_simulation_clock_advances_only_through_durable_decisions():
     worker = Path("app/real_worker.py").read_text(encoding="utf-8")
     store = Path("app/simulator_store.py").read_text(encoding="utf-8")

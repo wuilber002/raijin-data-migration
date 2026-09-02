@@ -565,6 +565,11 @@ def test_flight_board_supports_manual_refresh_and_bounded_loading():
     assert ".flight-board-restore-row .flight-board-phase.restore-saving{top:11px}" in page
 
 
+def test_flight_board_repeats_the_time_axis_below_the_restore_rows():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert '${chart}${flightBoardAxis(start,end)}</div><table class="flight-board-table"' in page
+
+
 def test_refresh_restores_the_current_view_and_selected_source_without_duplicate_loads():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
 
