@@ -1083,17 +1083,22 @@ refreshAll();
           <tr><th>Lane contínua</th><td>${completionDuration(idle.transfer_lane_seconds)}</td><td>Lacunas entre janelas de transferência; não inclui preparação nem o período após a última cópia.</td></tr>
           <tr><th>Fila de restores</th><td>${completionDuration(idle.restore_queue_seconds)}</td><td>Lacunas entre janelas de restore; ajuda a identificar espaço para antecipação do scheduler.</td></tr>
         </tbody></table>
-        <p class="hint">Previsão de transferência registrada em ${report.estimate_created_at?new Date(report.estimate_created_at).toLocaleString(raijinLocale()):'início não registrado (estimativa recuperada da capacidade configurada)'} · link configurado: ${fmt(report.configured_link_mbps)} Mbps · evidências: ${fmt(evidence.restore_windows)} janela(s) de restore e ${fmt(evidence.transfer_windows)} janela(s) da lane em ${fmt(evidence.waves)} wave(s).</p>`;
+        <p class="hint">Previsão de transferência registrada em ${report.estimate_created_at?new Date(report.estimate_created_at).toLocaleString(raijinLocale()):'início não registrado (estimativa recuperada da capacidade configurada)'} · link configurado: ${fmt(report.configured_link_mbps)} Mbps.</p>
+        <p class="hint"><b>Base de cálculo:</b> ${fmt(evidence.restore_windows)} período(s) consolidados de restore e ${fmt(evidence.transfer_windows)} período(s) consolidados da lane nas ${fmt(evidence.waves)} wave(s) da source. Waves restaurando ao mesmo tempo contam como um único período; Raijus transferindo em paralelo também contam como um único período.</p>`;
     }catch(error){$('#source-completion-content').innerHTML=`<p class="error">${escape(error.message)}</p>`}
   }
   (()=>{
     const ensureArrivalButton=()=>{
-      const row=$('.source-actions');if(!row||$('#source-completion-action'))return;
-      const button=document.createElement('button');button.type='button';button.id='source-completion-action';button.className='secondary';button.title='Resumo final de chegada da source';button.textContent='🏁 Chegada';button.onclick=showSourceCompletion;row.insertBefore(button,$('#source-lifecycle-action'));
+      // Older loaded pages may still have the former top-row action.
+      $('#source-completion-action')?.remove();
+      const actions=$('#source-summary-actions');if(!actions)return;
+      const button=document.createElement('button');button.type='button';button.id='source-completion-action';button.className='secondary';button.title='Tempos previstos e realizados desta source';button.textContent='🏁 Tempos';button.onclick=showSourceCompletion;actions.append(button);
     };
     ensureArrivalButton();
     const priorSelectSource=selectSource;
-    selectSource=async function(){ensureArrivalButton();const button=$('#source-completion-action');if(button)button.disabled=!$('#source-select').value;return priorSelectSource()};
+    selectSource=async function(){const result=await priorSelectSource();ensureArrivalButton();return result};
+    const loadSummaryWithArrival=loadSummary;
+    loadSummary=async function(){await loadSummaryWithArrival();ensureArrivalButton()};
   })();
 </script>
 <style>
