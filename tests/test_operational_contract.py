@@ -22,7 +22,7 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 
 from datetime import datetime, timedelta, timezone
 
-from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, continuous_lane_capacity_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, internal_rate_value, list_sources, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_statistics, source_key_in_scope, transfer_queue, wave_cost_estimate
+from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, continuous_lane_capacity_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, internal_rate_value, list_sources, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_report, source_completion_statistics, source_key_in_scope, source_summary, transfer_queue, wave_cost_estimate
 from app.real_worker import GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, require_new_restore_approval, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, task_kinds_for_role, validate_restore_preflight
 
 
@@ -1133,6 +1133,24 @@ def test_source_arrival_report_is_hidden_until_integrity_completion():
         source = Source(name="arrival-pending", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
         session.add(source); session.flush()
         assert source_completion_statistics(session, source, completed=False)["available"] is False
+
+
+def test_source_summary_keeps_final_report_out_of_selection_path():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="final-report-on-demand", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", status="DISCOVERED")
+        session.add(source); session.flush()
+        session.add(ObjectRecord(source_id=source.id, object_key="done", size_bytes=1,
+                                 state=ObjectState.VERIFIED,
+                                 delivery_integrity_status="OCI_ACCEPTED"))
+        session.commit()
+        summary = source_summary(source.id, session=session)
+        assert summary["completion_statistics_available"] is True
+        assert "completion_statistics" not in summary
+        assert "available" in source_completion_report(source.id, session=session)
 
 
 def test_dynamic_prediction_prefers_p75_history_then_conservative_link_model():

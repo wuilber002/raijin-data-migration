@@ -4820,6 +4820,13 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
              "inventory_status": s.status,
              "pipeline_status": (latest_pipeline_by_source[s.id].status
                                  if s.id in latest_pipeline_by_source else "NOT_STARTED"),
+             # Keep source selection lightweight.  The UI uses these compact
+             # pipeline attributes to render its controls without asking for
+             # the complete source summary a second time.
+             "pipeline_scheduled_restores": (bool(latest_pipeline_by_source[s.id].scheduled_restores)
+                                             if s.id in latest_pipeline_by_source else False),
+             "pipeline_restore_days": (int(latest_pipeline_by_source[s.id].restore_days or 0)
+                                       if s.id in latest_pipeline_by_source else 0),
              "destination_validation": {"status": s.destination_validation_status, "at": s.destination_validation_at,
                                         "missing": s.destination_missing_count, "size_mismatches": s.destination_size_mismatch_count},
              "migration_status": migration_status(s), "operational_status": operational_status(s),
@@ -5375,7 +5382,9 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
         .order_by(DynamicPipelineRun.id.desc()).limit(1)
     )
     return {"source_id": source_id, "objects": count, "bytes": bytes_total, "object_states": states, "migration_status": migration_status,
-            "completion_statistics": source_completion_statistics(session, source, completed=migration_status == "COMPLETED"),
+            # Source selection must stay inexpensive. The final report has its
+            # own endpoint and is calculated only when the operator opens it.
+            "completion_statistics_available": migration_status == "COMPLETED",
             "pipeline": {"status": pipeline.status if pipeline else "NOT_STARTED",
                          "run_id": pipeline.id if pipeline else None,
                          "scheduled_restores": bool(pipeline.scheduled_restores) if pipeline else False,
@@ -5395,6 +5404,32 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
                           "objects_per_second": round(count / discovery_duration_seconds, 2) if discovery_duration_seconds else 0,
                           "pages_per_minute": round(source.discovery_pages_completed * 60 / discovery_duration_seconds, 2) if discovery_duration_seconds else 0,
                           "can_resume": bool(source.discovery_continuation_token)}}
+
+
+@app.get("/api/sources/{source_id}/completion-statistics")
+def source_completion_report(source_id: int, session: Session = Depends(get_session)) -> dict:
+    """Calculate the expensive final report only when the operator requests it."""
+    source = source_or_404(session, source_id)
+    current = ObjectRecord.is_current_revision.is_(True)
+    count = session.scalar(select(func.count(ObjectRecord.id)).where(
+        ObjectRecord.source_id == source.id, current
+    )) or 0
+    verified = session.scalar(select(func.count(ObjectRecord.id)).where(
+        ObjectRecord.source_id == source.id, current,
+        ObjectRecord.state == ObjectState.VERIFIED
+    )) or 0
+    accepted = session.scalar(select(func.count(ObjectRecord.id)).where(
+        ObjectRecord.source_id == source.id, current,
+        ObjectRecord.delivery_integrity_status == "OCI_ACCEPTED"
+    )) or 0
+    transferred = session.scalar(select(func.count(ObjectRecord.id)).where(
+        ObjectRecord.source_id == source.id, current,
+        ObjectRecord.state.in_([ObjectState.TRANSFERRED, ObjectState.VERIFIED])
+    )) or 0
+    completed = bool(source.status == "DISCOVERED" and count and (
+        verified == count or (transferred == count and accepted == count)
+    ))
+    return source_completion_statistics(session, source, completed=completed)
 
 
 @app.get("/api/sources/{source_id}/discovery-changes")
