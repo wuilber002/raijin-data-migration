@@ -5780,42 +5780,39 @@ def continuous_lane_capacity_profile(session: Session, source_id: int,
     Object elapsed time is deliberately *not* used here.  It is worker work,
     while the lane needs wall time: with five Raijus, summing object durations
     can turn one saturated link hour into five hours (or much more after
-    autoscaling).  A completed wave provides one independent lane sample.
+    autoscaling).  A wave is only the restore container, not a transfer lane:
+    samples are the union of all source intervals.  This prevents overlapping
+    waves from dividing one aggregate link measurement into artificial,
+    slower per-wave rates.
     The configured limit is a hard ceiling even when historic CONTROL data
     predates virtual-lane serialization and looks faster than the link.
     """
-    rows = session.execute(
+    rows = list(session.execute(
         select(
-            TransferLaneSegment.wave_id,
             TransferLaneSegment.started_at,
             TransferLaneSegment.completed_at,
             TransferLaneSegment.bytes_transferred,
-            Wave.transfer_completed_virtual_at,
         )
-        .join(Wave, Wave.id == TransferLaneSegment.wave_id)
         .where(TransferLaneSegment.source_id == source_id)
-        .order_by(TransferLaneSegment.wave_id, TransferLaneSegment.started_at)
-    )
-    by_wave: dict[int, dict] = {}
-    for wave_id, started_at, completed_at, transferred_bytes, terminal_at in rows:
-        if not started_at or not transferred_bytes:
+        .order_by(TransferLaneSegment.started_at, TransferLaneSegment.id)
+    ))
+    windows: list[dict] = []
+    for started_at, completed_at, transferred_bytes in rows:
+        if (not started_at or not completed_at or completed_at <= started_at
+                or not transferred_bytes):
             continue
-        item = by_wave.setdefault(wave_id, {"starts": [], "ends": [], "bytes": 0, "terminal": terminal_at})
-        item["starts"].append(started_at)
-        if completed_at and completed_at > started_at:
-            item["ends"].append(completed_at)
-        item["bytes"] += int(transferred_bytes or 0)
-    rates: list[float] = []
-    for item in by_wave.values():
-        starts, ends, terminal = item["starts"], item["ends"], item["terminal"]
-        if terminal and (not ends or terminal > max(ends)):
-            ends.append(terminal)
-        if not starts or not ends:
-            continue
-        elapsed = (max(ends) - min(starts)).total_seconds()
-        if elapsed <= 0 or item["bytes"] <= 0:
-            continue
-        rates.append(item["bytes"] * 8 / elapsed / 1_000_000)
+        interval = {"start": started_at, "end": completed_at, "bytes": int(transferred_bytes)}
+        if windows and interval["start"] <= windows[-1]["end"]:
+            current = windows[-1]
+            current["end"] = max(current["end"], interval["end"])
+            current["bytes"] += interval["bytes"]
+        else:
+            windows.append(interval)
+    rates = [
+        item["bytes"] * 8 / (item["end"] - item["start"]).total_seconds() / 1_000_000
+        for item in windows
+        if item["end"] > item["start"] and item["bytes"] > 0
+    ]
     observed = percentile_25(rates)
     ceiling = max(1.0, float(configured_mbps))
     return {
@@ -6949,6 +6946,13 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
         run_changed = False
         latest_profiles = transfer_history_profiles(session, run.source_id, settings.multipart_part_size_mib)
         lane_profile = continuous_lane_capacity_profile(session, run.source_id, settings.max_throughput_mbps)
+        # The cursor belongs to the source-wide lane.  Individual waves may
+        # overlap on that lane, so their own min/max segment windows must not
+        # be appended serially when forecasting the next restore slice.
+        source_lane_observed_end = session.scalar(select(func.max(TransferLaneSegment.completed_at)).where(
+            TransferLaneSegment.source_id == run.source_id,
+            TransferLaneSegment.completed_at.is_not(None),
+        ))
         latest_samples = sum(value["samples"] for value in latest_profiles.values())
         # A new completed transfer gives the packing model new evidence. Only
         # then recompose unsubmitted waves; routine scheduler cycles merely
@@ -6979,6 +6983,30 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             observed_virtual_start = wave.transfer_started_virtual_at if simulated else None
             observed_virtual_end = wave.transfer_completed_virtual_at if simulated else None
             lane_observed_start, lane_observed_end = observed_transfer_lane_window(session, wave)
+            if lane_observed_start and lane_observed_end and lane_observed_end >= lane_observed_start:
+                # This wave has already entered the shared lane.  Its own
+                # calendar window may overlap another wave by design, hence
+                # it is evidence of *when this wave first flowed*, not a
+                # serial duration to add to the planning cursor.
+                actual_lane_start = lane_observed_start
+                shifted = abs((wave.planned_transfer_start_at - actual_lane_start).total_seconds()) if wave.planned_transfer_start_at else float("inf")
+                if shifted >= 60:
+                    prior_transfer_at = wave.planned_transfer_start_at
+                    wave.planned_transfer_start_at = actual_lane_start
+                    changed += 1
+                    run_changed = True
+                    record_event(
+                        session,
+                        "DYNAMIC_WAVE_REPLANNED",
+                        f"Wave '{wave.name}' transfer plan aligned to its first observed lane segment "
+                        f"({prior_transfer_at.isoformat() if prior_transfer_at else 'unset'} -> {actual_lane_start.isoformat()}); "
+                        "shared lane occupancy is source-wide and is not added per wave",
+                        source_id=wave.source_id,
+                        wave_id=wave.id,
+                    )
+                cursor = max(cursor or lane_observed_end, source_lane_observed_end or lane_observed_end)
+                cursor_basis = "observed source-wide continuous lane"
+                continue
             duration_seconds = max(1, int(wave.predicted_transfer_seconds or 1))
             observed_basis = "prediction"
             if lane_observed_start and lane_observed_end and lane_observed_end >= lane_observed_start:

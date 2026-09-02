@@ -818,6 +818,43 @@ def test_continuous_lane_history_is_aggregate_and_never_exceeds_link_cap():
         assert profile["effective_mbps"] == 1100
 
 
+def test_continuous_lane_capacity_keeps_overlapping_waves_in_one_window():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    started = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    with Session() as session:
+        source = Source(name="shared-lane", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+        first = Wave(source_id=1, name="one", max_bytes=1, restore_days=1, restore_tier="BULK")
+        second = Wave(source_id=1, name="two", max_bytes=1, restore_days=1, restore_tier="BULK")
+        session.add(source); session.flush()
+        first.source_id = second.source_id = source.id
+        session.add_all([first, second]); session.flush()
+        objects = [
+            ObjectRecord(source_id=source.id, wave_id=first.id, object_key="one", size_bytes=125_000_000, state=ObjectState.TRANSFERRED),
+            ObjectRecord(source_id=source.id, wave_id=second.id, object_key="two", size_bytes=125_000_000, state=ObjectState.TRANSFERRED),
+        ]
+        session.add_all(objects); session.flush()
+        items = [
+            TransferQueueItem(source_id=source.id, wave_id=first.id, object_id=objects[0].id, size_bytes=objects[0].size_bytes, state=TransferQueueState.TRANSFERRED),
+            TransferQueueItem(source_id=source.id, wave_id=second.id, object_id=objects[1].id, size_bytes=objects[1].size_bytes, state=TransferQueueState.TRANSFERRED),
+        ]
+        session.add_all(items); session.flush()
+        session.add_all([
+            TransferLaneSegment(source_id=source.id, wave_id=first.id, queue_item_id=items[0].id,
+                                started_at=started, completed_at=started + timedelta(seconds=10), bytes_transferred=125_000_000),
+            TransferLaneSegment(source_id=source.id, wave_id=second.id, queue_item_id=items[1].id,
+                                started_at=started, completed_at=started + timedelta(seconds=10), bytes_transferred=125_000_000),
+        ])
+        session.flush()
+        profile = continuous_lane_capacity_profile(session, source.id, 1100)
+    # 250 MB crossed the source-wide lane in ten seconds: 200 Mbps.  It must
+    # not become two independent 100 Mbps samples merely because two waves
+    # supplied the files concurrently.
+    assert profile["samples"] == 1
+    assert profile["p25_mbps"] == 200
+
+
 def test_dynamic_planner_uses_scalar_boundaries_and_assigns_every_object_once():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
