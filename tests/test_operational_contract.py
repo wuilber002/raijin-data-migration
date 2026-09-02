@@ -958,10 +958,15 @@ def test_source_arrival_report_uses_calendar_windows_and_frozen_link_estimate():
         session.flush()
         report = source_completion_statistics(session, source, completed=True)
         assert report["available"] is True
-        assert report["transfer"] == {"estimated_seconds": 100, "actual_seconds": 90, "difference_seconds": -10}
+        assert report["transfer"]["estimated_seconds"] == 100
+        assert report["transfer"]["actual_seconds"] == 90
+        assert report["transfer"]["difference_seconds"] == -10
+        assert report["transfer"]["effective_mbps"] == round(1_000_000_000 * 8 / 90 / 1_000_000, 2)
+        assert report["transfer"]["utilization_percent"] > 100
         assert report["restore"]["actual_seconds"] == 24 * 3600
         assert report["idle"]["restore_queue_seconds"] == 3600
         assert report["idle"]["transfer_lane_seconds"] == 0
+        assert report["estimate_basis"]["restore_forecast"]["standard"]["complete_seconds"] == 18 * 3600
 
 
 def test_source_arrival_report_is_hidden_until_integrity_completion():
@@ -989,7 +994,7 @@ def test_dynamic_schedule_starts_bulk_restore_before_predicted_transfer_window()
     times = dynamic_schedule_times(now, [{"restore_tier": "BULK", "predicted_transfer_seconds": 3600}], 6 * 3600)
     restore_at, transfer_at = times[0]
     assert restore_at == now
-    assert transfer_at == now + __import__("datetime").timedelta(hours=48)
+    assert transfer_at == now + __import__("datetime").timedelta(hours=72)
 
 
 def test_dynamic_schedule_uses_safety_to_advance_later_restore_not_delay_first_wave():
@@ -999,8 +1004,8 @@ def test_dynamic_schedule_uses_safety_to_advance_later_restore_not_delay_first_w
         {"restore_tier": "BULK", "predicted_transfer_seconds": 3600},
     ]
     first, second = dynamic_schedule_times(now, plans, 6 * 3600)
-    assert first == (now, now + __import__("datetime").timedelta(hours=48))
-    assert second[1] == now + __import__("datetime").timedelta(hours=108)
+    assert first == (now, now + __import__("datetime").timedelta(hours=72))
+    assert second[1] == now + __import__("datetime").timedelta(hours=132)
     assert second[0] == now + __import__("datetime").timedelta(hours=54)
 
 
@@ -1189,7 +1194,7 @@ def test_dynamic_replan_anchors_submitted_restore_to_its_actual_service_window()
         session.add(Task(wave_id=restoring.id, kind="SUBMIT_BATCH_RESTORE", state=TaskState.SUCCEEDED))
         session.flush()
         assert replan_dynamic_pipeline(session, settings, now=initial) == 1
-        assert restoring.planned_transfer_start_at == initial + timedelta(hours=48)
+    assert restoring.planned_transfer_start_at == initial + timedelta(hours=72)
 
 
 def test_connection_api_limits_are_durable_and_used_by_workers():

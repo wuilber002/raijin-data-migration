@@ -240,6 +240,7 @@ class Source(Base):
     # adaptive scheduler later changes worker allocation or wave timing.
     completion_estimate_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completion_estimated_transfer_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    completion_estimate_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     objects: Mapped[list[ObjectRecord]] = relationship(back_populates="source")
     waves: Mapped[list[Wave]] = relationship(back_populates="source")
@@ -438,6 +439,11 @@ class Wave(Base):
     planner_mode: Mapped[str] = mapped_column(String(32), default="MANUAL")
     predicted_transfer_seconds: Mapped[float] = mapped_column(Float, default=0)
     prediction_samples: Mapped[int] = mapped_column(Integer, default=0)
+    # Forecasts retain both useful restore milestones.  The first one warms
+    # the continuous lane; the complete one governs slot release and safety.
+    predicted_restore_first_seconds: Mapped[float] = mapped_column(Float, default=0)
+    predicted_restore_complete_seconds: Mapped[float] = mapped_column(Float, default=0)
+    predicted_restore_confidence_seconds: Mapped[float] = mapped_column(Float, default=0)
     # Raiju decides this value batch by batch.  Persisting the current
     # allocation makes the Status view report the actual dynamic concurrency
     # instead of presenting a fixed, misleading worker count.
@@ -889,6 +895,10 @@ class RuntimeSettings(Base):
     continuous_transfer_critical_batch_max_objects: Mapped[int] = mapped_column(Integer, default=20)
     continuous_transfer_critical_batch_max_bytes: Mapped[int] = mapped_column(BigInteger, default=256 * 1024**2)
     continuous_transfer_critical_priority: Mapped[int] = mapped_column(Integer, default=90)
+    restore_forecast_bulk_first_seconds: Mapped[int] = mapped_column(Integer, default=30 * 3600)
+    restore_forecast_bulk_complete_seconds: Mapped[int] = mapped_column(Integer, default=72 * 3600)
+    restore_forecast_standard_first_seconds: Mapped[int] = mapped_column(Integer, default=4 * 3600)
+    restore_forecast_standard_complete_seconds: Mapped[int] = mapped_column(Integer, default=18 * 3600)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
@@ -1177,6 +1187,10 @@ class RuntimeSettingsUpdate(BaseModel):
     continuous_transfer_critical_batch_max_objects: int = Field(default=20, ge=1, le=1_000)
     continuous_transfer_critical_batch_max_bytes: int = Field(default=256 * 1024**2, ge=1024**2, le=10 * 1024**3)
     continuous_transfer_critical_priority: int = Field(default=90, ge=1, le=100)
+    restore_forecast_bulk_first_seconds: int = Field(default=30 * 3600, ge=300, le=7 * 24 * 3600)
+    restore_forecast_bulk_complete_seconds: int = Field(default=72 * 3600, ge=300, le=14 * 24 * 3600)
+    restore_forecast_standard_first_seconds: int = Field(default=4 * 3600, ge=300, le=7 * 24 * 3600)
+    restore_forecast_standard_complete_seconds: int = Field(default=18 * 3600, ge=300, le=14 * 24 * 3600)
 
 
 class GlobalOutboundCostUpdate(BaseModel):
@@ -1320,11 +1334,15 @@ def create_schema() -> None:
         "continuous_transfer_critical_batch_max_objects": "INTEGER NOT NULL DEFAULT 20",
         "continuous_transfer_critical_batch_max_bytes": "BIGINT NOT NULL DEFAULT 268435456",
         "continuous_transfer_critical_priority": "INTEGER NOT NULL DEFAULT 90",
+        "restore_forecast_bulk_first_seconds": "INTEGER NOT NULL DEFAULT 108000",
+        "restore_forecast_bulk_complete_seconds": "INTEGER NOT NULL DEFAULT 259200",
+        "restore_forecast_standard_first_seconds": "INTEGER NOT NULL DEFAULT 14400",
+        "restore_forecast_standard_complete_seconds": "INTEGER NOT NULL DEFAULT 64800",
     }
     source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_objects_inserted": "BIGINT NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_bucket_region": "VARCHAR(64)", "backend_kind": "VARCHAR(16) NOT NULL DEFAULT 'REAL'", "simulation_scenario_id": "VARCHAR(36)", "simulation_execution_id": "VARCHAR(36)", "simulation_correlation_id": "VARCHAR(36)", "simulation_tenant_id": "VARCHAR(36)", "simulation_project_id": "VARCHAR(36)", "simulation_fidelity": "VARCHAR(16)", "business_priority": "INTEGER NOT NULL DEFAULT 999"}
     source_columns["archived_at"] = "TIMESTAMP WITH TIME ZONE"
-    source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION"})
-    wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_requested_virtual_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_started_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_completed_virtual_at": "TIMESTAMP WITH TIME ZONE", "simulation_transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
+    source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION", "completion_estimate_json": "TEXT NOT NULL DEFAULT '{}'"})
+    wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_requested_virtual_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_started_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_completed_virtual_at": "TIMESTAMP WITH TIME ZONE", "simulation_transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
     existing_runtime_columns = {column["name"] for column in inspect(engine).get_columns("runtime_settings")}
     existing_source_columns = {column["name"] for column in inspect(engine).get_columns("sources")}
     existing_wave_columns = {column["name"] for column in inspect(engine).get_columns("waves")}
@@ -1844,6 +1862,10 @@ def settings_dict(settings: RuntimeSettings) -> dict:
             "continuous_transfer_critical_batch_max_objects": settings.continuous_transfer_critical_batch_max_objects,
             "continuous_transfer_critical_batch_max_bytes": settings.continuous_transfer_critical_batch_max_bytes,
             "continuous_transfer_critical_priority": settings.continuous_transfer_critical_priority,
+            "restore_forecast_bulk_first_seconds": settings.restore_forecast_bulk_first_seconds,
+            "restore_forecast_bulk_complete_seconds": settings.restore_forecast_bulk_complete_seconds,
+            "restore_forecast_standard_first_seconds": settings.restore_forecast_standard_first_seconds,
+            "restore_forecast_standard_complete_seconds": settings.restore_forecast_standard_complete_seconds,
             "updated_at": settings.updated_at}
 
 
@@ -3918,8 +3940,12 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         if queued:
             phases.append(queued)
         restore_start = request_at or wave.planned_restore_at
+        expected_first_available_at = (
+            restore_start + timedelta(seconds=(wave.predicted_restore_first_seconds or restore_forecast_seconds(wave.restore_tier)[0]))
+            if restore_start else None
+        )
         expected_available_at = (
-            restore_start + timedelta(seconds=restore_service_window_seconds(wave.restore_tier))
+            restore_start + timedelta(seconds=(wave.predicted_restore_complete_seconds or restore_service_window_seconds(wave.restore_tier)))
             if restore_start else None
         )
         if request_at:
@@ -3928,7 +3954,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             restore_end = expected_available_at
         restore_progress_seconds = max(0, int((restore_end - restore_start).total_seconds())) if restore_start and restore_end else 0
         restore = phase("RESTORE", restore_start, restore_end, planned=not bool(request_at),
-                        expected_seconds=restore_service_window_seconds(wave.restore_tier),
+                        expected_seconds=int(wave.predicted_restore_complete_seconds or restore_service_window_seconds(wave.restore_tier)),
                         elapsed_seconds=restore_progress_seconds)
         if restore:
             phases.append(restore)
@@ -3964,6 +3990,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             "planned_restore_at": wave.planned_restore_at,
             "restore_requested_at": request_at,
             "first_restore_available_at": first_available_at,
+            "expected_first_restore_available_at": expected_first_available_at,
             "restore_available_at": available_at,
             "restore_elapsed_seconds": restore_progress_seconds if request_at else None,
             "expected_restore_available_at": expected_available_at,
@@ -4273,6 +4300,9 @@ def update_settings(payload: RuntimeSettingsUpdate, session: Session = Depends(g
             status_code=422,
             detail="Continuous-lane buffers must satisfy minimum ≤ target ≤ maximum.",
         )
+    if (payload.restore_forecast_bulk_first_seconds > payload.restore_forecast_bulk_complete_seconds or
+            payload.restore_forecast_standard_first_seconds > payload.restore_forecast_standard_complete_seconds):
+        raise HTTPException(status_code=422, detail="Restore first-availability forecast must not exceed complete-availability forecast.")
     settings = runtime_settings(session)
     for field, value in payload.model_dump().items():
         if value is not None:
@@ -5558,9 +5588,15 @@ def assign_wave(session: Session, source_id: int, name: str, max_bytes: int, res
                 pipeline_run_id: int | None = None,
                 transfer_release_policy: str = "AFTER_ALL_RESTORED") -> Wave:
     assigned_bytes = sum(obj.size_bytes for obj in objects)
+    restore_first, restore_complete = restore_forecast_seconds(
+        restore_tier, runtime_settings(session)
+    )
     wave = Wave(source_id=source_id, name=name, max_bytes=max_bytes, restore_days=restore_days,
                 restore_tier=restore_tier, status="PLANNED", planner_mode=planner_mode,
                 predicted_transfer_seconds=predicted_transfer_seconds, prediction_samples=prediction_samples,
+                predicted_restore_first_seconds=restore_first,
+                predicted_restore_complete_seconds=restore_complete,
+                predicted_restore_confidence_seconds=max(0, (restore_complete - restore_first) // 4),
                 planned_restore_at=planned_restore_at, planned_transfer_start_at=planned_transfer_start_at,
                 pipeline_run_id=pipeline_run_id, transfer_release_policy=transfer_release_policy)
     session.add(wave)
@@ -5822,9 +5858,13 @@ def next_dynamic_wave_plan(session: Session, source_id: int, max_bytes: int,
 
 
 def dynamic_wave_schedule(run: DynamicPipelineRun, prior_waves: list[Wave],
-                          scheduler_now: datetime) -> tuple[datetime, datetime]:
+                          scheduler_now: datetime,
+                          settings: RuntimeSettings | None = None) -> tuple[datetime, datetime]:
     """Schedule one newly materialized wave after the current transfer lane."""
-    service_window = restore_service_window_seconds(run.restore_tier)
+    # The tail, not the first available object, is the conservative boundary
+    # used to reserve restore capacity.  Keep the exact value on each wave so
+    # later settings changes cannot rewrite an already-published forecast.
+    service_window = restore_forecast_seconds(run.restore_tier, settings)[1]
     if prior_waves:
         predecessor = prior_waves[-1]
         predecessor_start = predecessor.planned_transfer_start_at or scheduler_now
@@ -5908,7 +5948,7 @@ def adaptive_restore_slot_limit(session: Session, run: DynamicPipelineRun,
     restore_seconds = (
         percentile_75(observed_restore_seconds)
         if len(observed_restore_seconds) >= 3
-        else restore_service_window_seconds(run.restore_tier)
+        else restore_forecast_seconds(run.restore_tier, settings)[1]
     )
     needed_for_continuity = math.ceil(restore_seconds / transfer_seconds)
     retention_seconds = max(1, int(run.restore_days)) * 24 * 3600
@@ -5947,16 +5987,21 @@ def materialize_dynamic_pipeline_horizon(session: Session, settings: RuntimeSett
         )
         if not plan:
             break
-        restore_at, transfer_at = dynamic_wave_schedule(run, existing, scheduler_now)
+        restore_at, transfer_at = dynamic_wave_schedule(run, existing, scheduler_now, settings)
         name = automatic_wave_name(session, source, run.selection_prefix, run.next_sequence)
         run.next_sequence += 1
+        restore_first, restore_complete = restore_forecast_seconds(run.restore_tier, settings)
         wave = Wave(
             source_id=source.id, name=name, max_bytes=run.target_max_bytes,
             restore_days=run.restore_days, restore_tier=run.restore_tier,
             transfer_release_policy="AS_OBJECTS_AVAILABLE",
             status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
             predicted_transfer_seconds=plan["predicted_transfer_seconds"],
-            prediction_samples=plan["prediction_samples"], planned_restore_at=restore_at,
+            prediction_samples=plan["prediction_samples"],
+            predicted_restore_first_seconds=restore_first,
+            predicted_restore_complete_seconds=restore_complete,
+            predicted_restore_confidence_seconds=max(0, (restore_complete - restore_first) // 4),
+            planned_restore_at=restore_at,
             planned_transfer_start_at=transfer_at, pipeline_run_id=run.id,
         )
         session.add(wave)
@@ -6085,27 +6130,45 @@ def create_automatic_waves(source_id: int, payload: AutomaticWaveCreate, session
             "names": [wave.name for wave in created]}
 
 
-def dynamic_schedule_times(now: datetime, plans: list[dict], safety_seconds: int) -> list[tuple[datetime, datetime]]:
+def dynamic_schedule_times(now: datetime, plans: list[dict], safety_seconds: int,
+                           settings: RuntimeSettings | None = None) -> list[tuple[datetime, datetime]]:
     """Forecast a single transfer lane with restore requests issued in advance."""
     # Safety is an advance-notice allowance for later restore submissions. It
     # is never added to the AWS service window and must not postpone the first
     # transfer. Objects observed as available may be copied even earlier.
     first_tier = plans[0].get("restore_tier") if plans else "BULK"
-    transfer_start = now + timedelta(seconds=restore_service_window_seconds(first_tier))
+    transfer_start = now + timedelta(seconds=restore_forecast_seconds(first_tier, settings)[1])
     times: list[tuple[datetime, datetime]] = []
     for plan in plans:
-        # BULK maximum latency is 48h; Standard is planned conservatively at
-        # 12h. The additional configured safety protects the handoff window.
-        restore_lead = restore_service_window_seconds(plan.get("restore_tier")) + safety_seconds
+        # Full availability is the slot reservation boundary.  The additional
+        # configured safety protects the handoff window; first availability
+        # can still feed the continuous lane well before this forecast.
+        restore_lead = restore_forecast_seconds(plan.get("restore_tier"), settings)[1] + safety_seconds
         restore_at = max(now, transfer_start - timedelta(seconds=restore_lead))
         times.append((restore_at, transfer_start))
         transfer_start += timedelta(seconds=plan["predicted_transfer_seconds"])
     return times
 
 
+def restore_forecast_seconds(tier: str | None, settings: RuntimeSettings | None = None) -> tuple[int, int]:
+    """Return first/complete availability forecasts for a restore tier.
+
+    The former single 48h/12h value incorrectly presented the first restored
+    object as if it meant a whole wave was available.  The tail is the safety
+    boundary; first availability is what warms the continuous lane.
+    """
+    if settings is None:
+        return ((30 * 3600, 72 * 3600) if tier == "BULK" else (4 * 3600, 18 * 3600))
+    if tier == "BULK":
+        return (int(settings.restore_forecast_bulk_first_seconds),
+                max(int(settings.restore_forecast_bulk_first_seconds), int(settings.restore_forecast_bulk_complete_seconds)))
+    return (int(settings.restore_forecast_standard_first_seconds),
+            max(int(settings.restore_forecast_standard_first_seconds), int(settings.restore_forecast_standard_complete_seconds)))
+
+
 def restore_service_window_seconds(tier: str | None) -> int:
-    """Return the conservative service window used by the local planner."""
-    return (48 if tier == "BULK" else 12) * 3600
+    """Compatibility helper: conservative planning always uses full availability."""
+    return restore_forecast_seconds(tier)[1]
 
 
 def _completion_timestamp(value: datetime | None) -> datetime | None:
@@ -6140,6 +6203,43 @@ def _completion_gap_seconds(windows: list[tuple[datetime, datetime]]) -> int:
                    for left, right in zip(windows, windows[1:])))
 
 
+def _completion_lane_idle_breakdown(session: Session, source: Source,
+                                    windows: list[tuple[datetime, datetime]]) -> dict:
+    """Classify persisted lane gaps without pretending parallel work is serial.
+
+    ``available_at`` is the durable moment at which Raikou could have copied
+    an object.  A gap with no available item is restore supply; a gap with
+    pending available work is dispatch/lease capacity.  This deliberately
+    reports ``unknown`` for historical rows that lack a usable timestamp
+    instead of inventing a cause from the duration alone.
+    """
+    result = {"initial_restore_wait_seconds": 0, "awaiting_restore_seconds": 0,
+              "dispatch_or_lease_seconds": 0, "unknown_seconds": 0}
+    if not windows:
+        return result
+    first_available = session.scalar(select(func.min(TransferQueueItem.available_at)).where(
+        TransferQueueItem.source_id == source.id
+    ))
+    if first_available:
+        available = _completion_timestamp(first_available)
+        if available and windows[0][0] > available:
+            result["initial_restore_wait_seconds"] = int((windows[0][0] - available).total_seconds())
+    for left, right in zip(windows, windows[1:]):
+        gap = int(max(0, (right[0] - left[1]).total_seconds()))
+        if not gap:
+            continue
+        pending = session.scalar(select(func.count(TransferQueueItem.id)).where(
+            TransferQueueItem.source_id == source.id,
+            TransferQueueItem.available_at <= left[1],
+            or_(TransferQueueItem.transferred_at.is_(None), TransferQueueItem.transferred_at >= right[0]),
+        )) or 0
+        if pending:
+            result["dispatch_or_lease_seconds"] += gap
+        else:
+            result["awaiting_restore_seconds"] += gap
+    return result
+
+
 def capture_source_completion_estimate(session: Session, source: Source,
                                        settings: RuntimeSettings | None = None) -> None:
     """Freeze the configured-link transfer forecast at the first paid restore.
@@ -6156,6 +6256,19 @@ def capture_source_completion_estimate(session: Session, source: Source,
     bits_per_second = max(1.0, float(settings.max_throughput_mbps or 1) * 1_000_000)
     source.completion_estimated_transfer_seconds = float(total_bytes) * 8 / bits_per_second
     source.completion_estimate_created_at = utcnow()
+    source.completion_estimate_json = json.dumps({
+        "schema": 2,
+        "link_mbps": int(settings.max_throughput_mbps),
+        "restore_forecast": {
+            "bulk": {"first_seconds": int(settings.restore_forecast_bulk_first_seconds),
+                     "complete_seconds": int(settings.restore_forecast_bulk_complete_seconds)},
+            "standard": {"first_seconds": int(settings.restore_forecast_standard_first_seconds),
+                         "complete_seconds": int(settings.restore_forecast_standard_complete_seconds)},
+        },
+        "restore_max_slots": int(settings.dynamic_restore_max_slots),
+        "restore_confidence": "±25% da distância entre primeiro e último arquivo previsto por wave",
+        "planner": "v9-forecast-evidence",
+    }, sort_keys=True)
 
 
 def source_completion_statistics(session: Session, source: Source,
@@ -6184,7 +6297,9 @@ def source_completion_statistics(session: Session, source: Source,
         available = wave.last_restore_available_virtual_at if simulated else persisted_available
         planned = wave.planned_restore_at or requested
         if planned:
-            expected_restore.append((planned, planned + timedelta(seconds=restore_service_window_seconds(wave.restore_tier))))
+            expected_restore.append((planned, planned + timedelta(seconds=(
+                wave.predicted_restore_complete_seconds or restore_service_window_seconds(wave.restore_tier)
+            ))))
         if requested and available:
             actual_restore.append((requested, available))
 
@@ -6210,23 +6325,72 @@ def source_completion_statistics(session: Session, source: Source,
     total_bytes = session.scalar(select(func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(
         ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True)
     )) or 0
-    configured_estimate = float(total_bytes) * 8 / max(1.0, float(settings.max_throughput_mbps or 1) * 1_000_000)
+    estimate_basis = json.loads(source.completion_estimate_json or "{}")
+    frozen_link_mbps = int(estimate_basis.get("link_mbps") or settings.max_throughput_mbps or 1)
+    configured_estimate = float(total_bytes) * 8 / max(1.0, float(frozen_link_mbps) * 1_000_000)
     estimated_transfer = source.completion_estimated_transfer_seconds
     if estimated_transfer is None:
         estimated_transfer = configured_estimate
     estimated_restore_seconds = _completion_window_seconds(expected_restore_windows)
     actual_restore_seconds = _completion_window_seconds(actual_restore_windows)
     actual_transfer_seconds = _completion_window_seconds(actual_lane_windows)
+    effective_mbps = (float(total_bytes) * 8 / actual_transfer_seconds / 1_000_000) if actual_transfer_seconds else 0.0
+    lane_idle = _completion_lane_idle_breakdown(session, source, actual_lane_windows)
+    delivery_accepted = session.scalar(select(func.count(ObjectRecord.id)).where(
+        ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True),
+        ObjectRecord.delivery_integrity_status == "OCI_ACCEPTED",
+    )) or 0
+    deep_verified = session.scalar(select(func.count(ObjectRecord.id)).where(
+        ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True),
+        ObjectRecord.state == ObjectState.VERIFIED,
+    )) or 0
+    worker_targets = [int(value or 0) for value in session.scalars(select(TransferDispatchBatch.worker_target).where(
+        TransferDispatchBatch.source_id == source.id,
+        TransferDispatchBatch.worker_target > 0,
+    ))]
+    retry_items = session.scalar(select(func.count(TransferQueueItem.id)).where(
+        TransferQueueItem.source_id == source.id, TransferQueueItem.attempts > 1,
+    )) or 0
+    recovery_events = session.scalar(select(func.count(Event.id)).where(
+        Event.source_id == source.id, Event.kind == "CONTINUOUS_TRANSFER_LEASES_RECOVERED",
+    )) or 0
+    segments_total, empty_segments = session.execute(select(
+        func.count(TransferLaneSegment.id),
+        func.count(case((TransferLaneSegment.bytes_transferred <= 0, TransferLaneSegment.id))),
+    ).where(TransferLaneSegment.source_id == source.id)).one()
     return {
         "available": True,
         "estimate_created_at": source.completion_estimate_created_at,
-        "configured_link_mbps": settings.max_throughput_mbps,
+        "configured_link_mbps": frozen_link_mbps,
+        "estimate_basis": estimate_basis,
         "transfer": {"estimated_seconds": int(estimated_transfer), "actual_seconds": actual_transfer_seconds,
-                     "difference_seconds": actual_transfer_seconds - int(estimated_transfer)},
+                     "difference_seconds": actual_transfer_seconds - int(estimated_transfer),
+                     "effective_mbps": round(effective_mbps, 2),
+                     "configured_mbps": frozen_link_mbps,
+                     "utilization_percent": round(100 * effective_mbps / max(1, frozen_link_mbps), 1)},
         "restore": {"estimated_seconds": estimated_restore_seconds, "actual_seconds": actual_restore_seconds,
                     "difference_seconds": actual_restore_seconds - estimated_restore_seconds},
         "idle": {"transfer_lane_seconds": _completion_gap_seconds(actual_lane_windows),
-                 "restore_queue_seconds": _completion_gap_seconds(actual_restore_windows)},
+                 "restore_queue_seconds": _completion_gap_seconds(actual_restore_windows),
+                 **lane_idle},
+        "closure": {
+            "delivery_accepted_objects": int(delivery_accepted),
+            "destination_validation": source.destination_validation_status or "NOT_RUN",
+            "destination_validated_at": source.destination_validation_at,
+            "destination_differences": {
+                "missing": int(source.destination_missing_count or 0),
+                "size_mismatches": int(source.destination_size_mismatch_count or 0),
+                "metadata_mismatches": int(source.destination_metadata_mismatch_count or 0),
+                "extras": int(source.destination_extra_count or 0),
+            },
+            "deep_audited_objects": int(deep_verified),
+        },
+        "autoscaling": {"samples": len(worker_targets), "peak_workers": max(worker_targets, default=0),
+                        "average_workers": round(sum(worker_targets) / len(worker_targets), 1) if worker_targets else 0},
+        "telemetry": {"items_with_retry": int(retry_items or 0),
+                      "lease_recovery_events": int(recovery_events or 0),
+                      "lane_segments": int(segments_total or 0),
+                      "empty_lane_segments": int(empty_segments or 0)},
         "evidence": {"restore_windows": len(actual_restore_windows), "transfer_windows": len(actual_lane_windows),
                      "waves": len(waves)},
     }
@@ -6422,7 +6586,7 @@ def repackage_unsubmitted_dynamic_waves(session: Session, settings: RuntimeSetti
             # planned wave. Keep it empty and let the next governance cycle
             # resolve it with the durable inventory state.
             continue
-        restore_at, transfer_at = dynamic_wave_schedule(run, preceding, scheduler_now)
+        restore_at, transfer_at = dynamic_wave_schedule(run, preceding, scheduler_now, settings)
         wave.max_bytes = run.target_max_bytes
         wave.predicted_transfer_seconds = plan["predicted_transfer_seconds"]
         wave.prediction_samples = plan["prediction_samples"]
@@ -6629,7 +6793,10 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             # A transfer forecast can safely be fixed even after its restore
             # was submitted. The restore timestamp itself is immutable once a
             # Batch task exists because changing it would falsify evidence.
-            restore_lead = restore_service_window_seconds(wave.restore_tier) + int(run.restore_safety_seconds or settings.dynamic_restore_safety_seconds)
+            restore_lead = int(
+                wave.predicted_restore_complete_seconds
+                or restore_forecast_seconds(wave.restore_tier, settings)[1]
+            ) + int(run.restore_safety_seconds or settings.dynamic_restore_safety_seconds)
             new_restore_at = max(scheduler_now, start - timedelta(seconds=restore_lead))
             shifted = abs((wave.planned_transfer_start_at - start).total_seconds()) if wave.planned_transfer_start_at else float("inf")
             if shifted >= 60:
@@ -6668,7 +6835,10 @@ def preview_dynamic_waves(source_id: int, prefix: str = Query(default="", max_le
     for plan in plans:
         plan["restore_tier"] = restore_tier
     scheduler_now = source_scheduler_clock(source).effective_now
-    times = dynamic_schedule_times(scheduler_now, plans, result["settings"].dynamic_restore_safety_seconds)
+    times = dynamic_schedule_times(
+        scheduler_now, plans, result["settings"].dynamic_restore_safety_seconds,
+        result["settings"],
+    )
     total_predicted_seconds = sum(int(plan["predicted_transfer_seconds"]) for plan in plans)
     historical_waves = sum(1 for plan in plans if plan["prediction_samples"] > 0)
     return {

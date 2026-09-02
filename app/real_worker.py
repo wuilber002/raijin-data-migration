@@ -2337,6 +2337,18 @@ def _utc_timestamp(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
+def _lane_event_summary(session, source: Source, kind: str, message: str,
+                        *, wave_id: int | None = None, interval_seconds: int = 300) -> None:
+    """Keep durable batches as full evidence without emitting one event/object."""
+    latest = session.scalar(select(Event).where(
+        Event.source_id == source.id, Event.kind == kind,
+    ).order_by(Event.created_at.desc(), Event.id.desc()).limit(1))
+    now = utcnow()
+    if latest and (now - latest.created_at).total_seconds() < interval_seconds:
+        return
+    event(session, kind, message, source_id=source.id, wave_id=wave_id)
+
+
 def _raiju_host_capacity_factor() -> tuple[float, str]:
     """Return a conservative local capacity factor for lane autoscaling.
 
@@ -2394,11 +2406,28 @@ def _continuous_raiju_worker_count(session, source: Source, available_objects: i
     ]
     if not rates:
         return floor
-    observed_per_raiju = max(.1, sum(rates) / len(rates))
+    # The mean is distorted by the tail of small objects and transient slow
+    # calls, which drove CONTROL runs to 64 logical slots without a matching
+    # aggregate throughput gain. Use a robust upper-quartile worker sample.
+    rates.sort()
+    observed_per_raiju = max(.1, rates[max(0, math.ceil(len(rates) * .75) - 1)])
     requested = math.ceil(max_throughput_mbps / observed_per_raiju)
     capacity_factor, capacity_reason = _raiju_host_capacity_factor()
     capped_request = max(floor, math.floor(requested * capacity_factor))
     chosen = min(RAIJU_MAX_WORKERS, available_objects, capped_request)
+    previous = session.scalar(select(TransferDispatchBatch.worker_target).where(
+        TransferDispatchBatch.source_id == source.id,
+        TransferDispatchBatch.worker_target > 0,
+    ).order_by(TransferDispatchBatch.started_at.desc(), TransferDispatchBatch.id.desc()).limit(1))
+    if previous:
+        # Scale in bounded steps and do not keep adding slots while the queue
+        # has already fallen below the current allocation. The floor remains
+        # inviolable whenever work is available.
+        step = 4
+        if chosen > previous:
+            chosen = min(chosen, int(previous) + step)
+        elif available_objects < int(previous):
+            chosen = max(floor, chosen, int(previous) - step)
     if capacity_factor < 1:
         message = f"Raikou limited Raiju expansion to {chosen}/{requested}: {capacity_reason}"
         # This decision is evaluated on every dispatcher heartbeat.  Keep the
@@ -2504,11 +2533,9 @@ def reconcile_completed_continuous_item_leases(session, source: Source) -> int:
         )) or 0
         if batch and not remaining:
             batch.state, batch.completed_at = "COMPLETED", now
-    event(
-        session,
-        "CONTINUOUS_TRANSFER_LEASES_RECONCILED",
-        f"Raikou reconciled {len(completed_items)} completed Raiju lease(s) after an interruption.",
-        source_id=source.id,
+    _lane_event_summary(
+        session, source, "CONTINUOUS_TRANSFER_LEASES_RECONCILED",
+        f"Raikou reconciled completed Raiju leases after an interruption; latest batch: {len(completed_items)} item(s).",
     )
     return len(completed_items)
 
@@ -2545,8 +2572,8 @@ def recover_expired_continuous_item_leases(session, source: Source) -> int:
         if obj and obj.state == ObjectState.TRANSFERRING:
             obj.state = ObjectState.RESTORED
     if items:
-        event(session, "CONTINUOUS_TRANSFER_LEASES_RECOVERED",
-              f"Raikou recovered {len(items)} expired object lease(s)", source_id=source.id)
+        _lane_event_summary(session, source, "CONTINUOUS_TRANSFER_LEASES_RECOVERED",
+                            f"Raikou recovered expired object leases; latest batch: {len(items)} item(s).")
     # A reservation is valid only while both the running normal object and its
     # critical successor are leased by this dispatcher. Clear abandoned links
     # so a later critical object can request a fresh safe handoff.
@@ -2654,15 +2681,13 @@ def claim_continuous_transfer_batch(session, source: Source, settings, task: Tas
         if obj and obj.state == ObjectState.RESTORED:
             obj.state = ObjectState.TRANSFERRING
     lead = selected[0]
-    event(
-        session,
-        "CONTINUOUS_TRANSFER_DISPATCH_DECISION",
+    _lane_event_summary(
+        session, source, "CONTINUOUS_TRANSFER_DISPATCH_DECISION",
         (
             f"Raikou selected {len(selected)} {'critical' if critical else 'normal'} lane item(s) "
             f"({total_bytes} bytes); lead score={lead.priority_score}, band={lead.priority_band}; "
             f"reason={lead_priority_reason}"
         ),
-        source_id=source.id,
         wave_id=lead.wave_id,
     )
     task.lease_expires_at = lease_expires

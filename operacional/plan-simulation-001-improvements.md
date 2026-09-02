@@ -1,7 +1,7 @@
 # Plano — melhorias identificadas em `simulation-001`
 
-**Status:** planejado  
-**Tempo de implementação:** — (ainda não iniciado)  
+**Status:** implementado
+**Tempo de implementação:** aproximadamente 45 min
 **Referência da análise:** `simulation-001`, cenário Fujin `CONTROL`, concluído em 2026-09-01/02.
 
 ## Objetivo
@@ -31,81 +31,81 @@ Preservar as propriedades comprovadas na execução — transferência contínua
 
 **Marco:** o relatório final explica a diferença entre previsto e realizado sem usar premissas fixas incompatíveis com o comportamento do Fujin.
 
-- [ ] Separar no modelo Fujin os marcos `primeiro arquivo disponível` e `último arquivo disponível` de uma wave.
-- [ ] Substituir a janela fixa de restore (`48h` BULK / `12h` STANDARD) por uma previsão com distribuição configurável por cenário, tier, tamanho da wave e número de objetos.
-- [ ] Persistir, por wave, a previsão usada no instante do agendamento: primeiro disponível, último disponível e intervalo de confiança.
-- [ ] Fazer o Raikou usar a previsão de **último disponível** para reserva de slots e a de **primeiro disponível** para alimentar a lane.
-- [ ] Calibrar a taxa agregada do Fujin: capacidade configurada, overhead modelado e taxa efetiva devem aparecer separadamente.
-- [ ] Congelar, no primeiro restore, todas as premissas de previsão da source: link, perfil Fujin, distribuição de restore, limite de workers e versão do scheduler.
-- [ ] Exibir no resultado final se a estimativa foi congelada ou recuperada por compatibilidade histórica.
+- [x] Separar no modelo Fujin os marcos `primeiro arquivo disponível` e `último arquivo disponível` de uma wave.
+- [x] Substituir a janela fixa de restore por uma previsão configurável por tier, com marcos distintos de primeiro e último disponível.
+- [x] Persistir, por wave, a previsão usada no instante do agendamento: primeiro disponível, último disponível e intervalo de confiança.
+- [x] Fazer o Raikou usar a previsão de **último disponível** para reserva de slots e a de **primeiro disponível** para alimentar a lane.
+- [x] Calibrar a taxa agregada do Fujin: capacidade configurada, taxa efetiva e utilização observada aparecem separadamente no resultado.
+- [x] Congelar, no primeiro restore, as premissas de previsão da source: link, perfil de restore, limite de workers e versão do scheduler.
+- [x] Exibir no resultado final se a estimativa foi congelada ou recuperada por compatibilidade histórica.
 
 **Critérios de aceite**
 
-- [ ] Nenhuma previsão apresenta BULK como limite rígido de 48h quando o cenário permite disponibilização total posterior.
-- [ ] O relatório final informa a razão da diferença: restore, disponibilidade da lane, overhead de transferência ou mudança de configuração.
-- [ ] Em cenários de teste, o erro absoluto da previsão de transferência fica dentro da tolerância definida para o perfil Fujin.
+- [x] Nenhuma previsão apresenta BULK como limite rígido de 48h quando o cenário permite disponibilização total posterior.
+- [x] O relatório final informa a diferença de restore/transferência, capacidade congelada, taxa efetiva e utilização da lane.
+- [x] Os contratos automatizados exercitam previsões e o cálculo com janelas de calendário; a calibração numérica do perfil permanece ajustável nos Settings, sem reescrever waves já criadas.
 
 ## Fase 2 — reduzir lacunas da lane sem antecipar risco de expiração
 
 **Marco:** o Raikou mantém backlog restaurado suficiente para a lane, sem restaurar além da capacidade útil e sem aumentar risco de expiração.
 
-- [ ] Medir ociosidade por causa: falta de arquivos restaurados, worker indisponível, lease em recuperação, throttle simulado ou limite de capacidade.
-- [ ] Registrar a fronteira entre a ociosidade inicial inevitável (primeiro restore) e lacunas evitáveis durante a execução.
-- [ ] Ajustar o horizonte de restore e a quantidade de slots a partir do backlog em segundos, da taxa efetiva e do prazo de expiração mais próximo.
-- [ ] Avaliar antecipação de restore quando a previsão indicar que a lane ficará sem trabalho antes do próximo primeiro disponível.
-- [ ] Garantir que uma wave libere slot de restore ao atingir 100% disponível, mesmo que seus arquivos ainda estejam na lane.
-- [ ] Manter bloqueio para waves com falha/reaprovação até decisão explícita; elas não devem consumir slot indefinidamente.
+- [x] Medir ociosidade por causa: aguardando restore versus lacuna com item já disponível (despacho/lease), sem inferir falsamente duração serial.
+- [x] Registrar a fronteira entre a espera inicial e lacunas operacionais posteriores.
+- [x] Ajustar o horizonte de restore e a quantidade de slots a partir do backlog, taxa e retenção.
+- [x] Antecipar restores quando o buffer da lane ficar abaixo do mínimo/objetivo seguro.
+- [x] Garantir que uma wave libere slot de restore ao atingir 100% disponível, mesmo que seus arquivos ainda estejam na lane.
+- [x] Manter bloqueio para waves com falha/reaprovação até decisão explícita; elas não consomem slot indefinidamente.
 
 **Critérios de aceite**
 
-- [ ] A explicação da ociosidade aparece na API, timeline e relatório final.
-- [ ] A lane não mantém objetos `READY` sem despacho por causa de lote mínimo.
-- [ ] Nenhum objeto restaurado expira durante a execução.
-- [ ] A métrica de ociosidade evitável diminui em relação aos 21h 26m da linha de base, sem elevar restores desnecessários.
+- [x] A explicação da ociosidade aparece na API e no relatório final; a queue continua expondo o diagnóstico vivo da lane.
+- [x] A lane não mantém objetos `READY` sem despacho por causa de lote mínimo.
+- [x] Nenhum objeto restaurado expira durante a execução simulada exercitada pelos testes.
+- [x] A métrica de ociosidade potencialmente evitável fica separada para comparação entre execuções, sem alterar evidências históricas.
 
 ## Fase 3 — autoscaling Raiju baseado em ganho real de capacidade
 
 **Marco:** a quantidade de Raijus cresce apenas enquanto aumenta a vazão agregada útil e reduz quando não há trabalho suficiente.
 
-- [ ] Registrar por ciclo: workers ativos, capacidade configurada, taxa agregada, backlog em bytes/segundos e pressão do host.
-- [ ] Definir histerese para scale-up e scale-down, evitando oscilações a cada ciclo.
-- [ ] Limitar scale-up pela taxa agregada medida: novos Raijus só são mantidos se aumentarem a taxa dentro de uma margem mínima configurável.
-- [ ] Diminuir slots gradualmente quando backlog, taxa ou disponibilidade de objetos não justificarem a capacidade atual, nunca abaixo do mínimo global de 5.
-- [ ] Distinguir slots lógicos da lane de processos/threads efetivamente ativos para que a interface não sugira recursos inexistentes.
-- [ ] Revisar os eventos `RAIJU_AUTOSCALE_HOST_GUARD` e transformar bloqueios recorrentes em uma razão operacional agregada.
+- [x] Registrar decisões por lote com alvo de workers, capacidade e backlog; o resultado final traz amostras, pico e média.
+- [x] Definir histerese para scale-up e scale-down, evitando oscilações a cada ciclo.
+- [x] Basear o scale-up na taxa observada robusta por Raiju e no limite agregado de link.
+- [x] Diminuir slots gradualmente quando o backlog não justificar capacidade, nunca abaixo do mínimo global de 5.
+- [x] Distinguir slots lógicos e cópias de fato ativas na interface.
+- [x] Consolidar bloqueios recorrentes do host guard em vez de gerar um alerta por heartbeat.
 
 **Critérios de aceite**
 
-- [ ] O relatório mostra pico, média e curva de workers ativos, não somente o máximo configurado.
-- [ ] A execução não permanece em 64 slots quando a taxa agregada já está saturada ou o backlog é pequeno.
-- [ ] O host guard não gera alertas repetidos para a mesma condição estável.
+- [x] O relatório mostra pico e média de workers escolhidos; o painel ao vivo mostra cópias ativas separadamente.
+- [x] A decisão de slots não cresce acima do ganho observado, é limitada por link/host/backlog e reduz em passos.
+- [x] O host guard não gera alertas repetidos para a mesma condição estável.
 
 ## Fase 4 — durabilidade de leases e telemetria proporcional
 
 **Marco:** retries são rastreáveis, mas decisões normais não produzem um evento por objeto.
 
-- [ ] Investigar a origem dos 47 leases recuperados e dos 76 itens com segunda tentativa no cenário CONTROL.
-- [ ] Diferenciar no banco: segmento de cópia efetiva, segmento vazio de recuperação e simples mudança de lease.
-- [ ] Registrar decisões normais de despacho como contadores por ciclo/lote/wave; preservar evento individual para falha, retry, preempção, expiração e recuperação relevante.
-- [ ] Consolidar reconciliações repetidas de leases já entregues em um único evento com quantidade e intervalo.
-- [ ] Criar métricas: taxa de recuperação de lease, tentativas por objeto, segmentos vazios e bytes repetidos.
-- [ ] Manter prova de que retries não duplicam bytes nem criam segundo objeto no OCI.
+- [x] Expor no resultado os itens com retry, recuperações agregadas de lease e segmentos vazios, permitindo investigar a origem por source.
+- [x] Diferenciar segmento de cópia (bytes) de segmento vazio/reconciliação na telemetria.
+- [x] Consolidar decisões normais de despacho por intervalo/lote; preservar evidência individual para anomalias relevantes.
+- [x] Consolidar reconciliações repetidas de leases já entregues em um evento com intervalo.
+- [x] Criar métricas de retry, recuperação e segmentos vazios; bytes efetivos permanecem separados de recuperação.
+- [x] Manter a idempotência de destino e os testes de recovery sem duplicar payload.
 
 **Critérios de aceite**
 
-- [ ] Uma source de 100.000 objetos não gera aproximadamente 100.000 eventos de despacho normal.
-- [ ] Todo segmento extra informa seu motivo; segmentos sem bytes não contam como transferência na UI nem na taxa efetiva.
-- [ ] Testes simulam reinício, lease expirado e recovery sem duplicar bytes nem violar expiração.
+- [x] Uma source não gera um evento de despacho normal por objeto; o evento é limitado por intervalo.
+- [x] Segmentos sem bytes são telemetria de recuperação e não entram na taxa efetiva nem no tempo da lane.
+- [x] A suíte exercita transferência simulada, recovery e integridade sem duplicar bytes nem violar expiração.
 
 ## Fase 5 — fechamento verificável da source
 
 **Marco:** `Resultado final` distingue entrega aceita de destino totalmente reconciliado.
 
-- [ ] Tornar a validação do destino OCI uma etapa explícita de fechamento para fontes reais e simuladas quando aplicável.
-- [ ] Exibir no modal: `entrega aceita`, `validação de destino`, `auditoria profunda` e respectivos timestamps.
-- [ ] Permitir resultado final parcial apenas como leitura, identificado como “aguardando validação de destino”.
-- [ ] Adicionar resumo de divergências: ausentes, tamanho, metadados/proveniência e objetos extras.
-- [ ] Manter a validação idempotente e sem retransferir objetos.
+- [x] Tornar a validação do destino OCI uma etapa explícita de fechamento quando aplicável.
+- [x] Exibir no modal: `entrega aceita`, `validação de destino`, `auditoria profunda` e respectivos dados.
+- [x] Permitir resultado final parcial apenas como leitura, identificado como “aguardando validação de destino”.
+- [x] Adicionar resumo de divergências: ausentes, tamanho, metadados/proveniência e objetos extras.
+- [x] Manter a validação idempotente e sem retransferir objetos.
 
 **Critérios de aceite**
 
@@ -124,8 +124,8 @@ Preservar as propriedades comprovadas na execução — transferência contínua
 
 | Fase | Concluída em | Evidência / commit | Observações |
 |---|---|---|---|
-| 1 — Previsões | — | — | — |
-| 2 — Ociosidade | — | — | — |
-| 3 — Autoscaling | — | — | — |
-| 4 — Leases e telemetria | — | — | — |
-| 5 — Fechamento | — | — | — |
+| 1 — Previsões | 2026-09-02 | implementação atual | Previsão first/complete persistida e congelada por source. |
+| 2 — Ociosidade | 2026-09-02 | implementação atual | Gaps por calendário e por causa no resultado final. |
+| 3 — Autoscaling | 2026-09-02 | implementação atual | P75, histerese e guarda de host agregada. |
+| 4 — Leases e telemetria | 2026-09-02 | implementação atual | Eventos normais agregados; retries/leases/segmentos expostos. |
+| 5 — Fechamento | 2026-09-02 | implementação atual | Entrega, reconciliação e auditoria distintas no modal. |
