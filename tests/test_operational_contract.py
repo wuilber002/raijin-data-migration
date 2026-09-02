@@ -69,6 +69,33 @@ def test_fujin_restore_forecast_stays_inside_the_profile_tolerance(monkeypatch):
     assert 30 * 3600 <= first <= complete <= 36 * 3600
 
 
+def test_bulk_restore_fallback_is_48_hours():
+    """The conservative fallback is policy, while Fujin may be tighter."""
+    assert restore_forecast_seconds("BULK") == (30 * 3600, 48 * 3600)
+
+
+def test_runtime_clock_reports_simulator_timeout_without_a_500(monkeypatch):
+    """A busy Fujin must not break the browser heartbeat."""
+    import app.main as main
+    from app.runtime_context import OperationMode, RuntimeContext
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="clock-timeout", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", backend_kind="SIMULATED",
+                        simulation_execution_id="execution")
+        session.add(source); session.flush()
+        monkeypatch.setattr(main, "runtime_context", RuntimeContext(
+            OperationMode.SIMULATION, "sqlite+pysqlite:///:memory:", "http://fujin"
+        ))
+        monkeypatch.setattr(main, "source_scheduler_clock", lambda _source: (_ for _ in ()).throw(TimeoutError()))
+        response = main.runtime_clock(source_id=source.id, session=session)
+    assert response["clock_available"] is False
+    assert response["virtual_now"] is None
+
+
 def test_simulated_destination_provenance_accepts_quoted_contract_etag():
     class Descriptor:
         etag = '"sim-content-identity"'
@@ -1086,7 +1113,7 @@ def test_dynamic_schedule_starts_bulk_restore_before_predicted_transfer_window()
     times = dynamic_schedule_times(now, [{"restore_tier": "BULK", "predicted_transfer_seconds": 3600}], 6 * 3600)
     restore_at, transfer_at = times[0]
     assert restore_at == now
-    assert transfer_at == now + __import__("datetime").timedelta(hours=72)
+    assert transfer_at == now + __import__("datetime").timedelta(hours=48)
 
 
 def test_dynamic_schedule_uses_safety_to_advance_later_restore_not_delay_first_wave():
@@ -1096,8 +1123,8 @@ def test_dynamic_schedule_uses_safety_to_advance_later_restore_not_delay_first_w
         {"restore_tier": "BULK", "predicted_transfer_seconds": 3600},
     ]
     first, second = dynamic_schedule_times(now, plans, 6 * 3600)
-    assert first == (now, now + __import__("datetime").timedelta(hours=72))
-    assert second[1] == now + __import__("datetime").timedelta(hours=132)
+    assert first == (now, now + __import__("datetime").timedelta(hours=48))
+    assert second[1] == now + __import__("datetime").timedelta(hours=108)
     assert second[0] == now + __import__("datetime").timedelta(hours=54)
 
 
@@ -1281,12 +1308,15 @@ def test_dynamic_replan_anchors_submitted_restore_to_its_actual_service_window()
                          restore_days=1, restore_tier="BULK", status="RESTORING", planner_mode="DYNAMIC",
                          predicted_transfer_seconds=60, planned_restore_at=initial + timedelta(days=8),
                          planned_transfer_start_at=initial + timedelta(days=10),
-                         restore_requested_virtual_at=initial)
+                         restore_requested_virtual_at=initial,
+                         predicted_restore_complete_seconds=36 * 3600)
         session.add_all([source, settings, run, restoring]); session.flush()
         session.add(Task(wave_id=restoring.id, kind="SUBMIT_BATCH_RESTORE", state=TaskState.SUCCEEDED))
         session.flush()
         assert replan_dynamic_pipeline(session, settings, now=initial) == 1
-    assert restoring.planned_transfer_start_at == initial + timedelta(hours=72)
+    # A submitted simulation restore retains its per-wave Fujin forecast;
+    # the conservative global 48h fallback must not replace this 36h profile.
+    assert restoring.planned_transfer_start_at == initial + timedelta(hours=36)
 
 
 def test_connection_api_limits_are_durable_and_used_by_workers():

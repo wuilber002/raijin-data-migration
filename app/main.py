@@ -910,7 +910,9 @@ class RuntimeSettings(Base):
     continuous_transfer_critical_priority: Mapped[int] = mapped_column(Integer, default=90)
     continuous_transfer_min_marginal_gain_mbps: Mapped[float] = mapped_column(Float, default=5)
     restore_forecast_bulk_first_seconds: Mapped[int] = mapped_column(Integer, default=30 * 3600)
-    restore_forecast_bulk_complete_seconds: Mapped[int] = mapped_column(Integer, default=72 * 3600)
+    # BULK has a conservative 48-hour completion fallback.  Fujin's immutable
+    # scenario profile may tighten this for a particular simulated source.
+    restore_forecast_bulk_complete_seconds: Mapped[int] = mapped_column(Integer, default=48 * 3600)
     restore_forecast_standard_first_seconds: Mapped[int] = mapped_column(Integer, default=4 * 3600)
     restore_forecast_standard_complete_seconds: Mapped[int] = mapped_column(Integer, default=18 * 3600)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -1203,7 +1205,7 @@ class RuntimeSettingsUpdate(BaseModel):
     continuous_transfer_critical_priority: int = Field(default=90, ge=1, le=100)
     continuous_transfer_min_marginal_gain_mbps: float = Field(default=5, ge=0, le=1200)
     restore_forecast_bulk_first_seconds: int = Field(default=30 * 3600, ge=300, le=7 * 24 * 3600)
-    restore_forecast_bulk_complete_seconds: int = Field(default=72 * 3600, ge=300, le=14 * 24 * 3600)
+    restore_forecast_bulk_complete_seconds: int = Field(default=48 * 3600, ge=300, le=14 * 24 * 3600)
     restore_forecast_standard_first_seconds: int = Field(default=4 * 3600, ge=300, le=7 * 24 * 3600)
     restore_forecast_standard_complete_seconds: int = Field(default=18 * 3600, ge=300, le=14 * 24 * 3600)
 
@@ -1351,7 +1353,7 @@ def create_schema() -> None:
         "continuous_transfer_critical_priority": "INTEGER NOT NULL DEFAULT 90",
         "continuous_transfer_min_marginal_gain_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 5",
         "restore_forecast_bulk_first_seconds": "INTEGER NOT NULL DEFAULT 108000",
-        "restore_forecast_bulk_complete_seconds": "INTEGER NOT NULL DEFAULT 259200",
+        "restore_forecast_bulk_complete_seconds": "INTEGER NOT NULL DEFAULT 172800",
         "restore_forecast_standard_first_seconds": "INTEGER NOT NULL DEFAULT 14400",
         "restore_forecast_standard_complete_seconds": "INTEGER NOT NULL DEFAULT 64800",
     }
@@ -1508,6 +1510,13 @@ def create_schema() -> None:
                                     .order_by(DiscoveryJob.id.desc()).limit(1))
             source.last_discovery_mode = latest.mode if latest else "LEGACY"
             source.discovery_generation = max(1, int(source.discovery_generation or 0))
+        # 72 hours was an implementation default, not an operator-selected
+        # policy.  Promote deployments that still carry that legacy default
+        # to the agreed conservative BULK ceiling of 48 hours.  Any value
+        # other than the legacy default remains an explicit operator choice.
+        runtime = session.get(RuntimeSettings, 1)
+        if runtime and int(runtime.restore_forecast_bulk_complete_seconds or 0) == 72 * 3600:
+            runtime.restore_forecast_bulk_complete_seconds = 48 * 3600
         # Planner v1/v2 added the operational safety allowance to the first
         # AWS service window. Correct active forecasts once: the first handoff
         # is SLA-only, while safety continues to advance only future restore
@@ -1529,16 +1538,22 @@ def create_schema() -> None:
                 Wave, ObjectRecord.wave_id == Wave.id
             ).where(Wave.pipeline_run_id == run.id))
             anchor = first_request_at or waves[0].planned_restore_at or run.created_at or migration_now
-            cursor = anchor + timedelta(seconds=restore_service_window_seconds(waves[0].restore_tier))
+            cursor = anchor + timedelta(seconds=int(
+                waves[0].predicted_restore_complete_seconds
+                or (runtime.restore_forecast_bulk_complete_seconds if waves[0].restore_tier == "BULK"
+                    else runtime.restore_forecast_standard_complete_seconds)
+            ))
             for wave in waves:
                 wave.planned_transfer_start_at = cursor
                 has_submission = session.scalar(select(Task.id).where(
                     Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE"
                 ).limit(1)) is not None
                 if wave.status == "RESTORE_SCHEDULED" and not has_submission:
-                    restore_lead = restore_service_window_seconds(wave.restore_tier) + int(
-                        run.restore_safety_seconds or 0
-                    )
+                    restore_lead = int(
+                        wave.predicted_restore_complete_seconds
+                        or (runtime.restore_forecast_bulk_complete_seconds if wave.restore_tier == "BULK"
+                            else runtime.restore_forecast_standard_complete_seconds)
+                    ) + int(run.restore_safety_seconds or 0)
                     wave.planned_restore_at = max(migration_now, cursor - timedelta(seconds=restore_lead))
                 cursor += timedelta(seconds=max(1, int(wave.predicted_transfer_seconds or 1)))
             run.planner_version = "v3-service-window"
@@ -2463,7 +2478,10 @@ def runtime_clock(source_id: int | None = Query(default=None, ge=1),
         "source_name": source.name if source else None,
         "execution_id": source.simulation_execution_id if source else None,
         "system_now": system_now,
-        "virtual_now": clock.effective_now if runtime_context.is_simulation and source else None,
+        # A simulator timeout is intentionally non-fatal for the header.  Do
+        # not dereference the absent clock while reporting that it is
+        # temporarily unavailable.
+        "virtual_now": clock.effective_now if runtime_context.is_simulation and clock else None,
         "acceleration": clock.acceleration if clock else 1.0,
         "paused": clock.paused if clock else False,
         # A held clock is deliberately different from a manually paused one:
@@ -3967,6 +3985,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             else (0 if planned else max(0, int((end - start).total_seconds()))),
         }
 
+    settings = runtime_settings(session)
     board_waves = []
     for wave, row_source in rows:
         row_source_name = row_source.name
@@ -3991,12 +4010,18 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         if queued:
             phases.append(queued)
         restore_start = request_at or wave.planned_restore_at
+        restore_complete_forecast_seconds = int(
+            wave.predicted_restore_complete_seconds
+            or restore_forecast_seconds(wave.restore_tier, settings, source=row_source)[1]
+        )
         expected_first_available_at = (
-            restore_start + timedelta(seconds=(wave.predicted_restore_first_seconds or restore_forecast_seconds(wave.restore_tier)[0]))
+            restore_start + timedelta(seconds=(wave.predicted_restore_first_seconds or restore_forecast_seconds(
+                wave.restore_tier, settings, source=row_source
+            )[0]))
             if restore_start else None
         )
         expected_available_at = (
-            restore_start + timedelta(seconds=(wave.predicted_restore_complete_seconds or restore_service_window_seconds(wave.restore_tier)))
+            restore_start + timedelta(seconds=restore_complete_forecast_seconds)
             if restore_start else None
         )
         if request_at:
@@ -4005,7 +4030,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             restore_end = expected_available_at
         restore_progress_seconds = max(0, int((restore_end - restore_start).total_seconds())) if restore_start and restore_end else 0
         restore = phase("RESTORE", restore_start, restore_end, planned=not bool(request_at),
-                        expected_seconds=int(wave.predicted_restore_complete_seconds or restore_service_window_seconds(wave.restore_tier)),
+                        expected_seconds=restore_complete_forecast_seconds,
                         elapsed_seconds=restore_progress_seconds)
         if restore:
             phases.append(restore)
@@ -4014,7 +4039,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         # gap, expose it separately as readiness/waiting time.
         if request_at and not available_at and expected_available_at:
             forecast_restore = phase("RESTORE", restore_end, expected_available_at, planned=True,
-                                     expected_seconds=restore_service_window_seconds(wave.restore_tier),
+                                     expected_seconds=restore_complete_forecast_seconds,
                                      elapsed_seconds=restore_progress_seconds)
             if forecast_restore:
                 phases.append(forecast_restore)
@@ -6298,7 +6323,7 @@ def restore_forecast_seconds(tier: str | None, settings: RuntimeSettings | None 
     boundary; first availability is what warms the continuous lane.
     """
     if settings is None:
-        first, complete = ((30 * 3600, 72 * 3600) if tier == "BULK" else (4 * 3600, 18 * 3600))
+        first, complete = ((30 * 3600, 48 * 3600) if tier == "BULK" else (4 * 3600, 18 * 3600))
     elif tier == "BULK":
         first, complete = (int(settings.restore_forecast_bulk_first_seconds),
                            int(settings.restore_forecast_bulk_complete_seconds))
@@ -7012,8 +7037,17 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             elif wave.first_restore_available_virtual_at:
                 lane_start = wave.first_restore_available_virtual_at
             elif wave.restore_requested_virtual_at:
+                # The immutable per-wave Fujin forecast is more precise than
+                # the global fallback.  Replanning a submitted restore from a
+                # generic service window was stretching this source's 36h
+                # BULK profile to 72h and made the board invent a distant
+                # horizon.
+                restore_complete_seconds = int(
+                    wave.predicted_restore_complete_seconds
+                    or restore_forecast_seconds(wave.restore_tier, settings, source=run.source)[1]
+                )
                 lane_start = wave.restore_requested_virtual_at + timedelta(
-                    seconds=restore_service_window_seconds(wave.restore_tier)
+                    seconds=restore_complete_seconds
                 )
             elif wave.status == "RESTORE_SCHEDULED" and not has_batch_task:
                 # An unsubmitted horizon entry is intentionally mutable. Its
@@ -7048,7 +7082,7 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             # Batch task exists because changing it would falsify evidence.
             restore_lead = int(
                 wave.predicted_restore_complete_seconds
-                or restore_forecast_seconds(wave.restore_tier, settings)[1]
+                or restore_forecast_seconds(wave.restore_tier, settings, source=run.source)[1]
             ) + int(run.restore_safety_seconds or settings.dynamic_restore_safety_seconds)
             new_restore_at = max(scheduler_now, start - timedelta(seconds=restore_lead))
             shifted = abs((wave.planned_transfer_start_at - start).total_seconds()) if wave.planned_transfer_start_at else float("inf")
@@ -7068,7 +7102,10 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                     wave_id=wave.id,
                 )
         if run_changed:
-            run.planner_version = "v2-adaptive"
+            # Keep the semantic version that drives the repackage guard.
+            # Reverting it to v2 made every governance cycle treat the model
+            # as stale and repeatedly repack/reforecast an unchanged wave.
+            run.planner_version = CONTINUOUS_LANE_FORECAST_VERSION
     if changed:
         record_event(session, "DYNAMIC_PIPELINE_REPLANNED",
                      f"Adapted {changed} unsubmitted dynamic wave schedule(s) from observed transfer timings")
