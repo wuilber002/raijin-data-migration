@@ -648,6 +648,37 @@ def simulation_transfer_task_active(session, wave: Wave) -> bool:
     ).limit(1)) is not None
 
 
+def simulation_restore_poll_clock_leader(session, task: Task, wave: Wave) -> bool:
+    """Whether this poll owns the next advance of its source virtual clock.
+
+    Several restore waves share one FUJIN clock.  They may all observe their
+    own availability at that clock instant, but only one due poll can advance
+    it; otherwise two concurrent waves incorrectly consume two polling
+    intervals of the *same* source timeline.  This helper is intentionally
+    simulation-only.  REAL uses no virtual clock and keeps independent AWS
+    availability polling for every wave.
+    """
+    if not runtime_context.is_simulation or wave.source.backend_kind != "SIMULATED":
+        return False
+    due_by = utcnow() + timedelta(seconds=1)
+    leader_id = session.scalar(
+        select(Task.id)
+        .join(Wave)
+        .join(Source)
+        .where(
+            Task.kind == "POLL_RESTORE",
+            Wave.source_id == wave.source_id,
+            Task.state.in_([TaskState.READY, TaskState.RUNNING]),
+            or_(Task.available_at.is_(None), Task.available_at <= due_by),
+            Wave.status != "PAUSED",
+            Source.archived_at.is_(None),
+        )
+        .order_by(Task.available_at, Task.id)
+        .limit(1)
+    )
+    return leader_id == task.id
+
+
 def synchronize_simulation_source_clocks(session) -> int:
     """Keep every source-owned virtual clock stopped between explicit ticks.
 
@@ -1584,6 +1615,14 @@ def poll_restore_simulated(
                 session,
                 task,
                 "SIMULATED: availability polling deferred while transfer retains the virtual restore window",
+                1,
+            )
+            return
+        if not simulation_restore_poll_clock_leader(session, task, wave):
+            retry(
+                session,
+                task,
+                "SIMULATED: availability observed at the source clock; waiting for the source poll leader to advance it",
                 1,
             )
             return

@@ -23,7 +23,9 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 from datetime import datetime, timedelta, timezone
 
 from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, continuous_lane_capacity_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, internal_rate_value, list_sources, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, start_source_deep_audit, transfer_queue, wave_cost_estimate
-from app.real_worker import GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, require_new_restore_approval, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, task_kinds_for_role, validate_restore_preflight
+from app.real_worker import GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, require_new_restore_approval, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, simulation_restore_poll_clock_leader, task_kinds_for_role, validate_restore_preflight
+from app import real_worker
+from app.runtime_context import OperationMode, RuntimeContext
 
 
 def test_object_model_contains_durable_multipart_checkpoint_fields():
@@ -1057,6 +1059,36 @@ def test_simulation_clock_advances_only_through_durable_decisions():
     assert 'control_clock(source.simulation_execution_id, "RESUME")' not in worker
     assert "paused=True" in store and "paused_virtual_at=datetime.now(timezone.utc)" in store
     assert "Releasing an already-cleared hold is therefore a safe" in store
+
+
+def test_simulated_restore_polls_have_one_source_clock_leader(monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    simulated = RuntimeContext(mode=OperationMode.SIMULATION, database_url="sqlite://")
+    monkeypatch.setattr(real_worker, "runtime_context", simulated)
+    with Session() as session:
+        source = Source(name="shared-clock", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", backend_kind="SIMULATED")
+        first = Wave(source=source, name="first", max_bytes=1, restore_days=1,
+                     restore_tier="BULK", status="RESTORING")
+        second = Wave(source=source, name="second", max_bytes=1, restore_days=1,
+                      restore_tier="BULK", status="RESTORING")
+        session.add_all([source, first, second]); session.flush()
+        now = datetime.now(timezone.utc)
+        first_task = Task(wave_id=first.id, kind="POLL_RESTORE", state=TaskState.RUNNING,
+                          available_at=now - timedelta(seconds=1))
+        second_task = Task(wave_id=second.id, kind="POLL_RESTORE", state=TaskState.READY,
+                           available_at=now + timedelta(seconds=1))
+        session.add_all([first_task, second_task]); session.commit()
+
+        assert simulation_restore_poll_clock_leader(session, first_task, first)
+        assert not simulation_restore_poll_clock_leader(session, second_task, second)
+
+        monkeypatch.setattr(real_worker, "runtime_context", RuntimeContext(
+            mode=OperationMode.REAL, database_url="sqlite://"
+        ))
+        assert not simulation_restore_poll_clock_leader(session, first_task, first)
 
 
 def test_simulated_restore_reapproval_requires_confirmed_expiry_evidence():
