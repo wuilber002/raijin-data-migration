@@ -4238,9 +4238,18 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             source_id: max(board_timestamp(source_clock_now.get(source_id, now)), lane_end)
             for source_id, lane_end in dispatched_lane_end_by_source.items()
         }
-        rate_bps = max(1.0, float(settings.max_throughput_mbps) * 1_000_000 / 8)
+        # The frozen configured link is the blue baseline.  Once the lane has
+        # durable evidence of a lower effective capacity, the extra forecast
+        # is drawn separately in purple instead of silently stretching blue.
+        baseline_rate_bps = max(1.0, float(settings.max_throughput_mbps) * 1_000_000 / 8)
+        rate_bps_by_source: dict[int, float] = {}
         for item in queued_items:
             item_source_id = wave_by_id[item.wave_id].source_id
+            rate_bps = rate_bps_by_source.setdefault(item_source_id, max(
+                1.0, continuous_lane_capacity_profile(
+                    session, item_source_id, settings.max_throughput_mbps
+                )["effective_mbps"] * 1_000_000 / 8,
+            ))
             cursor = cursors_by_source.get(
                 item_source_id, board_timestamp(source_clock_now.get(item_source_id, now))
             )
@@ -4265,10 +4274,24 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                 prior["object_count"] += 1
                 if item.restore_expires_at and (prior["nearest_expiry_at"] is None or item.restore_expires_at < prior["nearest_expiry_at"]):
                     prior["nearest_expiry_at"] = item.restore_expires_at
+        lane_extensions: list[dict] = []
         for wave_id, projection in projection_by_wave.items():
+            projected_end = projection["end_at"]
+            baseline_seconds = max(1, math.ceil(
+                int(projection["bytes_transferred"] or 0) / baseline_rate_bps
+            ))
+            baseline_end = projection["start_at"] + timedelta(seconds=baseline_seconds)
+            if baseline_end < projection["end_at"]:
+                extension = dict(projection)
+                extension.update({"start_at": baseline_end, "forecast_extension": True,
+                                  "entry_reason": "extensão da projeção além da capacidade configurada"})
+                lane_extensions.append(extension)
+                projection["end_at"] = baseline_end
+                projection["expected_seconds"] = baseline_seconds
             board_by_id[wave_id]["transfer_queue_projected_start_at"] = projection["start_at"]
-            board_by_id[wave_id]["transfer_queue_projected_end_at"] = projection["end_at"]
+            board_by_id[wave_id]["transfer_queue_projected_end_at"] = projected_end
             transfer_lane_phases.append(projection)
+        transfer_lane_phases.extend(lane_extensions)
     transfer_lane_phases.sort(key=lambda item: (item["start_at"], item["end_at"], bool(item["planned"])))
     timeline_points = [point for wave in board_waves for phase_item in wave["phases"] for point in (phase_item["start_at"], phase_item["end_at"])]
     # The shared lane is rendered above the per-wave restore rows, but it is
