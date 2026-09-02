@@ -1521,6 +1521,31 @@ def create_schema() -> None:
         runtime = session.get(RuntimeSettings, 1)
         if runtime and int(runtime.restore_forecast_bulk_complete_seconds or 0) == 72 * 3600:
             runtime.restore_forecast_bulk_complete_seconds = 48 * 3600
+        # A source-level deep-audit action was briefly allowed for CONTROL
+        # simulations, which cannot replay payload bytes. Recover only this
+        # exact rejected audit signature: the migration evidence itself is
+        # already VERIFIED, and unrelated FAILED waves must remain untouched.
+        rejected_control_audits = list(session.scalars(select(Task).join(Wave).join(Source).where(
+            Task.kind == "VERIFY_WAVE", Task.state == TaskState.FAILED,
+            Task.error.contains("Deep SHA-256 audit requires a DATA simulation"),
+            Wave.status == "FAILED", Source.backend_kind == "SIMULATED",
+            Source.simulation_fidelity != "DATA",
+        )))
+        for task in rejected_control_audits:
+            wave = task.wave
+            outstanding = session.scalar(select(func.count(ObjectRecord.id)).where(
+                ObjectRecord.wave_id == wave.id, ObjectRecord.state != ObjectState.VERIFIED
+            )) or 0
+            if outstanding:
+                continue
+            task.state, task.error, task.completed_at, task.lease_expires_at = (
+                TaskState.CANCELLED, "Cancelled: deep audit requires DATA simulation; migration integrity remains verified.",
+                utcnow(), None,
+            )
+            wave.status = "COMPLETED"
+            record_event(session, "CONTROL_DEEP_AUDIT_CANCELLED",
+                         "Incompatible CONTROL deep-audit task cancelled; verified migration state restored.",
+                         source_id=wave.source_id, wave_id=wave.id)
         # Planner v1/v2 added the operational safety allowance to the first
         # AWS service window. Correct active forecasts once: the first handoff
         # is SLA-only, while safety continues to advance only future restore
@@ -4812,6 +4837,7 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
              "discovery_error": s.discovery_error, "discovery_pages_completed": s.discovery_pages_completed,
              "discovery_objects_inserted": s.discovery_objects_inserted,
              "last_discovery_mode": s.last_discovery_mode, "discovery_generation": s.discovery_generation,
+             "simulation_fidelity": s.simulation_fidelity,
              "discovery_can_resume": bool(s.discovery_continuation_token), "archived_at": s.archived_at,
              # Inventory and migration are separate lifecycles.  In
              # particular, DISCOVERED means the inventory is ready; it must
@@ -7671,6 +7697,7 @@ def get_source_cost_estimate(source_id: int, session: Session = Depends(get_sess
 @app.get("/api/waves/{wave_id}/deep-audit-preview")
 def deep_audit_preview(wave_id: int, session: Session = Depends(get_session)) -> dict:
     wave = wave_or_404(session, wave_id)
+    require_deep_audit_content_access(wave.source)
     if wave.status not in {"COMPLETED", "TRANSFERRED", "TRANSFERRED_WITH_ERRORS", "VERIFICATION_FAILED"}:
         raise HTTPException(status_code=409, detail="Integrity verification can only be requested after transfer completes")
     objects, total_bytes, multipart_evidence_objects = session.execute(select(
@@ -7696,9 +7723,18 @@ def source_deep_audit_candidates(session: Session, source: Source) -> list[Wave]
     ).order_by(Wave.id)) if wave.id not in queued_ids]
 
 
+def require_deep_audit_content_access(source: Source) -> None:
+    """A CONTROL simulation has no replayable bytes for a SHA-256 reread."""
+    if runtime_context.is_simulation and source.simulation_fidelity != "DATA":
+        raise HTTPException(status_code=409, detail=(
+            "Deep SHA-256 audit requires a DATA simulation; CONTROL validates logical state only"
+        ))
+
+
 @app.get("/api/sources/{source_id}/deep-audit-preview")
 def source_deep_audit_preview(source_id: int, session: Session = Depends(get_session)) -> dict:
     source = source_or_404(session, source_id)
+    require_deep_audit_content_access(source)
     waves = source_deep_audit_candidates(session, source)
     wave_ids = [wave.id for wave in waves]
     objects, total_bytes = session.execute(select(
@@ -7717,6 +7753,7 @@ def start_source_deep_audit(source_id: int, payload: DeepAuditStart,
     if not payload.confirmed:
         raise HTTPException(status_code=422, detail="Explicit deep-audit confirmation is required")
     source = source_or_404(session, source_id)
+    require_deep_audit_content_access(source)
     waves = source_deep_audit_candidates(session, source)
     if not waves:
         raise HTTPException(status_code=409, detail="No completed waves are eligible for a deep audit")
@@ -7739,6 +7776,7 @@ def verify_wave(wave_id: int, payload: DeepAuditStart, session: Session = Depend
     if not payload.confirmed:
         raise HTTPException(status_code=422, detail="Explicit deep-audit confirmation is required")
     wave = wave_or_404(session, wave_id)
+    require_deep_audit_content_access(wave.source)
     if wave.status not in {"COMPLETED", "TRANSFERRED", "TRANSFERRED_WITH_ERRORS", "VERIFICATION_FAILED"}:
         raise HTTPException(status_code=409, detail="Integrity verification can only be requested after transfer completes")
     queued = session.scalar(select(Task.id).where(
