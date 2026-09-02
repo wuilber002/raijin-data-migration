@@ -963,13 +963,13 @@ refreshAll();
     };
     flightBoardPhaseTooltip=function(phase){
       const [,label]=flightBoardPhase(phase.kind),observed=!phase.planned;
-      const durationLabel=phase.forecast_extension?'Extensão da previsão':observed?'Duração observada':'Duração prevista';
+      const durationLabel=phase.forecast_extension?'Duração observada':observed?'Duração observada':'Duração prevista';
       const restoreReference=phase.kind==='RESTORE'&&phase.reference_seconds!=null
         ? ` / ${flightBoardDuration(phase.reference_seconds)} [${escape(phase.restore_tier||'—')}] (previsto)` : '';
-      const durationValue=flightBoardDuration(observed?phase.elapsed_seconds:phase.expected_seconds)+restoreReference;
+      const durationValue=flightBoardDuration((observed||phase.forecast_extension)?phase.elapsed_seconds:phase.expected_seconds)+restoreReference;
       const timeBasis=phase.time_basis==='WINDOW_UNION'?'\nReferência: união da primeira abertura à última conclusão das janelas persistidas; segmentos paralelos não são somados.':phase.time_basis==='DISPATCHED_VIRTUAL_OCCUPANCY'?'\nReferência: ocupação virtual já despachada aos Raijus; ainda não é período observado no relógio virtual.':phase.time_basis==='READY_BACKLOG_PROJECTION'?'\nReferência: projeção do backlog já restaurado aguardando Raiju, após a ocupação virtual já despachada.':'';
       const lane=phase.kind==='TRANSFER'?`\nObjetos/bytes: ${fmt(phase.object_count||0)} · ${bytes(phase.bytes_transferred||0)}${timeBasis}${phase.entry_reason?`\nOrigem: ${phase.entry_reason}`:''}${phase.nearest_expiry_at?`\nExpiração mais próxima: ${flightBoardMoment(phase.nearest_expiry_at)}`:''}`:'';
-      return `Tipo: ${label}\nInício: ${flightBoardMoment(phase.start_at)} [${observed?'observado':'previsto'}]\n${durationLabel}: ${durationValue}${phase.forecast_extension?'\nA referência do tier foi ultrapassada; roxo indica extensão, não erro.':''}${lane}`;
+      return `Tipo: ${label}\nInício: ${flightBoardMoment(phase.start_at)} [${observed?'observado':'previsto'}]\n${durationLabel}: ${durationValue}${phase.forecast_extension?'\nJANELA ULTRAPASSOU A REFERÊNCIA PREVISTA DO TIER.':''}${lane}`;
     };
     flightBoardTransferSchedule=function(w){
       if(w.transfer_started_at)return `<b>Início observado:</b> ${flightBoardDate(w.transfer_started_at)}<br><b>Conclusão:</b> ${flightBoardDate(w.transfer_completed_at)}<br><b>Duração virtual:</b> ${w.transfer_elapsed_seconds!=null?flightBoardDuration(w.transfer_elapsed_seconds):'em andamento'}`;
