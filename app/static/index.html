@@ -1069,7 +1069,24 @@ refreshAll();
 <div id="source-completion-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="source-completion-title"><div class="modal-panel source-completion-panel"><div class="row"><h2 id="source-completion-title">Resultado da migração</h2><button class="secondary" type="button" onclick="closeSourceCompletionModal()">Fechar</button></div><div id="source-completion-content" class="hint">Carregando resumo…</div></div></div>
 <script>
   function closeSourceCompletionModal(){closeModal('#source-completion-modal')}
-  function completionDuration(seconds){return seconds===null||seconds===undefined?'—':duration(Math.abs(Number(seconds)))}
+  function completionDuration(seconds){
+    if(seconds===null||seconds===undefined)return '—';
+    let remaining=Math.max(0,Math.round(Math.abs(Number(seconds))));
+    // The report is a duration, not a timestamp: use stable operational
+    // calendar units (365 days/year and 30 days/month) and always retain the
+    // precise clock portion. Zero-valued larger units stay out of the label.
+    const years=Math.floor(remaining/(365*86400));remaining-=years*365*86400;
+    const months=Math.floor(remaining/(30*86400));remaining-=months*30*86400;
+    const days=Math.floor(remaining/86400);remaining-=days*86400;
+    const hours=Math.floor(remaining/3600);remaining-=hours*3600;
+    const minutes=Math.floor(remaining/60),secs=remaining-minutes*60;
+    const units=[];
+    if(years)units.push(`${years} ${years===1?'ano':'anos'}`);
+    if(months)units.push(`${months} ${months===1?'mês':'meses'}`);
+    if(days)units.push(`${days} ${days===1?'dia':'dias'}`);
+    units.push(`${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}:${String(secs).padStart(2,'0')}`);
+    return units.join(', ');
+  }
   function completionDifference(seconds){if(seconds===null||seconds===undefined)return '—';const n=Number(seconds);return `${n===0?'igual ao previsto':`${n<0?'−':'+'}${completionDuration(n)}`}`}
   async function showSourceCompletion(){
     if(!selectedSource)return say('Selecione uma origem.',true);
