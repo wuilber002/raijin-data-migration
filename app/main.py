@@ -491,6 +491,9 @@ class DynamicPipelineRun(Base):
     transfer_strategy: Mapped[str] = mapped_column(String(32), default="AFTER_ALL_RESTORED")
     scheduled_restores: Mapped[bool] = mapped_column(default=False)
     selection_prefix: Mapped[str] = mapped_column(String(1024), default="")
+    # The dynamic pipeline consumes exactly one inventory generation. A later
+    # rediscovery is the explicit operator-approved trigger for a new run.
+    discovery_generation: Mapped[int] = mapped_column(Integer, default=0)
     next_sequence: Mapped[int] = mapped_column(Integer, default=1)
     historical_samples: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
@@ -1444,6 +1447,7 @@ def create_schema() -> None:
         for column, sql_type in {
             "restore_horizon_waves": "INTEGER NOT NULL DEFAULT 3",
             "selection_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''",
+            "discovery_generation": "INTEGER NOT NULL DEFAULT 0",
             "next_sequence": "INTEGER NOT NULL DEFAULT 1",
         }.items():
             if column not in existing_run_columns:
@@ -5374,7 +5378,9 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
             "completion_statistics": source_completion_statistics(session, source, completed=migration_status == "COMPLETED"),
             "pipeline": {"status": pipeline.status if pipeline else "NOT_STARTED",
                          "run_id": pipeline.id if pipeline else None,
-                         "scheduled_restores": bool(pipeline.scheduled_restores) if pipeline else False},
+                         "scheduled_restores": bool(pipeline.scheduled_restores) if pipeline else False,
+                         "restore_days": int(pipeline.restore_days or 0) if pipeline else 0,
+                         "discovery_generation": int(pipeline.discovery_generation or 0) if pipeline else 0},
             "destination_validation": {"status": source.destination_validation_status, "at": source.destination_validation_at,
                                        "missing": source.destination_missing_count, "size_mismatches": source.destination_size_mismatch_count,
                                        "metadata_mismatches": source.destination_metadata_mismatch_count, "extras": source.destination_extra_count,
@@ -6246,9 +6252,23 @@ def preview_automatic_waves(source_id: int, max_bytes: int = Query(gt=0, le=10 *
             "oversized_objects": oversized, "prefix": prefix.strip(), "max_automatic_waves": 10000}
 
 
+def require_dynamic_pipeline_rediscovery(session: Session, source: Source) -> None:
+    """Prevent mixing ad-hoc waves into an active continuous source generation."""
+    run = session.scalar(select(DynamicPipelineRun).where(
+        DynamicPipelineRun.source_id == source.id,
+        DynamicPipelineRun.scheduled_restores.is_(True),
+        DynamicPipelineRun.status.not_in(["COMPLETED", "HISTORICAL"]),
+    ).order_by(DynamicPipelineRun.id.desc()).limit(1))
+    if run and int(run.discovery_generation or 0) >= int(source.discovery_generation or 0):
+        raise HTTPException(status_code=409, detail=(
+            "Continuous transfer lane is active for this inventory. Run a rediscovery that finds new objects before creating more waves."
+        ))
+
+
 @app.post("/api/sources/{source_id}/waves", status_code=201)
 def create_wave(source_id: int, payload: WaveCreate, session: Session = Depends(get_session)) -> dict:
     source = active_source_or_409(session, source_id)
+    require_dynamic_pipeline_rediscovery(session, source)
     require_non_overlapping_source_scope(session, source)
     if session.scalar(select(Wave).where(Wave.source_id == source_id, Wave.name == payload.name)):
         raise HTTPException(status_code=409, detail="Wave name already exists for this source")
@@ -6266,6 +6286,7 @@ def create_wave(source_id: int, payload: WaveCreate, session: Session = Depends(
 @app.post("/api/sources/{source_id}/waves/automatic", status_code=201)
 def create_automatic_waves(source_id: int, payload: AutomaticWaveCreate, session: Session = Depends(get_session)) -> dict:
     source = active_source_or_409(session, source_id)
+    require_dynamic_pipeline_rediscovery(session, source)
     require_non_overlapping_source_scope(session, source)
     preview = preview_automatic_waves(source_id, payload.max_bytes, payload.prefix, session)
     if not preview["objects"]:
@@ -7216,6 +7237,7 @@ def preview_dynamic_waves(source_id: int, prefix: str = Query(default="", max_le
 @app.post("/api/sources/{source_id}/waves/dynamic", status_code=201)
 def create_dynamic_waves(source_id: int, payload: DynamicWaveCreate, session: Session = Depends(get_session)) -> dict:
     source = active_source_or_409(session, source_id)
+    require_dynamic_pipeline_rediscovery(session, source)
     require_non_overlapping_source_scope(session, source)
     settings = runtime_settings(session)
     target_transfer_seconds, reserve_seconds = automatic_dynamic_duration_limit(payload.restore_days)
@@ -7231,7 +7253,7 @@ def create_dynamic_waves(source_id: int, payload: DynamicWaveCreate, session: Se
         max_objects=DYNAMIC_PLATFORM_MAX_OBJECTS, restore_safety_seconds=settings.dynamic_restore_safety_seconds,
         restore_days=payload.restore_days, restore_tier=payload.restore_tier,
         transfer_strategy="AS_OBJECTS_AVAILABLE", scheduled_restores=True,
-        selection_prefix=payload.prefix.strip(), next_sequence=1,
+        selection_prefix=payload.prefix.strip(), discovery_generation=int(source.discovery_generation or 0), next_sequence=1,
         restore_horizon_waves=settings.dynamic_restore_horizon_waves,
         historical_samples=sum(value["samples"] for value in transfer_history_profiles(
             session, source.id, settings.multipart_part_size_mib
