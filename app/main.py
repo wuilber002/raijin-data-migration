@@ -6078,55 +6078,40 @@ def adaptive_restore_slot_limit(session: Session, run: DynamicPipelineRun,
                                 settings: RuntimeSettings) -> int:
     """Return the durable restore-lane capacity for one dynamic pipeline.
 
-    Two concurrent restores are the safe cold-start baseline.  Only after at
-    least three completed waves provide usable timing evidence can Raikou add
-    slots, and then only when the observed/planned restore lead would otherwise
-    leave the single Raiju transfer lane idle.  A deliberately small ceiling
-    prevents a temporary noisy estimate from creating an expensive restore
-    fan-out.
+    Two concurrent restores are the safe cold-start baseline.  A third slot is
+    justified only when measured lane capacity says that the stock already
+    restored *plus the still-untransferred bytes in the active restores* cannot
+    cover one more restore reference window and the target buffer.  This makes
+    the decision useful before three waves finish, without pre-restoring data
+    that would sit through its temporary-retention period.
     """
     baseline = 2
-    completed = list(session.scalars(select(Wave).where(
-        Wave.pipeline_run_id == run.id,
-        Wave.status.in_(["COMPLETED", "VERIFIED", "TRANSFERRED"]),
-        Wave.predicted_transfer_seconds > 0,
-    ).order_by(Wave.id.desc()).limit(12)))
-    if len(completed) < 3:
-        return baseline
-    predicted = sorted(float(w.predicted_transfer_seconds) for w in completed)
-    transfer_seconds = predicted[len(predicted) // 2]
-    if transfer_seconds <= 0:
-        return baseline
-    # Prefer observed end-to-end restore timings once the source has enough
-    # completed waves.  The service-window fallback remains intentionally
-    # conservative for a cold source and for sparse/partial evidence.
-    observed_restore_seconds: list[float] = []
-    completed_by_id = {wave.id: wave for wave in completed}
-    for wave_id, requested_at, available_at in session.execute(select(
-        ObjectRecord.wave_id,
-        func.min(ObjectRecord.restore_requested_at),
-        func.max(ObjectRecord.restored_at),
-    ).where(
-        ObjectRecord.wave_id.in_(tuple(completed_by_id)),
-        ObjectRecord.restore_requested_at.is_not(None),
-        ObjectRecord.restored_at.is_not(None),
-    ).group_by(ObjectRecord.wave_id)):
-        wave = completed_by_id[wave_id]
-        if wave.source.backend_kind == "SIMULATED":
-            requested_at = wave.restore_requested_virtual_at or requested_at
-            available_at = wave.last_restore_available_virtual_at or available_at
-        if requested_at and available_at and available_at >= requested_at:
-            observed_restore_seconds.append((available_at - requested_at).total_seconds())
-    restore_seconds = (
-        percentile_75(observed_restore_seconds)
-        if len(observed_restore_seconds) >= 3
-        else restore_forecast_seconds(run.restore_tier, settings)[1]
-    )
-    needed_for_continuity = math.ceil(restore_seconds / transfer_seconds)
-    retention_seconds = max(1, int(run.restore_days)) * 24 * 3600
-    safe_by_retention = max(baseline, int(retention_seconds // transfer_seconds))
     configured_ceiling = max(baseline, min(4, int(settings.dynamic_restore_max_slots or 4)))
-    return max(baseline, min(configured_ceiling, safe_by_retention, needed_for_continuity))
+    if configured_ceiling <= baseline:
+        return baseline
+    lane_profile = continuous_lane_capacity_profile(session, run.source_id, settings.max_throughput_mbps)
+    if int(lane_profile.get("samples") or 0) <= 0:
+        # No source-specific rate yet: do not turn a cold-start guess into
+        # extra restore cost. The initial two waves establish that evidence.
+        return baseline
+    active_states = ("RESTORE_REQUESTED", "RESTORE_REQUEST_ACCEPTED", "RESTORING", "RESTORE_DRAINING")
+    active_wave_ids = list(session.scalars(select(Wave.id).where(
+        Wave.pipeline_run_id == run.id, Wave.status.in_(active_states)
+    )))
+    remaining_bytes = 0
+    if active_wave_ids:
+        remaining_bytes = int(session.scalar(select(func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(
+            ObjectRecord.wave_id.in_(active_wave_ids),
+            ObjectRecord.state.not_in([ObjectState.TRANSFERRED, ObjectState.VERIFIED]),
+        )) or 0)
+    lane_bps = max(1.0, float(lane_profile["effective_mbps"]) * 1_000_000 / 8)
+    protected_stock = continuous_lane_backlog_seconds(session, run.source_id) + remaining_bytes / lane_bps
+    restore_seconds = restore_service_window_seconds(run.restore_tier)
+    target_seconds = max(0, int(settings.continuous_transfer_target_buffer_seconds or 0))
+    retention_seconds = max(1, int(run.restore_days)) * 24 * 3600
+    if retention_seconds <= restore_seconds + target_seconds:
+        return baseline
+    return min(configured_ceiling, 3) if protected_stock < restore_seconds + target_seconds else baseline
 
 
 def materialize_dynamic_pipeline_horizon(session: Session, settings: RuntimeSettings,

@@ -1565,7 +1565,7 @@ def test_transfer_queue_exposes_source_scoped_raiju_lane_not_an_active_wave_owne
         ]
 
 
-def test_adaptive_restore_capacity_honors_global_ceiling_after_history():
+def test_adaptive_restore_capacity_keeps_cold_source_at_two_slots_without_lane_evidence():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
@@ -1581,7 +1581,7 @@ def test_adaptive_restore_capacity_honors_global_ceiling_after_history():
             for index in range(3)
         ])
         session.flush()
-        assert adaptive_restore_slot_limit(session, run, settings) == 3
+        assert adaptive_restore_slot_limit(session, run, settings) == 2
 
 
 def test_failed_dynamic_wave_stops_future_restore_releases():
