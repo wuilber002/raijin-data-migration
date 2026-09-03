@@ -138,6 +138,16 @@ def test_wave_actions_use_a_fixed_order_and_manifest_is_a_button():
     assert "#waves .wave-actions .wave-action" in page
 
 
+def test_wave_table_prioritizes_compact_operational_columns_without_copy_duration():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    start = page.index("async function loadWaves()")
+    renderer = page[start:page.index("async function verifyWave", start)]
+    assert '<th>Restore</th><th>Ações</th>' in renderer
+    assert "Duração da cópia" not in renderer
+    assert "transfer_duration_seconds" not in renderer
+    assert "#waves th,#waves td{white-space:nowrap}" in page
+
+
 def test_discovered_objects_and_source_cost_actions_live_in_the_discovery_summary():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     source_actions = page[page.index('<div class="row source-actions">'):page.index('<div id="source-summary"')]
