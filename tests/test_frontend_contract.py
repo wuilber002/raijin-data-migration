@@ -126,6 +126,18 @@ def test_wave_report_is_a_scrollable_modal():
     assert ".report-content{max-height:72vh;overflow:auto" in page
 
 
+def test_wave_actions_use_a_fixed_order_and_manifest_is_a_button():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    start = page.index("function normalizeWaveActions()")
+    handler = page[start:page.index("const loadWavesWithNormalizedActions", start)]
+    assert "manifest.replaceWith(button)" in handler
+    assert "button.onclick=()=>window.location.assign(href)" in handler
+    assert "const actionItems=[cost,report,manifest,queue,audit,pause,resume,reprocess,remove]" in handler
+    assert "setText(report,'Report')" in handler
+    assert "setText(manifest,'Manifest CSV')" in handler
+    assert "#waves .wave-actions .wave-action" in page
+
+
 def test_discovered_objects_and_source_cost_actions_live_in_the_discovery_summary():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     source_actions = page[page.index('<div class="row source-actions">'):page.index('<div id="source-summary"')]

@@ -1211,6 +1211,62 @@ refreshAll();
     const loadSummaryWithArrival=loadSummary;
     loadSummary=async function(){await loadSummaryWithArrival();const source=sources.find(item=>String(item.id)===String(selectedSource));sourceCompletionAvailable=source?.operational_status==='COMPLETED';ensureArrivalButton()};
   })();
+  /* Keep every wave action in a stable visual slot.  The underlying action
+     availability is unchanged; disabled controls deliberately retain their
+     place so rows do not visually jump as a wave changes state. */
+  function normalizeWaveActions(){
+    for(const actions of document.querySelectorAll('#waves tbody td:last-child')){
+      const label=element=>(element?.textContent||'').replace(/\s+/g,' ').trim();
+      const children=()=>[...actions.children];
+      const find=test=>children().find(test);
+      let manifest=find(element=>element.matches('a[href*="/manifest.csv"],button.manifest-action'));
+      if(manifest?.tagName==='A'){
+        const href=manifest.href;
+        const button=document.createElement('button');
+        button.type='button';button.className='secondary wave-action manifest-action';
+        button.title='Download the CSV manifest for this wave.';
+        button.onclick=()=>window.location.assign(href);
+        manifest.replaceWith(button);manifest=button;
+      }
+      const cost=find(element=>element.classList.contains('wave-cost-action'));
+      const report=find(element=>/^(Relatório|Report)$/.test(label(element)));
+      const queue=find(element=>/^(Adicionar à fila|Add to queue)$/.test(label(element)));
+      const audit=find(element=>/SHA-256|Auditoria profunda|Deep audit|Verificar integridade/i.test(label(element)));
+      const pause=find(element=>/^(Pausar|Pause)$/.test(label(element)));
+      const resume=find(element=>/^(Retomar|Resume)$/.test(label(element)));
+      const reprocess=find(element=>/^(Reprocessar|Reprocess)$/.test(label(element)));
+      const remove=find(element=>/^(Excluir|Delete)$/.test(label(element)));
+      const actionItems=[cost,report,manifest,queue,audit,pause,resume,reprocess,remove].filter(Boolean);
+      if(!actionItems.length)continue;
+      actions.classList.add('wave-actions','wave-actions-cell');
+      for(const item of actionItems)item.classList.add('wave-action');
+      const setText=(item,text)=>{if(item&&item.textContent.trim()!==text)item.textContent=text};
+      if(cost){cost.classList.add('cost-action');setText(cost,'💰 Estimativa');}
+      setText(report,'Report');
+      if(manifest){manifest.classList.add('manifest-action');setText(manifest,'Manifest CSV');}
+      if(queue)queue.classList.add('queue-action');
+      // The existing audit formatter owns its translated label and help icon.
+      if(audit)audit.classList.add('audit-action');
+      setText(pause,'Pause');
+      setText(resume,'Resume');
+      setText(reprocess,'Reprocess');
+      setText(remove,'Delete');
+      const current=children().filter(item=>actionItems.includes(item));
+      if(current.length!==actionItems.length||current.some((item,index)=>item!==actionItems[index])){
+        for(const item of actionItems)actions.append(item);
+      }
+    }
+  }
+  const loadWavesWithNormalizedActions=loadWaves;
+  loadWaves=async function(){
+    await loadWavesWithNormalizedActions();
+    // Mutation observers that add cost/queue controls run at the microtask
+    // checkpoint; wait for them before putting the fixed order in place.
+    await Promise.resolve();
+    normalizeWaveActions();
+  };
+  new MutationObserver(normalizeWaveActions).observe($('#waves'),{childList:true,subtree:true});
+  document.addEventListener('raijin:language-changed',normalizeWaveActions);
 </script>
 <style>
   .source-completion-panel{width:min(900px,calc(100vw - 2rem));max-height:calc(100vh - 2rem);overflow-y:auto}
@@ -1218,5 +1274,9 @@ refreshAll();
   .source-completion-loading{display:grid;place-items:center;gap:.7rem;min-height:220px;text-align:center;color:#bfdbfe}.source-completion-loading strong{color:#e7eefb}.source-completion-loading small{max-width:30rem;color:#94a3b8}.source-completion-spinner{width:2.25rem;height:2.25rem;border:4px solid #60a5fa40;border-top-color:#60a5fa;border-radius:50%;animation:source-completion-spin .75s linear infinite}@keyframes source-completion-spin{to{transform:rotate(360deg)}}
   #wave-creation-controls.continuous-wave-creation-locked .wave-method{display:none!important}#continuous-wave-creation-lock{margin:.85rem 0 0}
   .modal-calculation-loading{display:grid;place-items:center;gap:.7rem;min-height:220px;text-align:center;color:#bfdbfe}.modal-calculation-loading strong{color:#e7eefb}.modal-calculation-loading small{max-width:30rem;color:#94a3b8}.modal-calculation-spinner{width:2.25rem;height:2.25rem;border:4px solid #60a5fa40;border-top-color:#60a5fa;border-radius:50%;animation:modal-calculation-spin .75s linear infinite}@keyframes modal-calculation-spin{to{transform:rotate(360deg)}}
+  #waves .wave-actions{display:flex;align-items:center;gap:.35rem;flex-wrap:nowrap;min-width:max-content;white-space:nowrap}
+  #waves .wave-actions .wave-action{display:inline-flex!important;align-items:center;justify-content:center;flex:0 0 auto!important;min-width:0!important;height:40px;min-height:40px;margin:0;padding:.45rem .7rem!important;border-radius:5px;font-size:.86rem;line-height:1.1;white-space:nowrap}
+  #waves .wave-actions .wave-cost-action{width:105px!important}.wave-actions .manifest-action{width:76px!important}.wave-actions .audit-action{width:160px!important}.wave-actions .queue-action{width:118px!important}.wave-actions .warn{width:55px!important}.wave-actions .wave-action:not(.wave-cost-action):not(.manifest-action):not(.audit-action):not(.queue-action):not(.warn){width:78px!important}
+  #waves .wave-actions-cell{padding-block:.5rem;vertical-align:middle}
 </style>
 </body></html>
