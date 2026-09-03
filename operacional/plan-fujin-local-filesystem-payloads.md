@@ -149,3 +149,60 @@ O modo atual, que gera bytes determinísticos a partir do catálogo, permanece o
 - Alteração, remoção, symlink ou escape de root após o snapshot falha de forma explícita, auditável e sem leitura fora do dataset.
 - Nenhuma credencial AWS/OCI é necessária; o simulador continua isolado.
 - O relatório permite provar qual dataset e qual snapshot abasteceram a execução.
+
+## Preparação para o teste de alta fidelidade
+
+O produto deve ser implementado e testado primeiro com datasets pequenos. A execução representativa de uma source lógica de 100 TB fica planejada para quando houver capacidade de armazenamento suficiente; ela não depende de criar um bucket AWS de 100 TB.
+
+### Perfil alvo: source lógica de 100 TB
+
+| Aspecto | Alvo |
+|---|---|
+| Catálogo lógico | 100 TB, com distribuição de objetos, prefixes e storage classes inspirada na source a ser migrada |
+| Dataset físico único | 5–10 TB de arquivos locais únicos; 10 TB é o alvo recomendado |
+| Modelo Fujin | `HYBRID`: waves físicas distribuídas ao longo do pipeline, não concentradas no início |
+| Origem física | volume local dedicado, montado somente leitura no simulador |
+| Destino | evidência simulada atual na primeira etapa; persistência física de destino é extensão separada |
+| Nuvem pública | nenhuma chamada AWS/OCI no modo Simulation |
+
+### Distribuição inicial do dataset físico
+
+Esta distribuição é uma base de capacidade, não uma verdade universal. Antes do teste, ela deve ser recalibrada com o histograma do inventário real ou esperado.
+
+| Faixa de tamanho | Quantidade de referência | Volume aproximado | Finalidade |
+|---|---:|---:|---|
+| 1 KB–10 MB | 100.000 | 200 GB | metadata, arquivos pequenos, throughput de operações |
+| 10 MB–1 GB | 20.000 | 2 TB | streaming, checksum, concorrência comum |
+| 1–20 GB | 800 | 5 TB | multipart, retry e retomada |
+| 20–100 GB | 50 | 3 TB | transferências longas e pressão sustentada |
+
+O total de referência é próximo de 10 TB. Se só 5 TB estiverem disponíveis, preservar todas as faixas e reduzir a quantidade proporcionalmente; não substituir o conjunto por poucos arquivos gigantes repetidos.
+
+### Recursos a solicitar no momento oportuno
+
+1. Volume de bloco dedicado de **10 TB úteis** (mínimo aceitável: 5 TB), com IOPS/throughput conhecidos e monitorados.
+2. Espaço adicional de 15–20% para staging controlado, hashes temporários, logs e crescimento do filesystem. O mount entregue ao Fujin continua estritamente somente leitura.
+3. VM ou host de teste com CPU, memória e rede documentadas; o teste mede a combinação host + volume + link, não somente o Fujin.
+4. Janela operacional sem outras cargas intensivas no mesmo volume/link.
+5. Dataset sintético ou anonimizado com distribuição aprovada. Nenhum dado de produção deve ser copiado sem revisão de privacidade e retenção.
+6. Se a intenção futura for validar escrita física de destino, um segundo volume independente, com capacidade equivalente à amostra física, e uma extensão específica do Fujin para persistir o destino.
+
+### Artefatos que devem existir antes de solicitar os recursos
+
+1. Manifesto versionado do dataset: contagem, tamanhos, histogramas, prefixes, classe de storage, seed, hash por arquivo e política de retenção.
+2. Gerador determinístico de dataset capaz de criar a distribuição aprovada em lotes, retomar após interrupção e verificar hashes sem carregar arquivos inteiros na memória.
+3. Template `HYBRID` versionado, com regra determinística de quais waves usam `LOCAL_FILE` e quais usam `DETERMINISTIC`.
+4. Runbook de provisionamento: formatação/mount do volume, permissões, bind mount read-only no container, cadastro do dataset, importação, validação e limpeza.
+5. Dashboard/report com: bytes lógicos, bytes físicos únicos, bytes físicos efetivamente lidos, arquivos por faixa, taxa de leitura, uso do link, cache e falhas de snapshot.
+6. Plano de rollback e limpeza que nunca apague o dataset físico por meio da operação de purge do cenário.
+
+### Fases de execução quando a capacidade existir
+
+1. **Smoke físico (20–100 GB):** validar mount, importação, restore, range, checksum, multipart e expiração.
+2. **Ensaio operacional (1 TB):** validar concorrência, queue, Raikou, pause/resume, retry e relatório sob carga prolongada.
+3. **Validação representativa (5–10 TB):** executar o perfil híbrido de 100 TB lógico, com waves físicas distribuídas pelo calendário virtual.
+4. **Opcional — sustentação integral:** somente quando houver 100 TB físicos únicos e destino físico: medir cópia completa, desgaste de I/O e comportamento de longa duração.
+
+### Go / no-go para a validação representativa
+
+Só iniciar a fase de 5–10 TB se: o snapshot do dataset estiver íntegro; o volume possuir espaço livre previsto; o mount read-only tiver sido validado; o histograma estiver aprovado; a suíte de regressão do Fujin/Raijin estiver verde; e métricas de host/link estiverem sendo coletadas. Qualquer divergência de snapshot, erro de isolamento ou falta de telemetria bloqueia o teste, pois invalidaria sua interpretação.
