@@ -36,6 +36,42 @@ O modo atual, que gera bytes determinísticos a partir do catálogo, permanece o
 
 5. Um dataset é transformado em snapshot no momento da importação/materialização. Arquivos alterados, removidos ou substituídos depois disso devem falhar de modo explícito, nunca serem lidos silenciosamente como se fossem o snapshot original.
 
+### Acordos aprovados antes da implementação — 2026-09-03
+
+| # | Decisão aprovada | Registro objetivo |
+|---:|---|---|
+| 1 | Escopo físico inicial | Somente fonte física local; destino simulado continua consumindo bytes e persistindo evidências. |
+| 2 | Modelos de massa | `VIRTUAL`, `REPRESENTATIVE` e `HYBRID`, disponíveis somente em `DATA`. |
+| 3 | Composição híbrida | Waves/faixas físicas são escolhidas explicitamente, de forma determinística e persistida no snapshot. |
+| 4 | Amostra compartilhada | A associação objeto lógico → arquivo físico é determinística e reportada. |
+| 5 | Integridade do dataset | Snapshot imutável; qualquer divergência de arquivo falha de forma auditável. |
+| 6 | Posse do repositório | O repositório é criado, lido, versionado e removido exclusivamente pelo Fujin. |
+| 7 | Origem do conteúdo | Primeira versão gera arquivos internamente; importação externa fica fora do escopo. |
+| 8 | Quota e lifecycle | Dataset recebe quota congelada, retenção, quarentena e limpeza apenas sem referências. |
+| 9 | Checksum | SHA-256 é calculado durante a geração e gravado no manifesto. |
+| 10 | Restore | Existência física não implica disponibilidade: classe, restore e expiração continuam lógicos. |
+| 11 | Perfil de massa | Histograma, prefixes, classes e multipart são versionados por perfil e seed. |
+| 12 | Momento de geração | Dataset é gerado e validado antes da execução; geração não compete com a transferência. |
+| 13 | Reuso | Datasets imutáveis são reutilizados por referência entre cenários e replays. |
+| 14 | Volume | Repositório vive em volume persistente dedicado, separado de banco, logs e releases. |
+| 15 | Relógio | Transferência física usa duração observada; relógio virtual não ultrapassa trabalho físico pendente. |
+| 16 | Rede | Perfil de rede do Fujin limita o stream; disco e link são medidos separadamente. |
+| 17 | Cache | Execuções identificam explicitamente `cold start` ou `warm cache`; Fujin não limpa cache do host. |
+| 18 | Falhas | Corrupção/retry/falhas são injetados no stream/operação, nunca alterando arquivos persistidos. |
+| 19 | Interface | Operador solicita ações de alto nível; não há path, browser, upload ou download direto de arquivos. |
+| 20 | Geração | Geração, hashing e validação são jobs duráveis, retomáveis; só dataset `READY` pode ser usado. |
+| 21 | Bytes | Conteúdo padrão tem alta entropia, não é sparse e ocupa o tamanho físico declarado. |
+| 22 | Layout interno | Arquivos são shardados por dataset/hash; chave S3 permanece independente no catálogo. |
+| 23 | Storage class | Perfil declara mistura de classes e tiers `BULK`/`STANDARD`; não pressupõe restore para todos os objetos. |
+| 24 | Topologia | Prefixes/prioridades e amostra física são distribuídos pelo pipeline, não concentrados em uma wave. |
+| 25 | Recursos | Limites de leitura, descritores, bloco, CPU de hash e taxa local são congelados por cenário. |
+| 26 | Evidência | Relatório de fidelidade física é obrigatório e registra configuração, métricas e divergências. |
+| 27 | Aprovação | Baseline versionada usa faixas; integridade e snapshot exigem zero divergência. |
+| 28 | Recuperação | Dataset é recriável por manifesto, seed e gerador; backup de volume é complementar. |
+| 29 | Importação externa | Não integra a primeira versão; futura importação será iniciativa controlada e separada. |
+| 30 | Isolamento real | Volume só é montado no Fujin; `REAL` rejeita qualquer payload local. |
+| 31 | Destino físico | Não haverá persistência física no destino por ora; eventual extensão terá volume independente. |
+
 ## Modelo de dados e migração
 
 1. Adicionar uma migração de schema do simulador.
