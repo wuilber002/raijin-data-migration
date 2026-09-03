@@ -23,7 +23,7 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 from datetime import datetime, timedelta, timezone
 
 from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, continuous_lane_capacity_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, internal_rate_value, list_sources, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, start_source_deep_audit, transfer_queue, wave_cost_estimate
-from app.real_worker import GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, require_new_restore_approval, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, simulation_restore_poll_clock_leader, task_kinds_for_role, validate_restore_preflight
+from app.real_worker import GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, require_new_restore_approval, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, simulation_restore_poll_clock_leader, simulation_source_lane_has_committed_work, task_kinds_for_role, validate_restore_preflight
 from app import real_worker
 from app.runtime_context import OperationMode, RuntimeContext
 
@@ -1161,6 +1161,35 @@ def test_simulated_restore_reapproval_requires_confirmed_expiry_evidence():
     assert "def simulation_restore_expiry_confirmed" in worker
     assert "SIMULATOR_RESTORE_STATE_MISMATCH" in worker
     assert "not simulation_restore_expiry_confirmed(session, wave, source)" in worker
+
+
+def test_simulated_clock_waits_for_durable_lane_work_on_its_own_source(monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(real_worker, "runtime_context", RuntimeContext(
+        mode=OperationMode.SIMULATION, database_url="sqlite://"
+    ))
+    with Session() as session:
+        source = Source(name="lane-clock", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", backend_kind="SIMULATED")
+        other = Source(name="other-clock", s3_bucket="other", aws_region="us-east-1",
+                       destination_bucket="other", backend_kind="SIMULATED")
+        wave = Wave(source=source, name="wave", max_bytes=1, restore_days=1,
+                    restore_tier="BULK", status="TRANSFERRING")
+        other_wave = Wave(source=other, name="other-wave", max_bytes=1, restore_days=1,
+                          restore_tier="BULK", status="RESTORING")
+        session.add_all([source, other, wave, other_wave]); session.flush()
+        obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="ready.bin",
+                           size_bytes=1, state=ObjectState.RESTORED)
+        session.add(obj); session.flush()
+        session.add(TransferQueueItem(source_id=source.id, wave_id=wave.id,
+                                      object_id=obj.id, size_bytes=1,
+                                      state=TransferQueueState.READY))
+        session.commit()
+
+        assert simulation_source_lane_has_committed_work(session, source)
+        assert not simulation_source_lane_has_committed_work(session, other)
 
 
 def test_continuous_lane_releases_each_observed_object_without_a_percent_threshold():

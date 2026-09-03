@@ -636,9 +636,29 @@ def advance_simulation_clock(session, source: Source, seconds: float, reason: st
     return bounded
 
 
+def simulation_source_lane_has_committed_work(session, source: Source) -> bool:
+    """Whether simulation time must wait for durable lane work on a source.
+
+    A dispatcher is short-lived: it may finish one batch while leases, a
+    retry, or the next READY batch still represent lane work. Looking only at
+    its ``RUNNING`` instant let restore polling fast-forward Fujin between
+    batches and age restored data without a corresponding lane interval.
+    """
+    if not runtime_context.is_simulation or source.backend_kind != "SIMULATED":
+        return False
+    return session.scalar(select(TransferQueueItem.id).where(
+        TransferQueueItem.source_id == source.id,
+        TransferQueueItem.state.in_([
+            TransferQueueState.AVAILABLE, TransferQueueState.READY,
+            TransferQueueState.LEASED, TransferQueueState.MULTIPART_RESUME,
+            TransferQueueState.RETRY_WAIT,
+        ]),
+    ).limit(1)) is not None
+
+
 def simulation_transfer_task_active(session, wave: Wave) -> bool:
-    """Whether a Raiju dispatcher currently owns this source's lane."""
-    return session.scalar(select(Task.id).join(Wave).where(
+    """Whether a Raiju owns, or has durably committed, this source's lane."""
+    dispatcher_running = session.scalar(select(Task.id).join(Wave).where(
         Wave.source_id == wave.source_id,
         Task.kind == "TRANSFER_CONTINUOUS",
         # A READY dispatcher has not started I/O.  Treating it as active
@@ -646,6 +666,18 @@ def simulation_transfer_task_active(session, wave: Wave) -> bool:
         # stall the restore scheduler indefinitely.
         Task.state == TaskState.RUNNING,
     ).limit(1)) is not None
+    return dispatcher_running or simulation_source_lane_has_committed_work(session, wave.source)
+
+
+def release_simulation_source_lane_holds_if_idle(session, source: Source) -> None:
+    """Release hand-off holds only after the source lane is durably empty."""
+    if not runtime_context.is_simulation or simulation_source_lane_has_committed_work(session, source):
+        return
+    for held_wave in session.scalars(select(Wave).where(
+        Wave.source_id == source.id,
+        Wave.simulation_transfer_clock_held.is_(True),
+    )):
+        release_simulation_clock_after_transfer(session, held_wave)
 
 
 def simulation_restore_poll_clock_leader(session, task: Task, wave: Wave) -> bool:
@@ -1588,6 +1620,10 @@ def poll_restore_simulated(
             if wave.transfer_release_policy == "AS_OBJECTS_AVAILABLE" else 0
         )
         if released:
+            # Freeze the source clock before the first ready object leaves
+            # polling. The lane later advances this same clock by its durable
+            # simulated occupancy, rather than by worker turnaround time.
+            retain_simulation_clock_for_transfer(session, wave)
             ensure_transfer_task(session, wave, settings)
             event(
                 session,
@@ -1612,7 +1648,7 @@ def poll_restore_simulated(
         # calls.  Never advance it while a Raiju transfer hold is active: that
         # would consume a temporary restore window while actual copy work is
         # still running.
-        if wave.simulation_transfer_clock_held or simulation_transfer_task_active(session, wave):
+        if wave.simulation_transfer_clock_held or simulation_source_lane_has_committed_work(session, source):
             retry(
                 session,
                 task,
@@ -3300,6 +3336,7 @@ def transfer_continuous(session, task: Task, settings) -> None:
             )
         reconcile_continuous_source_waves(session, source)
         refresh_transfer_queue_priorities(session, source.id, now=_continuous_source_now(source))
+        release_simulation_source_lane_holds_if_idle(session, source)
         session.commit()
     # Mark this dispatch cycle complete *before* asking Raikou for the next
     # one; a new durable task is then immediately eligible if backlog exists.
