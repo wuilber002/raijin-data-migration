@@ -16,10 +16,13 @@ O modo atual, que gera bytes determinísticos a partir do catálogo, permanece o
 
 ## Decisões de desenho
 
-1. Criar um modo de payload por objeto, e não alterar o comportamento global do engine:
+1. Expor três modelos de massa na criação da execução. O modo de payload continua registrado por objeto, mas o modelo explica ao operador como o catálogo inteiro será composto:
 
-   - `DETERMINISTIC` — padrão atual, sempre disponível;
-   - `LOCAL_FILE` — somente para execução `DATA` e objeto importado de um dataset local imutável.
+   - **Catálogo virtual** (`VIRTUAL`) — modelo atual: todos os objetos usam payload determinístico. É apropriado para escala lógica, planejamento e testes de controle; não exige arquivos no disco.
+   - **Amostra real compartilhada** (`REPRESENTATIVE`) — o catálogo pode ter muitos objetos, mas eles referenciam, de forma declarada, um conjunto pequeno de arquivos reais. Exercita leitura, multipart, checksum e retry com I/O real sem exigir o volume lógico no disco.
+   - **Execução híbrida** (`HYBRID`) — waves ou faixas de waves explicitamente selecionadas usam arquivos reais; as demais preservam payload determinístico. É o modelo recomendado para validar uma migração grande com uma amostra física representativa.
+
+   No nível do objeto, `DETERMINISTIC` permanece o padrão atual e `LOCAL_FILE` identifica a referência a um arquivo do dataset local imutável.
 
 2. O diretório não é uma entrada de caminho arbitrário fornecida pelo navegador ou pelo Raijin. O operador cadastra previamente um **dataset local** por configuração administrativa; a execução referencia seu identificador.
 
@@ -83,12 +86,13 @@ O modo atual, que gera bytes determinísticos a partir do catálogo, permanece o
 
 3. Definir colisões de chave, arquivos vazios, permissões insuficientes e arquivos que mudam durante o scan como erros auditáveis de importação.
 
-4. Oferecer dois modos claros na interface administrativa:
+4. Oferecer os três modelos claros na interface administrativa:
 
-   - **Importar arquivos reais**: um objeto por arquivo; apropriado para testar payload, multipart e checksum reais;
-   - **Catálogo sintético**: comportamento atual, adequado para milhões de objetos sem arquivos físicos.
+   - **Catálogo virtual**: comportamento atual, adequado para milhões de objetos sem arquivos físicos;
+   - **Amostra real compartilhada**: selecionar dataset e política determinística de associação dos objetos aos arquivos da amostra;
+   - **Execução híbrida**: selecionar dataset e quais waves/faixas de waves terão payload físico.
 
-5. Não prometer que “1 milhão de objetos usam 100 arquivos” é equivalente a um milhão de arquivos reais. Se futuramente houver reutilização representativa de payload, ela deve ser uma política explícita, registrar que vários objetos apontam ao mesmo conteúdo e manter tamanho/checksum compatíveis.
+5. Não apresentar “1 milhão de objetos usam 100 arquivos” como equivalente a um milhão de arquivos reais. No modelo de amostra compartilhada, a reutilização deve constar no relatório; tamanho e checksum de cada objeto lógico precisam ser compatíveis com o arquivo físico selecionado.
 
 ## Semântica de S3/Glacier simulada
 
@@ -120,7 +124,7 @@ O modo atual, que gera bytes determinísticos a partir do catálogo, permanece o
 
 2. Na tela Simulation, adicionar uma seção administrativa de datasets: estado do mount, root lógico, contagem, bytes, último scan, fingerprint e botão de importação/validação.
 
-3. Na criação/materialização de cenário `DATA`, permitir selecionar `Catálogo sintético` ou `Dataset local`. Exibir claramente que o segundo transfere bytes reais e consome I/O real, embora AWS/OCI continuem isoladas.
+3. Na criação/materialização de cenário `DATA`, permitir selecionar **Catálogo virtual**, **Amostra real compartilhada** ou **Execução híbrida**. Exibir para os dois últimos o tamanho físico da amostra, as waves físicas e lógicas e que AWS/OCI continuam isoladas, embora haja I/O local real.
 
 4. Incluir no report de execução: tipo de payload, dataset/snapshot, bytes físicos lidos, checksum e qualquer divergência detectada.
 
@@ -130,8 +134,8 @@ O modo atual, que gera bytes determinísticos a partir do catálogo, permanece o
 
 1. **Fundação** — migração, modelos, capability, configuração de mount somente leitura e contratos de erro; sem alterar `read_range` ainda.
 2. **Reader local** — `SourcePayloadReader`, validação de paths/snapshot e testes unitários de ranges, EOF, checksum e corrupção.
-3. **Importador** — cadastro administrativo, scan incremental, criação de objetos `LOCAL_FILE`, relatórios de erro e idempotência.
-4. **Integração do engine** — seleção do reader após a regra de restore; preservar reader determinístico em todos os cenários existentes.
+3. **Importador e composição** — cadastro administrativo, scan incremental, criação de objetos `LOCAL_FILE`, associação representativa determinística, seleção de waves híbridas, relatórios de erro e idempotência.
+4. **Integração do engine** — seleção do reader após a regra de restore; preservar reader determinístico em Catálogo virtual e nas waves lógicas do modo híbrido.
 5. **Observabilidade/UI** — dataset/snapshot na Simulation, métricas de I/O e evidências no relatório.
 6. **E2E** — dataset pequeno com arquivos conhecidos, restore BULK/STANDARD, transferência normal e multipart, pause/resume, retry, expiração e auditoria SHA-256.
 7. **Hardening** — testes de path traversal/symlink/alteração durante leitura, carga concorrente, reinício e clone/replay.
