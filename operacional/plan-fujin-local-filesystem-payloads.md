@@ -1,12 +1,16 @@
 # Plano — payloads locais reais no Fujin
 
+**Status:** PLANEJADO — implementação não iniciada
+**Referência:** proposta de dataset local para validar o caminho de dados do Fujin sem AWS/OCI reais, registrada em 2026-09-02.
+**Dependência externa:** a validação representativa de 100 TB lógicos exige capacidade física a ser solicitada oportunamente; as fases de produto não dependem dessa capacidade para começar.
+
 ## Objetivo
 
 Permitir que o Fujin exponha, para uma execução `DATA` explicitamente configurada, bytes de arquivos existentes em um diretório local controlado. O catálogo, o relógio virtual, as regras de restore, expiração e os jobs continuam no PostgreSQL do Fujin. Assim, o Raijin exercita transferência, multipart, checksum e retomada com bytes reais, sem chamada à AWS ou à OCI.
 
 O modo atual, que gera bytes determinísticos a partir do catálogo, permanece o padrão e não pode mudar de comportamento.
 
-## Situação atual confirmada
+## Linha de base técnica
 
 - `VirtualObject` já separa metadados e identidade lógica de conteúdo (`content_seed`, `content_object_id`, `source_sha256`).
 - `SimulationEngine.read_range()` produz os bytes determinísticos para a faixa solicitada; os endpoints `/v1/cloud/source/read-range` e `/v1/cloud/destination/read-range` apenas os transmitem.
@@ -14,7 +18,7 @@ O modo atual, que gera bytes determinísticos a partir do catálogo, permanece o
 - Restore e expiração são predicados do catálogo. Portanto, um arquivo local pode continuar “arquivado” até a disponibilidade virtual, sem mover nem duplicar o arquivo no disco.
 - O Fujin não é, hoje, um emulador genérico de toda a API S3: ele implementa o contrato versionado consumido pelos ports simulados do Raijin. O recurso deve preservar esse contrato.
 
-## Decisões de desenho
+## Decisões consolidadas
 
 1. Expor três modelos de massa na criação da execução. O modo de payload continua registrado por objeto, mas o modelo explica ao operador como o catálogo inteiro será composto:
 
@@ -130,25 +134,111 @@ O modo atual, que gera bytes determinísticos a partir do catálogo, permanece o
 
 5. Não expor a opção em `CONTROL`, pois esse modo existe para simulação lógica sem tráfego de payload.
 
-## Sequência de implementação
+## Fase 1 — fundação compatível e contratos versionados
 
-1. **Fundação** — migração, modelos, capability, configuração de mount somente leitura e contratos de erro; sem alterar `read_range` ainda.
-2. **Reader local** — `SourcePayloadReader`, validação de paths/snapshot e testes unitários de ranges, EOF, checksum e corrupção.
-3. **Importador e composição** — cadastro administrativo, scan incremental, criação de objetos `LOCAL_FILE`, associação representativa determinística, seleção de waves híbridas, relatórios de erro e idempotência.
-4. **Integração do engine** — seleção do reader após a regra de restore; preservar reader determinístico em Catálogo virtual e nas waves lógicas do modo híbrido.
-5. **Observabilidade/UI** — dataset/snapshot na Simulation, métricas de I/O e evidências no relatório.
-6. **E2E** — dataset pequeno com arquivos conhecidos, restore BULK/STANDARD, transferência normal e multipart, pause/resume, retry, expiração e auditoria SHA-256.
-7. **Hardening** — testes de path traversal/symlink/alteração durante leitura, carga concorrente, reinício e clone/replay.
-8. **Extensão opcional** — somente se houver demanda: destino físico local com root separado e evidência de escrita, sem mudar a semântica da fonte.
+**Marco:** o Fujin reconhece datasets e tipos de payload sem alterar qualquer cenário determinístico existente.
 
-## Critérios de aceite
+- [ ] Criar migração para dataset, referência física e fingerprint do snapshot em `VirtualObject`.
+- [ ] Manter `DETERMINISTIC` como default compatível para todos os objetos e cenários legados.
+- [ ] Registrar a capability `local-filesystem-source-payload-v1` no handshake versionado.
+- [ ] Congelar no snapshot da execução o modelo de massa, dataset e versão do importador.
+- [ ] Preparar configuração de allowlist e bind mount read-only, sem ainda permitir leitura pelo engine.
 
-- Cenários existentes `CONTROL` e `DATA` determinísticos continuam produzindo os mesmos resultados e passam na suíte atual.
-- Um arquivo real só é acessível após o restore virtual e fica indisponível depois da expiração.
-- Leitura de faixa retorna exatamente os bytes e `Content-Length` solicitados, inclusive em multipart e retomada.
-- Alteração, remoção, symlink ou escape de root após o snapshot falha de forma explícita, auditável e sem leitura fora do dataset.
-- Nenhuma credencial AWS/OCI é necessária; o simulador continua isolado.
-- O relatório permite provar qual dataset e qual snapshot abasteceram a execução.
+**Critérios de aceite**
+
+- [ ] Cenários `CONTROL` e `DATA` determinísticos passam sem alteração de resultado.
+- [ ] Uma execução sem dataset não cria referência a path local nem requer novo recurso externo.
+- [ ] O handshake recusa combinação de versões incompatíveis.
+
+## Fase 2 — leitura local segura e semântica de restore
+
+**Marco:** um objeto `LOCAL_FILE` pode ser lido por faixa com os mesmos controles de restore e expiração do objeto virtual.
+
+- [ ] Implementar `SourcePayloadReader`, `DeterministicPayloadReader` e `LocalFilesystemPayloadReader`.
+- [ ] Validar path relativo, root permitido, ausência de symlink, identidade/tamanho/mtime do snapshot e limites de offset/length.
+- [ ] Fazer `read_range` aplicar restore/expiração antes de abrir o arquivo local.
+- [ ] Implementar SHA-256 streaming sob demanda, com persistência de evidência e controle de concorrência.
+- [ ] Preservar a injeção de falhas acima do reader para os dois tipos de payload.
+
+**Critérios de aceite**
+
+- [ ] Range e `Content-Length` retornam exatamente os bytes esperados, inclusive em EOF e multipart.
+- [ ] Arquivo local permanece indisponível em `ARCHIVED` e volta a falhar após expiração.
+- [ ] Alteração, remoção, symlink ou escape de root falha de forma explícita e auditável.
+
+## Fase 3 — importação e composição dos três modelos de massa
+
+**Marco:** o operador compõe uma execução de forma reprodutível como Catálogo virtual, Amostra real compartilhada ou Execução híbrida.
+
+- [ ] Criar cadastro administrativo de dataset sem aceitar paths do host pela interface ou pelo Raijin.
+- [ ] Implementar scan incremental/idempotente, com chaves relativas POSIX, metadados e relatório de colisões/erros.
+- [ ] Implementar **Catálogo virtual** (`VIRTUAL`) como comportamento atual.
+- [ ] Implementar **Amostra real compartilhada** (`REPRESENTATIVE`) com associação determinística e evidência de reutilização.
+- [ ] Implementar **Execução híbrida** (`HYBRID`) com seleção versionada de waves/faixas físicas e lógicas.
+- [ ] Impedir incompatibilidade de tamanho/checksum entre objeto lógico e arquivo físico associado.
+
+**Critérios de aceite**
+
+- [ ] O mesmo template e dataset produzem a mesma composição ao clonar/reexecutar o cenário.
+- [ ] O relatório diferencia bytes lógicos, bytes físicos únicos e bytes físicos efetivamente lidos.
+- [ ] A reutilização representativa nunca é apresentada como arquivo físico único por objeto.
+
+## Fase 4 — engine, interface e observabilidade
+
+**Marco:** o modelo selecionado é visível e o resultado permite interpretar a fidelidade física da execução.
+
+- [ ] Integrar a seleção do reader ao `SimulationEngine` sem mudar os ports HTTP usados pelo Raijin.
+- [ ] Exibir datasets, fingerprint, mount lógico, estado de validação e último scan na console Simulation.
+- [ ] Exibir os três modelos apenas para `DATA`; manter `CONTROL` estritamente lógico.
+- [ ] Incluir no report tipo de payload, dataset/snapshot, arquivos por faixa, bytes físicos, checksum e divergências.
+- [ ] Coletar taxa de leitura, uso de link, cache, falhas de snapshot e limites de recursos do host.
+
+**Critérios de aceite**
+
+- [ ] O operador consegue identificar, antes do início, quais waves transferirão bytes reais.
+- [ ] Nenhum caminho absoluto do host é exposto na API, UI, eventos ou relatórios.
+- [ ] O relatório torna impossível confundir os 100 TB lógicos com volume físico efetivamente lido.
+
+## Fase 5 — validação fim a fim e hardening
+
+**Marco:** o caminho de dados real é comprovado em amostra pequena, com segurança e retomada.
+
+- [ ] Executar dataset conhecido de 20–100 GB com restore BULK/STANDARD, range, multipart, pause/resume, retry e expiração.
+- [ ] Exercitar auditoria SHA-256 e verificar as evidências de origem, worker e destino simulado.
+- [ ] Testar reinício, clone/replay, concorrência, alteração de arquivo durante leitura e exaustão controlada de recursos.
+- [ ] Adicionar testes de path traversal, permissões, symlink, arquivos especiais e limite de descritores.
+- [ ] Documentar que purge de cenário remove catálogo/evidência, nunca os arquivos físicos do dataset.
+
+**Critérios de aceite**
+
+- [ ] A suíte Fujin/Raijin permanece verde e cobre payload determinístico e local.
+- [ ] Falhas de snapshot são diagnosticáveis sem leitura fora do dataset permitido.
+- [ ] Nenhuma credencial AWS/OCI é necessária no modo Simulation.
+
+## Fase 6 — preparação e execução representativa de 100 TB
+
+**Marco:** quando os recursos forem disponibilizados, o ensaio híbrido é executado com uma amostra física suficiente para produzir evidência operacional útil.
+
+- [ ] Preparar manifesto versionado, gerador determinístico, template `HYBRID`, runbook e dashboard antes de solicitar capacidade.
+- [ ] Solicitar volume dedicado de 10 TB úteis (mínimo 5 TB), espaço auxiliar, telemetria de host/link e janela sem carga concorrente.
+- [ ] Executar smoke físico de 20–100 GB e ensaio operacional de 1 TB antes da validação representativa.
+- [ ] Executar 100 TB lógicos com 5–10 TB físicos únicos, distribuindo waves físicas pelo pipeline virtual.
+- [ ] Registrar resultado, limitações, throughput, ociosidade e relação entre bytes lógicos/físicos.
+
+**Critérios de aceite**
+
+- [ ] Dataset, snapshot, mount read-only, histograma, telemetria e suíte de regressão são validados antes do ensaio de 5–10 TB.
+- [ ] A interpretação do resultado identifica claramente a capacidade de disco, rede e host usada.
+- [ ] A fase integral de 100 TB físicos só é proposta se houver origem e destino físicos independentes com essa capacidade.
+
+## Sequência recomendada
+
+1. Fase 1 — estabelece compatibilidade, contrato e isolamento.
+2. Fase 2 — torna o acesso físico seguro antes de expô-lo ao operador.
+3. Fase 3 — implementa os modelos de massa reproduzíveis.
+4. Fase 4 — integra ao fluxo e torna a fidelidade observável.
+5. Fase 5 — comprova o produto em dataset pequeno.
+6. Fase 6 — usa a capacidade solicitada para a validação representativa.
 
 ## Preparação para o teste de alta fidelidade
 
@@ -206,3 +296,14 @@ O total de referência é próximo de 10 TB. Se só 5 TB estiverem disponíveis,
 ### Go / no-go para a validação representativa
 
 Só iniciar a fase de 5–10 TB se: o snapshot do dataset estiver íntegro; o volume possuir espaço livre previsto; o mount read-only tiver sido validado; o histograma estiver aprovado; a suíte de regressão do Fujin/Raijin estiver verde; e métricas de host/link estiverem sendo coletadas. Qualquer divergência de snapshot, erro de isolamento ou falta de telemetria bloqueia o teste, pois invalidaria sua interpretação.
+
+## Registro de acompanhamento
+
+| Fase | Estado | Evidência / commit | Observações |
+|---|---|---|---|
+| 1 — Fundação | Pendente | — | Não iniciar sem migração, compatibilidade e contrato versionado. |
+| 2 — Reader seguro | Pendente | — | Depende da configuração read-only e da validação de snapshot. |
+| 3 — Modelos de massa | Pendente | — | Implementa Virtual, Representativo e Híbrido. |
+| 4 — Interface e observabilidade | Pendente | — | Depende da composição persistida no catálogo. |
+| 5 — E2E e hardening | Pendente | — | Pode usar datasets pequenos já disponíveis. |
+| 6 — Ensaio representativo | Aguardando recursos | — | Requer volume dedicado de 5–10 TB e telemetria do ambiente. |
