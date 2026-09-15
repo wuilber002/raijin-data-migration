@@ -36,6 +36,24 @@ cleanup_failed_bootstrap() {
 
 trap cleanup_failed_bootstrap EXIT
 
+# A LOCAL deployment owns the shared loopback gateway on port 8080 and keeps
+# Raijin in ordinary REAL mode behind it.  Re-running this bootstrap while the
+# complete LOCAL topology is already healthy must be idempotent: attempting to
+# publish a second process on 8080 would incorrectly mark the platform service
+# failed even though every required container is running.
+local_runtime_complete=true
+for container in s3-oci-postgres s3-oci-app s3-oci-governance-worker s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-dns s3-oci-local-ui-gateway; do
+  if [[ "$(podman inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]]; then
+    local_runtime_complete=false
+    break
+  fi
+done
+if [[ "$local_runtime_complete" == true ]]; then
+  bootstrap_complete=true
+  trap - EXIT
+  exit 0
+fi
+
 mkdir -p "$data_root/postgres" "$secret_root" "$runtime_root" "$mode_control_root"
 chmod 700 "$secret_root"
 # The web service is loopback-only. SSH is the sole administrative entrypoint,
@@ -80,6 +98,7 @@ podman network exists s3-oci-migration 2>/dev/null || podman network create s3-o
 podman rm -f s3-oci-app s3-oci-postgres s3-oci-governance-worker s3-oci-transfer-worker s3-oci-real-worker s3-oci-simulator 2>/dev/null || true
 
 podman run -d --name s3-oci-postgres --replace --restart unless-stopped \
+  --shm-size=512m \
   --network s3-oci-migration --network-alias postgres \
   -e POSTGRES_DB=migration \
   -e POSTGRES_USER=migration \
@@ -126,7 +145,10 @@ if ! podman exec s3-oci-postgres psql -U migration -d migration -tAc \
   podman exec s3-oci-postgres createdb -U migration -O migration_simulation migration_simulation
 fi
 
-podman build -t localhost/s3-oci-migration:latest "$install_root"
+podman build \
+  --build-arg "RAIJIN_SERVICE_VERSION=${RAIJIN_SERVICE_VERSION:-0.5.0}" \
+  --build-arg "RAIJIN_BUILD_REVISION=${RAIJIN_BUILD_REVISION:-development}" \
+  -t localhost/s3-oci-migration:latest "$install_root"
 mode_file=/etc/s3-oci-migration/operation-mode
 if [[ ! -s "$mode_file" ]]; then
   printf 'REAL\n' >"$mode_file"
@@ -137,6 +159,10 @@ operation_mode="$(tr '[:lower:]' '[:upper:]' <"$mode_file")"
   exit 1
 }
 install -m 0750 "$install_root/scripts/start-runtime.sh" /usr/local/sbin/s3-oci-start-runtime
+install -m 0750 "$install_root/scripts/start-fujin-local-runtime.sh" /usr/local/sbin/s3-oci-start-fujin-local-runtime
+install -m 0750 "$install_root/scripts/configure-fujin-local-oci-runtime.py" /usr/local/sbin/configure-fujin-local-oci-runtime
+install -m 0750 "$install_root/scripts/mount-fujin-payload-volume.sh" /usr/local/sbin/s3-oci-mount-fujin-payload
+/usr/local/sbin/s3-oci-mount-fujin-payload
 install -m 0750 "$install_root/scripts/stop-runtime.sh" /usr/local/sbin/s3-oci-stop-runtime
 install -m 0750 "$install_root/scripts/raijin-mode.sh" /usr/local/sbin/raijin-mode
 install -m 0750 "$install_root/scripts/process-mode-request.sh" /usr/local/sbin/s3-oci-process-mode-request

@@ -4,6 +4,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_raijin_uses_the_shared_operational_card_contract():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    shell = (ROOT / "app/static/operational-shell.js").read_text(encoding="utf-8")
+    styles = (ROOT / "app/static/operational-shell.css").read_text(encoding="utf-8")
+    assert "window.OperationalShell?.enhanceCards()" in page
+    assert "createCard" in shell and "enhanceCards" in shell
+    assert "selector='.metric,.fujin-metric,.service,.worker-status'" in shell
+    assert "observer.observe(scope,{subtree:true,childList:true})" in shell
+    assert "attributes:true" not in shell
+    assert "--ops-card-neutral" in styles
+    assert ".operational-card-title" in styles
+    assert ".operational-card-info" in styles
+    assert "inferKind" in shell
+    assert 'data-card-kind="number"' in styles
+    assert 'data-card-kind="status"' in styles
+
+
 def test_language_selector_is_available_only_in_interface_settings():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert page.count('id="language-selector"') == 1
@@ -16,7 +33,7 @@ def test_language_selector_is_available_only_in_interface_settings():
 def test_dynamic_restore_slot_ceiling_is_visible_and_persisted_from_settings():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="set-dynamic-restore-max-slots"' in page
-    assert "dynamic_restore_max_slots:Number($('#set-dynamic-restore-max-slots').value)" in page
+    assert "dynamic_restore_max_slots:Math.round(Number($('#set-dynamic-restore-max-slots').value))" in page
     assert "Raikou starts with two restore slots" in page
 
 
@@ -34,6 +51,18 @@ def test_aws_connection_interface_never_places_secret_content_in_javascript():
     assert "bootstrap_secret_access_key" not in page.split("<script>", 1)[1]
 
 
+def test_aws_connection_interface_can_submit_generic_private_endpoints_without_fujin_mode():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    for identifier in ("aws-sts-endpoint-url", "aws-s3-endpoint-url", "aws-s3control-endpoint-url", "aws-s3-addressing-style", "aws-tls-ca-bundle-path"):
+        assert f'id="{identifier}"' in page
+    assert "Endpoints privados (opcional)" in page
+    submit = page[page.index("$('#aws-connection-form').addEventListener('submit'"):page.index("$('#discovery-form')")]
+    assert "sts_endpoint_url:b('#aws-sts-endpoint-url')" in submit
+    assert "s3_endpoint_url:b('#aws-s3-endpoint-url')" in submit
+    assert "s3control_endpoint_url:b('#aws-s3control-endpoint-url')" in submit
+    assert "Fujin" not in submit and "LOCAL" not in submit
+
+
 def test_aws_connection_template_is_formatted_and_copyable():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="aws-secret-json-template"' in page
@@ -42,21 +71,98 @@ def test_aws_connection_template_is_formatted_and_copyable():
     assert "copyAwsSecretTemplate()" in page
     assert "navigator.clipboard.writeText" in page
     assert ".json-key" in page and ".json-string" in page
+    assert '"private_endpoint"' in page
+    assert '"s3control_endpoint_url"' in page
     assert "Nenhuma conexão AWS cadastrada" in page
 
 
-def test_registered_aws_connection_secrets_are_disabled_in_the_registration_form():
+def test_only_active_connection_secrets_are_disabled_and_archived_ones_can_be_reused():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    assert "registeredBySecret" in page
-    assert "Secret já cadastrado na conexão" in page
+    assert "activeBySecret" in page
+    assert "Secret já cadastrado na conexão ativa" in page
+    assert "reutilizar; conexão anterior" in page
     assert "id=\"aws-connection-register\"" in page
+
+
+def test_migration_activity_cards_separate_primary_values_units_and_context():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'class="metric activity-metric ${extra}" data-card-kind="activity"' in page
+    assert 'class="activity-primary-value"' in page
+    assert 'class="activity-primary-unit"' in page
+    assert 'class="activity-secondary"' in page
+    assert "`${bytes(used)} de ${bytes(total)}`" in page
+    assert "`${fmt(activity.restore_requested_total)} solicitados`" in page
+    assert "#activity .activity-primary-value" in page
+    assert "#activity.activity-grid{grid-template-columns:repeat(6" in page
+
+
+def test_platform_status_cards_use_compact_metric_and_worker_layouts():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'data-card-kind="platform-health"' in page
+    assert 'class="platform-health-number"' in page
+    assert 'class="platform-health-unit"' in page
+    assert "renderPlatformHealthMetrics(operations)" in page
+    assert "splitPlatformMeasure(bytes(operations.bytes))" in page
+    assert 'data-card-kind="worker"' in page
+    assert 'class="worker-primary-value"' in page
+    assert "renderCompactWorkerStatus(operations,platform)" in page
+    assert ".service-grid .service{min-height:76px" in page
+    assert "#health.platform-health-grid{grid-template-columns:repeat(6" in page
+
+
+def test_retired_restore_forecasts_are_not_exposed_as_operational_settings():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "Previsão BULK" not in page
+    assert "Previsão STANDARD" not in page
+    assert "set-bulk-restore-first-hours" not in page
+    assert "set-standard-restore-first-hours" not in page
+    assert "janela conservadora de 48 horas" in page
+    assert "referência de planejamento para 12 horas" in page
+
+
+def test_operational_configuration_numeric_controls_are_integer_only():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    form = page[page.index('<form id="settings-form"'):page.index("</form>", page.index('<form id="settings-form"'))]
+    numeric_ids = (
+        "set-throughput", "set-multipart-part-size", "set-wave-tb", "set-restore-days",
+        "set-lease", "set-dynamic-safety-hours", "set-dynamic-restore-horizon",
+        "set-dynamic-restore-max-slots", "set-continuous-min-buffer-hours",
+        "set-continuous-target-buffer-hours", "set-continuous-max-buffer-hours",
+        "set-continuous-batch-objects", "set-continuous-batch-gib",
+        "set-continuous-critical-objects", "set-continuous-critical-mib",
+        "set-continuous-critical-priority", "set-continuous-min-marginal-gain-mbps",
+        "set-continuous-critical-initial-workers",
+    )
+    for field_id in numeric_ids:
+        marker = f'id="{field_id}"'
+        position = form.index(marker)
+        tag = form[form.rfind("<input", 0, position):form.index(">", position) + 1]
+        assert 'type="number"' in tag
+        assert 'step="1"' in tag
+        assert 'inputmode="numeric"' in tag
+        assert "required" in tag
+    assert 'step="0.' not in form
+    assert "const hours=(seconds,fallback)=>Math.round" in page
+    assert "default_wave_size_bytes:Math.round(Number($('#set-wave-tb').value))*1024**4" in page
+
+
+def test_observability_cards_use_compact_values_and_fill_the_desktop_row():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert '#observability.observability-grid{grid-template-columns:repeat(7' in page
+    assert 'data-card-kind="observability"' in page
+    assert 'class="observability-number"' in page
+    assert 'class="observability-unit"' in page
+    assert 'class="observability-secondary"' in page
+    assert "free=splitPlatformMeasure(bytes(freeBytes))" in page
+    assert "`${fmt(usedPercent)}% ${en?'used':'utilizado'}`" in page
+    assert "freeBytes<10*1024**3?'error':usedPercent>=85?'warning':'success'" in page
 
 
 def test_connection_api_limits_are_configurable_in_the_interface():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="aws-connection-limits-modal"' in page
     assert "editAwsConnectionLimits" in page
-    assert "Limites API" in page
+    assert "Limites de API" in page
     assert "updateAwsConnectionRegistrationState" in page
 
 
@@ -134,7 +240,7 @@ def test_wave_actions_use_a_fixed_order_and_manifest_is_a_button():
     assert "button.onclick=()=>window.location.assign(href)" in handler
     assert "const actionItems=[cost,report,manifest,queue,audit,pause,resume,reprocess,remove]" in handler
     assert "setText(report,'Report')" in handler
-    assert "setText(manifest,'Manifest CSV')" in handler
+    assert "setText(manifest,'Manifest')" in handler
     assert "#waves .wave-actions .wave-action" in page
 
 
@@ -146,6 +252,70 @@ def test_wave_table_prioritizes_compact_operational_columns_without_copy_duratio
     assert "Duração da cópia" not in renderer
     assert "transfer_duration_seconds" not in renderer
     assert "#waves th,#waves td{white-space:nowrap}" in page
+
+
+def test_duration_displays_use_the_shared_calendar_clock_format():
+    migration = (ROOT / "app/static/index.html").read_text()
+    simulation = (ROOT / "app/static/simulation.html").read_text()
+    required = "if(year)units.push(`${year}y`);if(month)units.push(`${month}m`);if(day)units.push(`${day}d`);"
+    for page in (migration, simulation):
+        assert required in page
+        assert "return units.join(' ')" in page
+    assert "function flightBoardDuration(seconds){return duration(seconds)}" in migration
+    assert "function completionDuration(seconds){return seconds===null||seconds===undefined?'—':duration(Math.abs(Number(seconds)))}" in migration
+    assert "Real elapsed<b>${duration(r.real_elapsed_seconds)}</b>" in simulation
+
+
+def test_wave_actions_stay_inside_their_scroll_container_and_cost_is_compact():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "#waves{max-width:100%;overflow-x:auto;overflow-y:clip" in page
+    assert "#waves table{table-layout:auto;min-width:1320px}" in page
+    assert "waves-action-tooltip" in page
+    assert "document.body.appendChild(tooltip)" in page
+    assert "#waves .cost-action[data-cost-help]:hover::after" in page
+    assert "setText(cost,'💰 Custo')" in page
+    assert "button.removeAttribute('title')" in page
+    assert "button:disabled{opacity:1!important" in page
+
+
+def test_wave_status_help_uses_the_rich_aligned_tooltip_variant():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "status-tooltip-grid" in page
+    assert "status-tooltip-tag status-${tone}" in page
+    assert "data-rich-help" in page
+    assert "tooltip.innerHTML=contentFor(target)" in page
+    assert "Waves: Status" in page
+    assert "raijin-tooltip-title" in page
+    assert "scope===item?item:`${scope}: ${item}`" in page
+
+
+def test_restore_queue_state_help_lists_all_operational_states_with_colored_tags():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "const restoreStateTooltip=()" in page
+    assert "RESTORE SCHEDULED" in page
+    assert "RESTORE + TRANSFER" in page
+    assert "RESTORE REAPPROVAL REQUIRED" in page
+    assert "restore-state-tooltip-grid" in page
+    assert "stateHelp.dataset.richHelp=restoreStateTooltip()" in page
+
+
+def test_simulation_help_uses_the_shared_rich_tooltip_pattern():
+    page = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
+    assert "raijin-tooltip-title" in page
+    assert "const targetFor=node=>node?.closest?.('.help[data-help]')||null" in page
+    assert ".help:hover::after,.help:focus-visible::after{content:none!important}" in page
+
+
+def test_simulation_sources_show_template_status_and_fixed_actions():
+    simulation = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
+    main = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    simulator = (ROOT / "app/simulator.py").read_text(encoding="utf-8")
+    assert "Template: ${esc(s.template_name||'Custom scenario')}" in simulation
+    assert "${sourceStatusTag(s.operational_status)}" in simulation
+    assert "deleteSimulationSource(${s.id},${sourceName})" in simulation
+    assert "/api/simulation/sources/${id}" in simulation
+    assert '@app.delete("/api/simulation/sources/{source_id}")' in main
+    assert '"template_name": template_snapshot.get("name") or "Custom scenario"' in simulator
 
 
 def test_discovered_objects_and_source_cost_actions_live_in_the_discovery_summary():
@@ -310,6 +480,74 @@ def test_continuous_lane_queue_exposes_priority_and_idle_diagnosis():
     assert "Prioridades:" in page
 
 
+def test_queue_restore_panel_hides_completed_waves_but_migrations_keeps_history():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "w.status!=='COMPLETED'&&(restoreStates.has(w.status)||w.restore?.requested_at)" in page
+    assert "async function loadWaves" in page
+
+
+def test_restore_and_continuous_lane_panels_share_the_top_row_and_details_span_below():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert ".queue-operations-grid{" in page
+    assert "display:grid;grid-template-columns:repeat(2,minmax(0,1fr))" in page
+    assert "align-items:stretch;min-width:0;max-width:100%" in page
+    assert "grid-template-columns:minmax(0,1fr);align-items:start" in page
+    assert ".queue-lane-details{grid-column:1/-1" in page
+    assert ".queue-lane-details .lane-dispatches .queue-table-wrap{max-height:none" in page
+    assert "const dispatchesOpen=$('#transfer-queue .lane-dispatches')?.open??false" in page
+    assert "const raijusOpen=$('#transfer-queue .lane-raijus')?.open??false" in page
+    assert "${dispatchesOpen?' open':''}" in page
+    assert "${raijusOpen?' open':''}" in page
+    assert "Reservado / aguardando Raiju" in page
+    assert "Capacidade alvo" in page
+    assert "reference_mbps_basis" in page
+    assert '--raikou-accent:#d97706' in page
+    assert '--raiju-accent:#22d3ee' in page
+    assert '<span class="queue-panel-tag">Raiju</span>' in page
+    assert '<h3>Detalhes da transferência contínua ' in page
+    assert '.lane-backlog-copying{background:#d946ef}' in page
+    assert '.lane-dispatches{border-top:0}' in page
+    assert '.restore-operation .queue-table-wrap{width:100%;overflow-x:auto' in page
+    assert '.queue-cell-line{display:block;white-space:nowrap}' in page
+    assert '.lane-decision-lines{display:grid;gap:.12rem;margin:.3rem 0 0 1.65rem' in page
+    assert '<span class="lane-decision-title"><strong>Próxima decisão: despacho elegível.</strong></span>' in page
+    assert '${bytes(next.size_bytes||0)} · prioridade ${fmt(next.priority_score)}' in page
+
+
+def test_raiju_lane_cards_and_tables_expose_contextual_help():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'const laneHelp=text=>' in page
+    for label in (
+        "Elegível agora",
+        "Retry / retomada",
+        "Reservado / aguardando Raiju",
+        "Em cópia agora",
+    ):
+        assert f"<strong>{label} ${{laneHelp(" in page
+    assert 'class="lane-backlog-legend"' not in page
+    assert "<b>${bytes(leasedBytes)}</b><small>${fmt(leased)} objetos reservados ou em cópia" in page
+    assert '<span class="lane-flow-title">Reservado/<wbr>copying</span>${laneHelp(' in page
+    assert '.lane-flow-step.leased{border-color:#d946ef}' in page
+    assert '.lane-flow-step.waiting,.lane-flow-step.copying{border-color:var(--raiju-accent,#22d3ee)}' in page
+    assert page.rfind('.lane-flow-step.waiting,.lane-flow-step.copying') > page.find('.lane-flow-step.waiting{border-color:#64748b}')
+    assert '.lane-flow-step.leased strong{display:grid;grid-template-columns:minmax(0,1fr) 17px' in page
+    assert "<strong>Taxa de referência ${laneHelp(" not in page
+    for label in (
+        "Momento",
+        "Lote despachado",
+        "Capacidade alvo",
+        "Prioridade",
+        "Estado",
+        "Motivo",
+        "Worker",
+        "Origem",
+        "Arquivo atual",
+        "Progresso",
+    ):
+        assert f'<span class="lane-table-heading">{label} ${{laneHelp(' in page
+    assert ".lane-table-heading{display:inline-flex" in page
+
+
 def test_cost_estimation_has_a_global_operational_toggle():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="set-cost-estimation"' in page
@@ -317,7 +555,7 @@ def test_cost_estimation_has_a_global_operational_toggle():
     assert "estimativa de custo está desabilitada" in page
     assert "wave-cost-action" in page
     assert "source-cost-action" in page
-    assert page.count("button.textContent='💰 Estimativa'") == 2
+    assert page.count("button.textContent='💰 Custo'") == 2
     assert "button.textContent='💲'" not in page
 
 
@@ -342,6 +580,11 @@ def test_public_aws_pricing_controls_are_visible_when_cost_estimation_is_enabled
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "classList.toggle('hidden',!costEstimationEnabled)" in page
     assert "if(costEstimationEnabled)await loadGlobalAwsPricing()" in page
+    assert 'class="global-pricing-toolbar"' in page
+    assert 'class="toggle-box global-pricing-auto-toggle"' in page
+    assert 'class="global-pricing-auto-label"' in page
+    assert "#global-pricing-settings .global-pricing-auto-toggle{display:inline-flex!important" in page
+    assert "grid-template-columns:auto minmax(230px,1fr) auto auto" in page
 
 
 def test_cost_pricing_can_show_collected_public_rates_and_modals_lock_background_scroll():
@@ -353,6 +596,9 @@ def test_cost_pricing_can_show_collected_public_rates_and_modals_lock_background
     assert 'id="cost-include-oci-costs"' in page
     assert "body.modal-open{overflow:hidden}" in page
     assert "syncModalScrollLock" in page
+    assert 'class="public-pricing-outbound-label"' in page
+    assert ".public-pricing-outbound{display:grid;grid-template-columns:auto minmax(0,auto) auto" in page
+    assert ".public-pricing-outbound input{width:auto!important;margin:0;align-self:center}" in page
 
 
 def test_collected_public_pricing_handler_keeps_modal_open_inside_its_try_block():
@@ -492,7 +738,9 @@ def test_simulation_mode_keeps_the_regular_console_and_exposes_a_red_admin_page(
     assert ".simulation-active{background:#b91c1c" in simulation
     assert "body.simulation-mode #alerts{top:134px}" in page
     assert "body.simulation-mode .notification-stack{top:138px}" in page
-    assert "Open in Migrations" in simulation
+    assert "Reative source" in simulation
+    assert "/api/simulation/sources/${id}/reactivate" in simulation
+    assert '@app.post("/api/simulation/sources/{source_id}/reactivate")' in main
     assert '>Discovery</button><button onclick="createWaves' not in simulation
     assert '>Create dynamic waves</button>' not in simulation
     assert '>Queue all</button>' not in simulation
@@ -512,8 +760,57 @@ def test_new_simulated_source_is_available_and_selected_in_migrations_without_re
     assert "cache:'no-store'" in page
     assert "cache:'no-store'" in simulation
     assert "raijin:pending-simulation-source-id" in page
-    assert "sessionStorage.setItem('raijin:pending-simulation-source-id',String(created.source_id))" in simulation
-    assert "onclick=\"openMigrations(${s.id})\"" in simulation
+    assert "sessionStorage.setItem('raijin:pending-simulation-source-id',String(sourceId))" in simulation
+    assert "function announceMigrationSource(sourceId)" in simulation
+    assert "new BroadcastChannel('raijin-sources')" in simulation
+    assert "raijin:simulation-source-notification" in simulation
+    assert "function receiveSimulationSourceNotification(message)" in page
+    assert "new BroadcastChannel('raijin-sources')" in page
+    assert "window.addEventListener('storage'" in page
+    assert "onclick=\"reactivateSource(${s.id})\"" in simulation
+
+
+def test_final_report_throughput_chart_resolves_its_id_as_a_css_selector():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert "const target=$(`#${targetId}`);if(!target)return;" in page
+    assert "Carregar gráfico de taxa de transferência" in page
+    assert "Velocidade do link" in page
+    assert "throughput-footer" in page
+    assert ">Throughput</strong>" in page
+    assert "<b>Util:</b> ${fmt(throughputUtilization)}%" in page
+    assert "A utilização é a média de throughput em relação ao limite configurado." not in page
+    assert 'id="source-throughput-chart-action"' in page
+    assert "target.innerHTML='<p class=\"hint\">Carregando amostras de throughput…</p>'" in page
+    assert "target.innerHTML='<button id=\"source-throughput-chart-action\"" in page
+    assert "action?.replaceWith(target)" not in page
+    assert 'id="source-throughput-chart" class="source-throughput-chart" aria-live="polite"><button' in page
+    assert "throughput-observed" in page
+    assert "throughput-range" not in page
+    assert ".throughput-chart text{fill:#dbeafe}" in page
+    assert "const plottedMinimum=Math.min(...points.map(point=>Number(point.average_mbps)||0));" in page
+    assert "const yMin=Math.max(0,plottedMinimum-plottedRange*.1);" in page
+
+
+def test_discovery_queue_renders_at_most_five_items():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert "(await api('/api/discovery-queue')).slice(0,5)" in page
+
+
+def test_final_report_keeps_its_header_visible_and_explains_evidence_metrics():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert 'class="modal-header source-completion-header"' in page
+    assert 'class="source-completion-content hint"' in page
+    assert ".source-completion-panel{display:flex;flex-direction:column" in page
+    assert ".source-completion-content{min-height:0;overflow-y:auto" in page
+    assert "function completionHelp(text)" in page
+    assert "Acima do modelo de link ${completionHelp(" in page
+    assert "Itens com retry ${completionHelp(" in page
+    assert "Lane contínua ${completionHelp(" in page
+    assert "Entrega OCI ${completionHelp(" in page
+    assert "source-completion-footnote" in page
 
 
 def test_operational_top_alerts_are_dismissible_without_removing_the_footer_condition():
@@ -573,6 +870,29 @@ def test_flight_board_modal_has_only_one_vertical_scroll_container():
     assert "filter(phase=>phase.kind!=='TRANSFER')" in page
 
 
+def test_activity_auto_refresh_is_a_compact_horizontal_control():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert 'class="toggle-box activity-auto-refresh-toggle"' in page
+    assert 'class="activity-auto-refresh-label"' in page
+    assert ".activity-auto-refresh-toggle{display:inline-flex!important;flex-direction:row!important" in page
+    assert "grid-template-columns:minmax(230px,1fr) auto auto minmax(220px,300px)" in page
+
+
+def test_aws_connection_actions_are_compact_and_region_never_wraps():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert "action('⚙️','Ver configuração'" in page
+    assert "action('💰','Tarifas'" in page
+    assert "action('🔄','Sincronizar Secret'" in page
+    assert "action('📋','Pré-check'" in page
+    assert "c.sources?'🗄️':'🗑️'" in page
+    assert "limits.textContent='🎚️'" in page
+    assert ".aws-connection-actions{display:flex;align-items:center;gap:.42rem" in page
+    assert ".aws-connection-action{display:inline-flex!important" in page
+    assert '#aws-connections th:nth-child(3),#aws-connections td:nth-child(3){min-width:92px;white-space:nowrap}' in page
+
+
 def test_flight_board_supports_manual_refresh_and_bounded_loading():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
 
@@ -582,9 +902,22 @@ def test_flight_board_supports_manual_refresh_and_bounded_loading():
     assert "flightBoardRequestController?.abort()" in page
     assert "RESTORE_SAVING:['restore-saving','Tempo economizado no restore']" in page
     assert ".flight-board-phase.restore-saving" in page
+    assert ".flight-board-phase.restore-saving{background-color:#16a34a!important;background-image:none!important;opacity:1}" in page
+    assert "phase.planned&&!observedSaving?' planned':''" in page
     assert "continues-to-saving" in page
     assert "continues-from-restore" in page
-    assert ".flight-board-restore-row .flight-board-phase.restore-saving{top:11px}" in page
+    assert ".flight-board-restore-row .flight-board-phase.restore-saving{top:10px}" in page
+    assert ".flight-board-restore-row .flight-board-phase{top:10px;height:8px}" in page
+    assert "function flightBoardBars(" in page
+    assert "joins-previous" in page and "joins-next" in page
+    assert "function flightBoardRestoreSchedule(w)" in page
+    assert "Aguardando vaga de restore." in page
+    assert "Aguardando drenagem segura da fila contínua." in page
+    assert "A data acima indica elegibilidade, não uma submissão programada." in page
+    assert "A disponibilidade será calculada após a submissão." in page
+    assert "Tempo decorrido / janela máxima:" in page
+    assert "Janela máxima prevista:" in page
+    assert "Início do restore:" in page
 
 
 def test_flight_board_repeats_the_time_axis_below_the_restore_rows():

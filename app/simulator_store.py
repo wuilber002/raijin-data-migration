@@ -492,6 +492,20 @@ class SimulatorStore:
             virtual_objects = int(session.scalar(select(func.count(VirtualObject.id)).where(
                 VirtualObject.bucket_id.in_(bucket_ids)
             )) or 0) if bucket_ids else 0
+            materialization = (json.loads(scenario.configuration_json).get("_materialization", {}) if scenario else {})
+            scenario_configuration = json.loads(scenario.configuration_json) if scenario else {}
+            source_objects = (VirtualObject.bucket_id.in_(bucket_ids) if bucket_ids else False)
+            local_objects = int(session.scalar(select(func.count(VirtualObject.id)).where(
+                source_objects, VirtualObject.payload_kind == "LOCAL_FILE"
+            )) or 0) if bucket_ids else 0
+            local_unique_bytes = int(session.scalar(select(func.coalesce(func.sum(VirtualObject.payload_size_bytes), 0)).where(
+                source_objects, VirtualObject.payload_kind == "LOCAL_FILE"
+            )) or 0) if bucket_ids else 0
+            # Reused sample files must not be counted once per logical object.
+            local_file_rows = session.execute(select(
+                VirtualObject.payload_file_id, VirtualObject.payload_size_bytes
+            ).where(source_objects, VirtualObject.payload_kind == "LOCAL_FILE").distinct()).all() if bucket_ids else []
+            local_unique_bytes = sum(int(row.payload_size_bytes or 0) for row in local_file_rows)
             elapsed = None
             if execution.real_started_at:
                 end = execution.real_finished_at or datetime.now(timezone.utc)
@@ -507,7 +521,27 @@ class SimulatorStore:
                 "real_elapsed_seconds": elapsed,
                 "physical_budget_bytes": int(execution.physical_budget_bytes or 0),
                 "physical_bytes_processed": int(execution.physical_bytes_processed or 0),
+                "physical_read_operations": int(execution.physical_read_operations or 0),
+                "physical_local_bytes_read": int(execution.physical_local_bytes_read or 0),
+                "physical_read_seconds": float(execution.physical_read_seconds or 0.0),
+                "physical_read_mbps": (
+                    (int(execution.physical_local_bytes_read or 0) * 8 / 1_000_000)
+                    / float(execution.physical_read_seconds or 0.0)
+                    if float(execution.physical_read_seconds or 0.0) > 0 else 0.0
+                ),
+                "physical_snapshot_failures": int(execution.physical_snapshot_failures or 0),
                 "virtual_objects": virtual_objects,
+                "payload": {
+                    "model": materialization.get("payload_model", "VIRTUAL"),
+                    "dataset": materialization.get("payload_dataset"),
+                    "cache_mode": scenario_configuration.get("payload_cache_mode", "UNSPECIFIED"),
+                    "resource_limits": scenario_configuration.get("payload_resource_limits", {}),
+                    "physical_object_count": local_objects,
+                    "physical_unique_bytes": local_unique_bytes,
+                    "physical_logical_bytes": int(materialization.get("physical_logical_bytes", 0)),
+                    "virtual_logical_bytes": int(materialization.get("virtual_logical_bytes", scenario.logical_size_bytes if scenario else 0)),
+                    "physical_object_indices": materialization.get("physical_object_indices", []),
+                },
                 "operation_counts": operation_counts,
                 "fault_counts": fault_counts,
                 "restore_jobs": restore_jobs,

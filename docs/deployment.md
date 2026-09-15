@@ -10,7 +10,7 @@
 ## OCI Resource Manager
 
 1. Crie um Stack a partir de `terraform/orm` neste repositório.
-2. Preencha o formulário. Use 8 OCPUs, 32 GB e boot volume de 500 GB como ponto de partida.
+2. Preencha o formulário. Use 8 OCPUs, 32 GB e boot volume de 500 GB como ponto de partida. O stack também cria o Block Volume dedicado do Fujin com 15.360 GB (15 TB), separado do boot volume.
    A VM aceita administração SSH exclusivamente por chave pública/privada: senha, teclado interativo e login direto de root são desabilitados pelo cloud-init e reforçados pelo bootstrap. A porta 8080 nunca deve ser liberada; ela é publicada apenas em `127.0.0.1` na VM. O cliente pode manter a regra de SSH sem restrição de CIDR conforme sua política, desde que preserve a proteção da chave privada.
 3. Escolha criar Vault/Key ou informar os OCIDs de recursos existentes. O stack pode criar os Secrets de plataforma e um template JSON inicial de conexão AWS; quando esses recursos são externos, o cliente deve fornecer o Secret de senha PostgreSQL e as policies correspondentes.
 4. Se criar policy, informe os buckets OCI de destino em `destination_buckets_json`. Agrupe buckets no mesmo compartment sempre que possível.
@@ -19,6 +19,8 @@
 7. Confirme que a policy automática de backup está associada ao boot volume.
 
 Depois do deploy, abra **Configurações → Inventário de buckets OCI** e use **Atualizar buckets OCI**. A consulta ocorre somente sob demanda via OCI Resource Search no tenancy e o resultado é persistido no PostgreSQL. O cadastro de origem aceita apenas um bucket presente nesse cache; a policy da Dynamic Group continua sendo a autorização efetiva para escrita.
+
+O PostgreSQL é iniciado com `--shm-size=512m`. Esse limite evita que consultas de consolidação do Resultado final e da timeline esgotem o `/dev/shm` padrão de containers em sources com muitos segmentos de transferência.
 
 Uma origem com apenas cadastro, discovery, inventário ou ondas ainda não executadas pode ser excluída definitivamente, removendo também esses dados de preview. Depois que um worker assumir qualquer onda, a interface disponibiliza somente **Arquivar**: ela pausa ondas não concluídas, remove a origem da lista diária e mantém todo o histórico para auditoria.
 
@@ -60,7 +62,18 @@ Os perfis são mutuamente exclusivos e expõem a console somente em
 ```bash
 docker compose --profile real up -d
 docker compose --profile simulation up -d
+docker compose --profile local up -d
 ```
+
+The About page reports the semantic release and the exact build revision. CI
+or a manual release should inject the Git commit while building, for example:
+
+```bash
+RAIJIN_SERVICE_VERSION=0.5.0 RAIJIN_BUILD_REVISION="$(git rev-parse --short HEAD)" docker compose build
+```
+
+Without build metadata the revision is shown as `development`, so an operator
+can distinguish an unversioned local image from a traceable release.
 
 Não ative os dois perfis juntos. Em um diretório PostgreSQL novo, o init cria
 `migration_simulation` e o usuário dedicado usando o Secret
@@ -68,6 +81,44 @@ Não ative os dois perfis juntos. Em um diretório PostgreSQL novo, o init cria
 antes de iniciar o perfil, ou prefira o bootstrap da VM, que faz isso de forma
 idempotente. O ambiente de produção troca o modo por `raijin-mode`, depois de
 um drain comprovado da fila, e nunca executa os dois runtimes ao mesmo tempo.
+
+O perfil `local` não cria um modo adicional no Raijin: API e workers seguem
+em `REAL`. Ele inicia o Fujin como provedor privado, com os dados em rede
+Docker interna e as duas interfaces no mesmo túnel SSH:
+
+```text
+http://127.0.0.1:8080/raijin/
+http://127.0.0.1:8080/fujin/
+```
+
+A console administrativa LOCAL não usa token próprio. O gateway publica-a
+somente em `127.0.0.1`; o acesso é protegido pela chave e pelo túnel SSH que
+expõe a porta local. Não há Secret Fujin adicional, e nada é entregue ao
+Raijin.
+
+Na VM Oracle Linux, o bootstrap também instala o launcher equivalente ao
+perfil Compose. Depois de drenar a execução corrente, execute
+`sudo /usr/local/sbin/s3-oci-stop-runtime`, gere o perfil OCI LOCAL e execute
+`sudo /usr/local/sbin/s3-oci-start-fujin-local-runtime`. O launcher recria o
+PostgreSQL durável quando ele foi removido pela parada controlada.
+Ele sobe Raijin em `REAL`, os workers, Fujin, DNS privado e o gateway em
+loopback; não existe modo LOCAL no Raijin.
+
+A console Fujin fornece o pacote de Secret sintético no formato normal de uma
+conexão AWS. Cadastre-o no Vault sem alterar o schema e crie uma conexão AWS
+normal no Raijin. Para a conexão, use os endpoints HTTPS privados e a CA
+`/etc/fujin-local-ca/fujin-local.crt`: `sts.<região>.fujin.internal`,
+`vpce-fujin-local.s3.<região>.fujin.internal` e
+`control.vpce-fujin-local.s3.<região>.fujin.internal`. O DNS interno resolve
+também o hostname virtual de cada bucket. APIs de dados não possuem porta
+publicada; somente a UI fica em loopback por meio do gateway.
+
+O perfil de runtime OCI é igualmente genérico: use
+`https://oci.<região>.fujin.internal`, o namespace configurado no bucket OCI
+LOCAL e a mesma CA privada. Esse endpoint não pertence à Secret AWS e não
+introduz um modo Fujin/LOCAL no Raijin. Gere-o a partir do perfil REAL com
+`/usr/local/sbin/configure-fujin-local-oci-runtime`; o arquivo derivado é
+montado exclusivamente nos containers do perfil Compose `local`.
 
 ### Alterar o modo de operação por API local
 
@@ -114,6 +165,10 @@ migração. Quando a API retornar `409`, conclua, pause ou recupere as tarefas
 informadas antes de repetir a chamada.
 
 O painel de saúde também mostra o estado do serviço systemd da plataforma, dos containers PostgreSQL e aplicação, do timer de backup lógico e do timer que atualiza esse estado. O host gera um pequeno JSON em `/run/s3-oci-migration` a cada minuto; o container web apenas o lê, sem acesso ao socket Podman, systemd ou privilégios de host.
+
+O stack anexa o Block Volume `*-fujin-payloads` de 15 TB como `/dev/oracleoci/oraclevdb`. O bootstrap o formata como XFS apenas se estiver vazio e o monta em `/var/lib/s3-oci-migration/fujin-payloads` com permissões `0700`. Esse diretório só é bind-mounted no container Fujin durante **SIMULATION**; PostgreSQL, Raijin workers, API e **REAL** não o recebem. Ao aplicar a alteração em uma VM já existente, execute uma vez `sudo /opt/s3-oci-migration/release/scripts/bootstrap.sh` após a attachment ficar `ATTACHED`.
+
+Embora o boot volume seja provisionado com 500 GB, a imagem OCI pode iniciar com a partição LVM ainda no tamanho original. No primeiro boot, o cloud-init expande a partição e o PV e aloca todos os extents livres do volume group ao filesystem raiz. Assim, o Raijin — instalado no boot volume — utiliza praticamente toda a capacidade disponível, sem competir com o volume dedicado de 15 TB do Fujin. A rotina é idempotente e não reduz nem altera o filesystem em execuções posteriores.
 
 O bloco **Observabilidade operacional** acompanha, sem chamar AWS ou OCI: tarefas falhas e em retry, leases vencidos, checkpoints multipart pendentes de retomada, transferências sem progresso há mais de dez minutos, falhas persistidas nas últimas 24 horas, risco previsto de expiração de cópias restauradas e espaço livre do volume persistente. Para um coletor local compatível, `http://127.0.0.1:8080/metrics` expõe essas métricas no formato Prometheus (`raijin_failed_tasks`, `raijin_retrying_tasks`, `raijin_stale_task_leases`, `raijin_active_multipart_checkpoints`, `raijin_stalled_transfers`, `raijin_failures_last_24h`, `raijin_restore_expiry_risk_waves` e `raijin_disk_free_bytes`); mantenha-o atrás do mesmo túnel SSH ou de um agente local, nunca em uma porta pública.
 

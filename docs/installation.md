@@ -63,6 +63,8 @@ Cole o JSON e substitua **todos** os valores entre `<...>`:
 ```json
 {
   "object_storage_namespace": "<OBJECT_STORAGE_NAMESPACE>",
+  "object_storage_endpoint_url": "",
+  "object_storage_ca_bundle_path": "",
   "destination_compartment_names": {
     "<DESTINATION_COMPARTMENT_OCID>": "<DESTINATION_COMPARTMENT_NAME>"
   },
@@ -76,6 +78,10 @@ Cole o JSON e substitua **todos** os valores entre `<...>`:
   ]
 }
 ```
+
+Deixe os dois campos de endpoint vazios para OCI público. Em uma implantação
+privada, informe a URL HTTPS e o caminho absoluto do bundle da CA interna; a
+semântica do Raijin permanece a mesma.
 
 Proteja o arquivo após salvar:
 

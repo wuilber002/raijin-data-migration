@@ -67,6 +67,17 @@ variable "boot_volume_size_in_gbs" {
   }
 }
 
+variable "fujin_payload_volume_size_in_gbs" {
+  description = "Dedicated OCI Block Volume capacity for Fujin-managed physical source payloads. 15360 GB is the required 15 TB allocation and is separate from boot, database, logs and releases."
+  type        = number
+  default     = 15360
+
+  validation {
+    condition     = var.fujin_payload_volume_size_in_gbs >= 15360
+    error_message = "Fujin physical payload storage requires at least 15360 GB (15 TB)."
+  }
+}
+
 variable "ssh_public_key" {
   description = "SSH public key used only for administration and localhost web-interface tunnels."
   type        = string
@@ -236,4 +247,16 @@ variable "bootstrap_ref" {
   description = "Git ref installed by cloud-init. Use a release tag in production."
   type        = string
   default     = "main"
+}
+
+variable "object_storage_endpoint_url" {
+  description = "Optional private OCI Object Storage endpoint URL. Empty keeps the public OCI SDK endpoint."
+  type        = string
+  default     = ""
+}
+
+variable "object_storage_ca_bundle_path" {
+  description = "Optional absolute CA bundle path trusted by the OCI SDK for a private Object Storage endpoint."
+  type        = string
+  default     = ""
 }

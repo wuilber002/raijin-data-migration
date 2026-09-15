@@ -55,6 +55,15 @@ class SimulatorAdminClient:
     def materialize(self, scenario_id: str, payload: dict) -> dict:
         return self._request("POST", f"/v1/scenarios/{scenario_id}/materialize", payload)
 
+    def list_payload_datasets(self) -> list[dict]:
+        return self._request("GET", "/v1/payload-datasets")
+
+    def create_payload_dataset(self, payload: dict) -> dict:
+        return self._request("POST", "/v1/payload-datasets", payload)
+
+    def validate_payload_dataset(self, dataset_id: str) -> dict:
+        return self._request("POST", f"/v1/payload-datasets/{dataset_id}/validate", {})
+
     def create_execution(self, scenario_id: str) -> dict:
         return self._request("POST", f"/v1/scenarios/{scenario_id}/executions", {})
 

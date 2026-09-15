@@ -5,6 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from botocore.exceptions import ClientError
+from app.simulator_admin import SimulatorAdminError
 
 
 # The worker imports the application module. These values make that import
@@ -132,6 +133,10 @@ def test_aws_task_errors_retry_only_for_transient_service_pressure():
     assert classify_task_error(throttled)[0] == "retry"
     assert classify_task_error(denied)[0] == "failed"
     assert classify_task_error(malformed)[0] == "failed"
+    assert classify_task_error(TimeoutError("simulator request timed out"))[0] == "retry"
+    assert classify_task_error(ConnectionResetError("connection reset by peer"))[0] == "retry"
+    assert classify_task_error(SimulatorAdminError("clock: connection reset by peer"))[0] == "retry"
+    assert classify_task_error(SimulatorAdminError("bad clock operation", status_code=400))[0] == "failed"
 
 
 def test_unknown_worker_errors_fail_instead_of_looping_indefinitely():

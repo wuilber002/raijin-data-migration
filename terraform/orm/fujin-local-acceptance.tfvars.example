@@ -1,0 +1,25 @@
+# Copy to a protected, untracked *.tfvars file and replace every placeholder.
+# This file creates a dedicated LOCAL acceptance VM; it does not introduce a
+# LOCAL mode in Raijin.
+compartment_ocid         = "ocid1.compartment.oc1..REPLACE"
+availability_domain      = "REPLACE_WITH_AVAILABILITY_DOMAIN"
+subnet_ocid              = "ocid1.subnet.oc1..REPLACE"
+image_ocid               = "ocid1.image.oc1..REPLACE"
+ssh_public_key           = "ssh-ed25519 REPLACE"
+secrets_compartment_ocid = "ocid1.compartment.oc1..REPLACE"
+
+# The same compartment is a reasonable starting point when the deployment
+# owns its Vault/Key. Override them for a centrally managed Vault.
+vault_compartment_ocid = "ocid1.compartment.oc1..REPLACE"
+key_compartment_ocid   = "ocid1.compartment.oc1..REPLACE"
+
+resource_name_prefix             = "fujin-local-acceptance"
+assign_public_ip                 = false
+ocpus                            = 8
+memory_in_gbs                    = 32
+boot_volume_size_in_gbs          = 500
+fujin_payload_volume_size_in_gbs = 15360
+
+# Populate only with the OCI destination bucket(s) explicitly approved for
+# this acceptance environment.
+destination_buckets_json = "[]"

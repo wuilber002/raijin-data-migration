@@ -26,6 +26,7 @@ from app.simulator_store import (
     TemplateWrite,
 )
 from app.simulation_engine import SimulationEngine, SimulatedNetworkUnavailable
+from app.fujin_payloads import FujinPayloadError, FujinPayloadRepository, host_telemetry, repository_root
 from app.backend_contracts import (
     HeadObjectRequest,
     RestoreAvailabilityRequest,
@@ -53,6 +54,31 @@ async def automatic_housekeeping(stop: asyncio.Event) -> None:
             store().apply_generator_housekeeping()
 
 
+async def payload_generation(stop: asyncio.Event) -> None:
+    """Advance Fujin-owned physical datasets without blocking API requests."""
+    while not stop.is_set():
+        try:
+            # File generation performs deliberate synchronous I/O, hashing and
+            # fsync.  Keep that work out of FastAPI's event loop so a large
+            # managed sample cannot make clock, restore or read endpoints
+            # appear unavailable while its durable job advances.
+            await asyncio.to_thread(
+                payload_repository().process_generation_jobs, max_files=1
+            )
+            await asyncio.to_thread(
+                payload_repository().process_validation_jobs, max_files=1
+            )
+        except Exception:
+            # The durable job captures failures; a later operator action or
+            # restart can resume it without taking the simulator down.
+            pass
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.2)
+            return
+        except asyncio.TimeoutError:
+            continue
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     if operations_ready()[0]:
@@ -62,13 +88,17 @@ async def lifespan(_app: FastAPI):
         store().apply_housekeeping()
     stop = asyncio.Event()
     task = asyncio.create_task(automatic_housekeeping(stop))
+    payload_task = asyncio.create_task(payload_generation(stop))
     try:
         yield
     finally:
         stop.set()
         task.cancel()
+        payload_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        with suppress(asyncio.CancelledError):
+            await payload_task
 
 
 app = FastAPI(
@@ -99,6 +129,17 @@ class MaterializePayload(BaseModel):
     logical_size_bytes: int = Field(ge=0)
     prefixes: list[str] = Field(default_factory=lambda: ["simulation"])
     storage_class: str = Field(default="DEEP_ARCHIVE", max_length=64)
+    payload_model: str = Field(default="VIRTUAL", pattern="^(VIRTUAL|REPRESENTATIVE|HYBRID)$")
+    payload_dataset_id: str | None = Field(default=None, max_length=36)
+    physical_object_indices: list[int] = Field(default_factory=list, max_length=10_000_000)
+
+
+class PayloadDatasetCreatePayload(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    quota_bytes: int = Field(gt=0)
+    seed: str = Field(min_length=1, max_length=255)
+    profile: dict = Field(default_factory=dict)
+    model: str = Field(default="REPRESENTATIVE", pattern="^(REPRESENTATIVE|HYBRID)$")
 
 
 class ClockControlPayload(BaseModel):
@@ -129,6 +170,7 @@ class TemplateWritePayload(BaseModel):
 
 
 def scenario_response(item) -> dict:
+    template_snapshot = json.loads(item.template_snapshot_json or "{}")
     return {
         "id": item.id,
         "name": item.name,
@@ -141,6 +183,8 @@ def scenario_response(item) -> dict:
         "quarantine_days": item.quarantine_days,
         "contract_version": item.contract_version,
         "generator_version": item.generator_version,
+        "template_id": item.template_id,
+        "template_name": template_snapshot.get("name") or "Custom scenario",
         "created_at": item.created_at,
     }
 
@@ -164,6 +208,11 @@ def store() -> SimulatorStore:
 
 def engine() -> SimulationEngine:
     return SimulationEngine(store())
+
+
+@lru_cache(maxsize=1)
+def payload_repository() -> FujinPayloadRepository:
+    return FujinPayloadRepository(store())
 
 
 def decode_metadata(value: str, model):
@@ -232,6 +281,7 @@ def handshake() -> SimulatorHandshake:
                 "clone-replay-v1",
                 "housekeeping-quarantine-v1",
                 "generator-lifecycle-v1",
+                "local-filesystem-source-payload-v1",
             ]
             if ready
             else []
@@ -246,6 +296,44 @@ def materialize_scenario(scenario_id: str, payload: MaterializePayload) -> dict:
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@app.get("/v1/payload-datasets")
+def list_payload_datasets() -> list[dict]:
+    try:
+        return payload_repository().list_datasets()
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@app.post("/v1/payload-datasets", status_code=201)
+def create_payload_dataset(payload: PayloadDatasetCreatePayload) -> dict:
+    try:
+        item = payload_repository().create_dataset(**payload.model_dump())
+        return {"id": item.id, "name": item.name, "state": item.state}
+    except FujinPayloadError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@app.post("/v1/payload-datasets/jobs/process")
+def process_payload_generation() -> dict:
+    """Small explicit progress hook useful to diagnostics and test runners."""
+    try:
+        return payload_repository().process_generation_jobs(max_files=1)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@app.post("/v1/payload-datasets/{dataset_id}/validate", status_code=202)
+def validate_payload_dataset(dataset_id: str) -> dict:
+    try:
+        return payload_repository().enqueue_validation(dataset_id)
+    except FujinPayloadError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
@@ -351,6 +439,10 @@ def execution_detail(execution_id: str) -> dict:
         "state": item.state,
         "physical_budget_bytes": item.physical_budget_bytes,
         "physical_bytes_processed": item.physical_bytes_processed,
+        "physical_read_operations": item.physical_read_operations,
+        "physical_local_bytes_read": item.physical_local_bytes_read,
+        "physical_read_seconds": item.physical_read_seconds,
+        "physical_snapshot_failures": item.physical_snapshot_failures,
         "real_started_at": item.real_started_at,
         "real_finished_at": item.real_finished_at,
         "virtual_started_at": item.virtual_started_at,
@@ -362,7 +454,15 @@ def execution_detail(execution_id: str) -> dict:
 @app.get("/v1/executions/{execution_id}/report")
 def execution_report(execution_id: str) -> dict:
     try:
-        return store().execution_report(execution_id)
+        report = store().execution_report(execution_id)
+        try:
+            report["physical_host_telemetry"] = host_telemetry(repository_root())
+            report["physical_host_telemetry_available"] = True
+        except Exception:
+            # Report generation must remain available even if a local volume
+            # is temporarily absent in a non-payload test/deployment.
+            report["physical_host_telemetry_available"] = False
+        return report
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -391,7 +491,14 @@ def clone_execution(execution_id: str, payload: ExecutionClonePayload) -> dict:
             configuration=configuration,
             fault_rules=snapshot.get("fault_rules", []),
         ))
-        catalog = engine().materialize(scenario.id, **materialization)
+        materialize_fields = {
+            "source_bucket", "destination_bucket", "region", "object_count",
+            "logical_size_bytes", "prefixes", "storage_class", "payload_model",
+            "payload_dataset_id", "physical_object_indices",
+        }
+        catalog = engine().materialize(
+            scenario.id, **{key: value for key, value in materialization.items() if key in materialize_fields}
+        )
         cloned = store().create_execution(scenario.id)
         return {
             "scenario": scenario_response(scenario),

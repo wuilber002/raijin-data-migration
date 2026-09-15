@@ -6,6 +6,7 @@ install_root=/opt/s3-oci-migration/release
 secret_root=/etc/s3-oci-migration/secrets
 runtime_root=/run/s3-oci-migration
 mode_control_root=/var/lib/s3-oci-migration/mode-control
+fujin_payload_root=/var/lib/s3-oci-migration/fujin-payloads
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 image=localhost/s3-oci-migration:latest
 network=s3-oci-migration
@@ -44,6 +45,9 @@ case "$mode" in
     done
     ;;
   SIMULATION)
+    # This is deliberately mounted only in the Fujin simulator.  Raijin's
+    # API/workers and every REAL container have no access to physical samples.
+    install -d -m 0700 "$fujin_payload_root"
     podman run --rm --network "$network" \
       -e PYTHONPATH=/app \
       -e RAIJIN_OPERATION_MODE=SIMULATION \
@@ -59,7 +63,9 @@ case "$mode" in
       -e RAIJIN_OPERATION_MODE=SIMULATION \
       -e RAIJIN_SIMULATOR_DATABASE_URL=postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation \
       -e RAIJIN_SIMULATOR_POSTGRES_PASSWORD_FILE=/run/secrets/simulation_postgres_password \
+      -e RAIJIN_FUJIN_PAYLOAD_ROOT=/var/lib/fujin-payloads \
       -v "$secret_root/simulation_postgres_password:/run/secrets/simulation_postgres_password:ro,z" \
+      -v "$fujin_payload_root:/var/lib/fujin-payloads:rw,z" \
       "$image" uvicorn app.simulator:app --host 0.0.0.0 --port 8090
     for attempt in $(seq 1 30); do
       podman exec s3-oci-simulator python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=2)" >/dev/null 2>&1 && break

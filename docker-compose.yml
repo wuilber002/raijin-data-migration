@@ -1,3 +1,9 @@
+x-raijin-build: &raijin-build
+  context: .
+  args:
+    RAIJIN_SERVICE_VERSION: ${RAIJIN_SERVICE_VERSION:-0.5.0}
+    RAIJIN_BUILD_REVISION: ${RAIJIN_BUILD_REVISION:-development}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -19,7 +25,7 @@ services:
       retries: 10
 
   app:
-    build: .
+    build: *raijin-build
     profiles: ["real"]
     restart: unless-stopped
     depends_on:
@@ -34,8 +40,143 @@ services:
     secrets:
       - postgres_password
 
+  # LOCAL deliberately remains a REAL Raijin process. Fujin is a separate
+  # provider service; only the generic endpoint configuration points clients
+  # at its private network aliases.
+  local-app:
+    build: *raijin-build
+    profiles: ["local"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      fujin-local:
+        condition: service_healthy
+    environment:
+      RAIJIN_OPERATION_MODE: REAL
+      DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      OCI_RUNTIME_CONFIG_FILE: /run/oci-runtime/oci-runtime.json
+    expose: ["8080"]
+    secrets: [postgres_password]
+    # The UI network is control-plane only.  It lets the loopback gateway
+    # resolve the app and Fujin aliases without joining its data API to the
+    # default application network.
+    networks: [fujin-local-ui, default, fujin-local-data]
+    dns: [172.30.0.53]
+    volumes:
+      - /var/lib/s3-oci-migration/fujin-local/tls:/etc/fujin-local-ca:ro
+      - /etc/s3-oci-migration/oci-runtime-local.json:/run/oci-runtime/oci-runtime.json:ro
+
+  local-governance-worker:
+    build: *raijin-build
+    profiles: ["local"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      local-app:
+        condition: service_started
+      fujin-local:
+        condition: service_healthy
+    environment:
+      RAIJIN_OPERATION_MODE: REAL
+      RAIJIN_WORKER_ROLE: raikou
+      RAIJIN_WORKER_ID: raikou-local
+      DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      OCI_RUNTIME_CONFIG_FILE: /run/oci-runtime/oci-runtime.json
+    command: ["python3", "-m", "app.real_worker"]
+    secrets: [postgres_password]
+    networks: [default, fujin-local-data]
+    dns: [172.30.0.53]
+    volumes:
+      - /var/lib/s3-oci-migration/fujin-local/tls:/etc/fujin-local-ca:ro
+      - /etc/s3-oci-migration/oci-runtime-local.json:/run/oci-runtime/oci-runtime.json:ro
+
+  local-transfer-worker:
+    build: *raijin-build
+    profiles: ["local"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      local-app:
+        condition: service_started
+      fujin-local:
+        condition: service_healthy
+    environment:
+      RAIJIN_OPERATION_MODE: REAL
+      RAIJIN_WORKER_ROLE: raiju
+      RAIJIN_WORKER_ID: raiju-local
+      DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      OCI_RUNTIME_CONFIG_FILE: /run/oci-runtime/oci-runtime.json
+    command: ["python3", "-m", "app.real_worker"]
+    secrets: [postgres_password]
+    networks: [default, fujin-local-data]
+    dns: [172.30.0.53]
+    volumes:
+      - /var/lib/s3-oci-migration/fujin-local/tls:/etc/fujin-local-ca:ro
+      - /etc/s3-oci-migration/oci-runtime-local.json:/run/oci-runtime/oci-runtime.json:ro
+
+  fujin-local:
+    build: *raijin-build
+    profiles: ["local"]
+    restart: unless-stopped
+    environment:
+      FUJIN_LOCAL_DATABASE_URL: sqlite+pysqlite:////var/lib/fujin-local/catalog.db
+      FUJIN_LOCAL_PAYLOAD_ROOT: /var/lib/fujin-local/payloads
+      FUJIN_LOCAL_STAGING_ROOT: /var/lib/fujin-local/staging
+      FUJIN_LOCAL_AWS_REGION: us-east-1
+      FUJIN_LOCAL_OCI_REGION: sa-saopaulo-1
+      FUJIN_LOCAL_VPCE_ID: vpce-fujin-local
+      FUJIN_LOCAL_ADMIN_TOKEN_FILE: /run/secrets/fujin_local_admin_token
+    command: ["scripts/run-fujin-local.sh"]
+    expose: ["443"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:443/healthz', context=ssl._create_unverified_context(), timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 15
+    volumes:
+      - /var/lib/s3-oci-migration/fujin-local:/var/lib/fujin-local
+      # Representative payloads are immutable physical input.  The Fujin may
+      # index and stream them, but never writes source bytes or its staging
+      # cache back to the dedicated payload volume.
+      - /var/lib/s3-oci-migration/fujin-payloads:/var/lib/fujin-local/payloads:ro
+    secrets: [fujin_local_admin_token]
+    networks:
+      default: {}
+      fujin-local-data:
+        ipv4_address: 172.30.0.10
+      fujin-local-ui: {}
+
+  fujin-local-dns:
+    image: coredns/coredns:1.11.3
+    profiles: ["local"]
+    restart: unless-stopped
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./docker/fujin-local.Corefile:/etc/coredns/Corefile:ro
+    networks:
+      fujin-local-data:
+        ipv4_address: 172.30.0.53
+
+  local-ui-gateway:
+    image: nginx:1.27-alpine
+    profiles: ["local"]
+    restart: unless-stopped
+    depends_on: [local-app, fujin-local]
+    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - ./docker/nginx-local-ui.conf:/opt/fujin/nginx-local-ui.conf:ro
+      - ./docker/run-local-ui-gateway.sh:/opt/fujin/run-local-ui-gateway.sh:ro
+    command: ["/bin/sh", "/opt/fujin/run-local-ui-gateway.sh"]
+    networks: [default, fujin-local-ui]
+
   simulator:
-    build: .
+    build: *raijin-build
     profiles: ["simulation"]
     restart: unless-stopped
     depends_on:
@@ -59,7 +200,7 @@ services:
       - simulation_postgres_password
 
   simulation-migrate:
-    build: .
+    build: *raijin-build
     profiles: ["simulation"]
     depends_on:
       postgres:
@@ -76,7 +217,7 @@ services:
       - simulation_postgres_password
 
   simulation-app:
-    build: .
+    build: *raijin-build
     profiles: ["simulation"]
     restart: unless-stopped
     depends_on:
@@ -100,7 +241,7 @@ services:
       - simulation_postgres_password
 
   simulation-governance-worker:
-    build: .
+    build: *raijin-build
     profiles: ["simulation"]
     restart: unless-stopped
     depends_on:
@@ -122,7 +263,7 @@ services:
       - simulation_postgres_password
 
   simulation-transfer-worker:
-    build: .
+    build: *raijin-build
     profiles: ["simulation"]
     restart: unless-stopped
     depends_on:
@@ -148,3 +289,19 @@ secrets:
     file: /etc/s3-oci-migration/secrets/postgres_password
   simulation_postgres_password:
     file: /etc/s3-oci-migration/secrets/simulation_postgres_password
+  # LOCAL administration is intentionally separate from Raijin and protected
+  # even inside the loopback-only UI topology.  The secret is generated or
+  # provisioned by the host bootstrap and is never injected into Raijin.
+  fujin_local_admin_token:
+    file: /etc/s3-oci-migration/secrets/fujin_local_admin_token
+
+networks:
+  # The provider data plane has no host-published port.  Only Raijin workers
+  # and the local UI bridge may reach it on this internal Docker network.
+  fujin-local-data:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  fujin-local-ui:
+    internal: true

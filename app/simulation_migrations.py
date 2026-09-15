@@ -6,6 +6,10 @@ from sqlalchemy import Engine, inspect, select, text
 from sqlalchemy.orm import Session
 
 from app.simulation_schema import (
+    FujinPayloadDataset,
+    FujinPayloadFile,
+    FujinPayloadGenerationJob,
+    FujinPayloadValidationJob,
     GeneratorRelease,
     SIMULATION_SCHEMA_VERSION,
     SimulationBase,
@@ -100,4 +104,86 @@ def migrate(engine: Engine) -> int:
                 description="Phase-owned virtual clock holds",
             ))
             session.commit()
+        revision = 4
+    if revision < 5:
+        # Fresh schemas obtain these definitions from ``create_all``. Existing
+        # catalogs need additive columns and independent Fujin repository
+        # tables. Legacy rows keep the deterministic default.
+        columns = {item["name"] for item in inspect(engine).get_columns("sim_virtual_objects")}
+        additions = {
+            "payload_kind": "VARCHAR(24) NOT NULL DEFAULT 'DETERMINISTIC'",
+            "payload_dataset_id": "VARCHAR(36)",
+            "payload_file_id": "VARCHAR(36)",
+            "payload_relative_path": "VARCHAR(1024)",
+            "payload_size_bytes": "BIGINT",
+            "payload_mtime_ns": "BIGINT",
+            "payload_identity": "VARCHAR(255)",
+            "payload_sha256": "VARCHAR(64)",
+        }
+        with engine.begin() as connection:
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.execute(text(
+                        f"ALTER TABLE sim_virtual_objects ADD COLUMN {name} {definition}"
+                    ))
+        FujinPayloadDataset.__table__.create(engine, checkfirst=True)
+        FujinPayloadFile.__table__.create(engine, checkfirst=True)
+        FujinPayloadGenerationJob.__table__.create(engine, checkfirst=True)
+        with Session(engine) as session:
+            session.add(SimulationSchemaRevision(
+                version=5,
+                description="Fujin-managed local payload repository catalog",
+            ))
+            session.commit()
+        revision = 5
+    if revision < 6:
+        columns = {item["name"] for item in inspect(engine).get_columns("sim_executions")}
+        additions = {
+            "physical_read_operations": "INTEGER NOT NULL DEFAULT 0",
+            "physical_local_bytes_read": "BIGINT NOT NULL DEFAULT 0",
+            "physical_read_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "physical_snapshot_failures": "INTEGER NOT NULL DEFAULT 0",
+        }
+        with engine.begin() as connection:
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.execute(text(
+                        f"ALTER TABLE sim_executions ADD COLUMN {name} {definition}"
+                    ))
+        with Session(engine) as session:
+            session.add(SimulationSchemaRevision(
+                version=6,
+                description="Physical payload reader telemetry",
+            ))
+            session.commit()
+        revision = 6
+    if revision < 7:
+        columns = {item["name"] for item in inspect(engine).get_columns("sim_payload_datasets")}
+        additions = {
+            "last_validated_at": "TIMESTAMP WITH TIME ZONE" if engine.dialect.name == "postgresql" else "DATETIME",
+            "last_validation_state": "VARCHAR(24)",
+            "last_validation_error": "TEXT",
+        }
+        with engine.begin() as connection:
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.execute(text(
+                        f"ALTER TABLE sim_payload_datasets ADD COLUMN {name} {definition}"
+                    ))
+        with Session(engine) as session:
+            session.add(SimulationSchemaRevision(
+                version=7,
+                description="Durable Fujin payload snapshot validation evidence",
+            ))
+            session.commit()
+        revision = 7
+    if revision < 8:
+        FujinPayloadValidationJob.__table__.create(engine, checkfirst=True)
+        with Session(engine) as session:
+            session.add(SimulationSchemaRevision(
+                version=8,
+                description="Durable Fujin payload checksum validation jobs",
+            ))
+            session.commit()
+        revision = 8
     return SIMULATION_SCHEMA_VERSION

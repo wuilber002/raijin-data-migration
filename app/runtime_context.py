@@ -17,8 +17,9 @@ from urllib.parse import urlparse
 # Version identifiers are deliberately centralized: the About page and the
 # API report the release that is actually running, rather than a duplicated
 # presentation-only value.
-RAIJIN_SERVICE_VERSION = "0.4.0"
-SIMULATOR_CONTRACT_VERSION = "1"
+RAIJIN_SERVICE_VERSION = os.environ.get("RAIJIN_SERVICE_VERSION", "0.5.0").strip() or "0.5.0"
+RAIJIN_BUILD_REVISION = os.environ.get("RAIJIN_BUILD_REVISION", "development").strip() or "development"
+SIMULATOR_CONTRACT_VERSION = "2"
 SIMULATOR_SERVICE_VERSION = "0.1.0"
 
 
@@ -85,6 +86,8 @@ class RuntimeContext:
                 "Configured simulator contract does not match this RAIJIN release"
             )
         if self.is_real:
+            if values.get("RAIJIN_FUJIN_PAYLOAD_ROOT"):
+                raise RuntimeIsolationError("REAL mode refuses a Fujin local payload volume")
             return
 
         if not self.simulator_base_url:

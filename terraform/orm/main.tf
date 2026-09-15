@@ -210,10 +210,13 @@ resource "oci_core_instance" "migration" {
   metadata = {
     ssh_authorized_keys = var.ssh_public_key
     user_data = base64encode(templatefile("${path.module}/cloud-init.yaml.tftpl", {
-      bootstrap_repository = var.bootstrap_repository
-      bootstrap_ref        = var.bootstrap_ref
+      bootstrap_repository         = var.bootstrap_repository
+      bootstrap_ref                = var.bootstrap_ref
+      boot_volume_expansion_script = indent(6, file("${path.module}/../../scripts/expand-boot-volume.sh"))
       oci_runtime_config = jsonencode({
-        object_storage_namespace = data.oci_objectstorage_namespace.migration.namespace
+        object_storage_namespace      = data.oci_objectstorage_namespace.migration.namespace
+        object_storage_endpoint_url   = var.object_storage_endpoint_url
+        object_storage_ca_bundle_path = var.object_storage_ca_bundle_path
         destination_compartment_names = {
           for compartment_id, compartment in data.oci_identity_compartment.destination : compartment_id => compartment.name
         }
@@ -255,6 +258,27 @@ resource "oci_core_instance" "migration" {
       error_message = "Provide initial_aws_connection_secret_name when creating the initial AWS connection Secret."
     }
   }
+}
+
+# Fujin's generated physical samples must never compete with PostgreSQL, logs,
+# backups or releases on the boot volume. The fixed paravirtualized device is
+# formatted only when blank by the idempotent bootstrap mount script.
+resource "oci_core_volume" "fujin_payloads" {
+  availability_domain = var.availability_domain
+  compartment_id      = var.compartment_ocid
+  display_name        = "${var.resource_name_prefix}-fujin-payloads"
+  size_in_gbs         = var.fujin_payload_volume_size_in_gbs
+}
+
+resource "oci_core_volume_attachment" "fujin_payloads" {
+  attachment_type = "paravirtualized"
+  instance_id     = oci_core_instance.migration.id
+  volume_id       = oci_core_volume.fujin_payloads.id
+  device          = "/dev/oracleoci/oraclevdb"
+  # This existing E5 VM does not support PV encryption in transit. OCI Block
+  # Volume encryption at rest remains enabled by the platform; transport is
+  # restricted to the VM-local paravirtualized attachment.
+  is_pv_encryption_in_transit_enabled = false
 }
 
 resource "oci_identity_dynamic_group" "migration_vm" {

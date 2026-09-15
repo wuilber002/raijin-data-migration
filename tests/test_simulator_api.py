@@ -190,6 +190,9 @@ def test_simulator_api_exposes_versioned_end_to_end_data_path(tmp_path, monkeypa
     _, report = get(f"/v1/executions/{execution['id']}/report")
     assert report["fidelity"] == "DATA"
     assert report["physical_bytes_processed"] == 4096
+    # Deterministic DATA bytes exercise the worker path, but are not local
+    # filesystem I/O and must not inflate physical-sample evidence.
+    assert report["physical_local_bytes_read"] == 0
     assert report["operation_counts"]["READ_RANGE"] >= 1
     assert report["operation_counts"]["PUT_OBJECT"] == 1
     assert report["virtual_objects"] == 2

@@ -19,7 +19,7 @@ from app.runtime_context import SIMULATOR_CONTRACT_VERSION
 from app.simulated_data import GENERATOR_VERSION
 
 
-SIMULATION_SCHEMA_VERSION = 4
+SIMULATION_SCHEMA_VERSION = 8
 DEFAULT_DATA_PHYSICAL_BUDGET_BYTES = 1_000_000_000_000
 DEFAULT_RETENTION_DAYS = 60
 DEFAULT_QUARANTINE_DAYS = 30
@@ -140,6 +140,12 @@ class SimulationExecution(SimulationBase):
     immutable_snapshot_json: Mapped[str] = mapped_column(Text)
     physical_budget_bytes: Mapped[int] = mapped_column(BigInteger)
     physical_bytes_processed: Mapped[int] = mapped_column(BigInteger, default=0)
+    # These counters intentionally cover only LOCAL_FILE reader work.  Logical
+    # deterministic bytes must never be presented as physical disk I/O.
+    physical_read_operations: Mapped[int] = mapped_column(Integer, default=0)
+    physical_local_bytes_read: Mapped[int] = mapped_column(BigInteger, default=0)
+    physical_read_seconds: Mapped[float] = mapped_column(Float, default=0.0)
+    physical_snapshot_failures: Mapped[int] = mapped_column(Integer, default=0)
     real_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     real_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     virtual_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -175,6 +181,92 @@ class VirtualBucket(SimulationBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class FujinPayloadDataset(SimulationBase):
+    """A Fujin-owned, immutable physical payload repository entry.
+
+    The host path never enters this catalog: only the relative directory below
+    the simulator's dedicated volume is persisted.  The simulator alone owns
+    the files referred to by this record.
+    """
+
+    __tablename__ = "sim_payload_datasets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    state: Mapped[str] = mapped_column(String(24), default="DRAFT", index=True)
+    model: Mapped[str] = mapped_column(String(24), default="VIRTUAL")
+    repository_relative_path: Mapped[str] = mapped_column(String(255), unique=True)
+    quota_bytes: Mapped[int] = mapped_column(BigInteger)
+    seed: Mapped[str] = mapped_column(String(255))
+    profile_json: Mapped[str] = mapped_column(Text, default="{}")
+    manifest_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    physical_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    files_total: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_validation_state: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    last_validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FujinPayloadFile(SimulationBase):
+    __tablename__ = "sim_payload_files"
+    __table_args__ = (
+        Index("ix_sim_payload_file_dataset_path", "dataset_id", "relative_path", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    dataset_id: Mapped[str] = mapped_column(String(36), index=True)
+    relative_path: Mapped[str] = mapped_column(String(1024))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str] = mapped_column(String(64))
+    mtime_ns: Mapped[int] = mapped_column(BigInteger)
+    identity: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class FujinPayloadGenerationJob(SimulationBase):
+    """Durable, resumable generation/checksum job owned by Fujin."""
+
+    __tablename__ = "sim_payload_generation_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    dataset_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    state: Mapped[str] = mapped_column(String(24), default="READY", index=True)
+    next_file_index: Mapped[int] = mapped_column(Integer, default=0)
+    files_total: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_written: Mapped[int] = mapped_column(BigInteger, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class FujinPayloadValidationJob(SimulationBase):
+    """Durable checksum validation of a generated Fujin dataset.
+
+    The cursor is persisted after every file so validating a multi-terabyte
+    dataset never holds an HTTP request open and can resume after a restart.
+    """
+
+    __tablename__ = "sim_payload_validation_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    dataset_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    state: Mapped[str] = mapped_column(String(24), default="READY", index=True)
+    next_file_index: Mapped[int] = mapped_column(Integer, default=0)
+    files_total: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_validated: Mapped[int] = mapped_column(BigInteger, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class VirtualObject(SimulationBase):
     __tablename__ = "sim_virtual_objects"
     __table_args__ = (
@@ -200,6 +292,16 @@ class VirtualObject(SimulationBase):
     # CONTROL executions prefix deterministic evidence with ``logical:``;
     # DATA executions store the ordinary 64-character SHA-256 hex digest.
     source_sha256: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # ``LOCAL_FILE`` points to a Fujin-managed payload file.  No external
+    # path is ever accepted or stored in this catalog.
+    payload_kind: Mapped[str] = mapped_column(String(24), default="DETERMINISTIC", index=True)
+    payload_dataset_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    payload_file_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    payload_relative_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    payload_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    payload_mtime_ns: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    payload_identity: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payload_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     restore_state: Mapped[str] = mapped_column(String(32), default="ARCHIVED", index=True)
     restore_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     restore_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -22,8 +23,9 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 
 from datetime import datetime, timedelta, timezone
 
-from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, continuous_lane_capacity_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, internal_rate_value, list_sources, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, start_source_deep_audit, transfer_queue, wave_cost_estimate
-from app.real_worker import GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, require_new_restore_approval, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, simulation_restore_poll_clock_leader, simulation_source_lane_has_committed_work, task_kinds_for_role, validate_restore_preflight
+from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, list_sources, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, transfer_queue, wave_cost_estimate
+from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, require_new_restore_approval, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, simulated_network_retry_after, simulation_restore_poll_clock_leader, simulation_source_lane_has_committed_work, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
+from app.simulator_ports import SimulatorTransportError
 from app import real_worker
 from app.runtime_context import OperationMode, RuntimeContext
 
@@ -31,6 +33,59 @@ from app.runtime_context import OperationMode, RuntimeContext
 def test_object_model_contains_durable_multipart_checkpoint_fields():
     columns = ObjectRecord.__table__.columns
     assert {"multipart_upload_id", "multipart_part_size", "multipart_parts_json", "multipart_updated_at"} <= set(columns.keys())
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_backup", "simulator_visible"),
+    [
+        (OperationMode.REAL, "/backups/migration-20260908.dump", False),
+        (OperationMode.SIMULATION, "/backups/migration-simulation-20260908.dump", True),
+    ],
+)
+def test_platform_status_exposes_only_the_active_runtime_domain(
+    tmp_path, monkeypatch, mode, expected_backup, simulator_visible
+):
+    import json
+    import app.main as main
+
+    snapshot = tmp_path / "status.json"
+    snapshot.write_text(json.dumps({
+        "available": True,
+        "generated_at": "2026-09-08T00:00:00Z",
+        "services": {
+            "migration_systemd": "inactive",
+            "postgres_container": "running",
+            "app_container": "running",
+            "governance_worker": "running",
+            "transfer_worker": "running",
+            "simulator_container": "running",
+            "postgres_backup_timer": "active",
+            "platform_status_timer": "active",
+        },
+        "last_postgres_backups": {
+            "REAL": {"path": "/backups/migration-20260908.dump"},
+            "SIMULATION": {"path": "/backups/migration-simulation-20260908.dump"},
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(main, "platform_status_file", str(snapshot))
+    monkeypatch.setattr(main, "runtime_context", RuntimeContext(
+        mode, "sqlite+pysqlite:///:memory:", "http://fujin" if mode is OperationMode.SIMULATION else None
+    ))
+
+    result = main.platform_status()
+
+    assert result["operation_mode"] == mode.value
+    assert result["last_postgres_backup"]["path"] == expected_backup
+    assert ("simulator_container" in result["services"]) is simulator_visible
+    assert "migration_systemd" not in result["services"]
+
+
+def test_platform_status_collector_separates_real_and_simulation_backups():
+    script = Path("scripts/write-platform-status.sh").read_text(encoding="utf-8")
+    assert "latest_backup_json 'migration-[0-9]*.dump'" in script
+    assert "latest_backup_json 'migration-simulation-[0-9]*.dump'" in script
+    assert '"last_postgres_backups"' in script
+    assert '"simulator_container"' in script
 
 
 def test_source_model_has_a_durable_discovery_page_checkpoint():
@@ -45,8 +100,36 @@ def test_source_model_has_a_durable_discovery_page_checkpoint():
     assert "Atomically persist a bounded discovery batch" in worker
 
 
+def test_real_source_freezes_generic_private_endpoint_profile_before_execution():
+    connection = AwsConnection(
+        label="private-endpoints", secret_ocid="ocid1.vaultsecret.oc1..local", aws_account_id="123456789012",
+        default_region="us-east-1", control_bucket="control",
+        sts_endpoint_url="https://sts.us-east-1.fujin.internal",
+        s3_endpoint_url="https://vpce-fujin-local.s3.us-east-1.fujin.internal",
+        s3control_endpoint_url="https://control.vpce-fujin-local.s3.us-east-1.fujin.internal",
+        s3_addressing_style="virtual", tls_ca_bundle_path="/etc/fujin-local-ca/fujin-local.crt",
+    )
+    source = Source(name="frozen-endpoint", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+    freeze_source_endpoint_configuration(source, connection)
+    frozen = source.aws_endpoint_snapshot_json
+    connection.s3_endpoint_url = "https://changed.example.invalid"
+    assert "changed.example.invalid" not in frozen
+    assert connection_endpoint_configuration(connection)["s3_endpoint_url"] == "https://changed.example.invalid"
+    assert '"s3_addressing_style": "virtual"' in frozen
+
+
 def test_transfer_queue_keeps_virtual_availability_separate_from_lease_clock():
     assert "available_virtual_at" in TransferQueueItem.__table__.columns
+
+
+def test_simulated_network_retry_hint_is_parsed_for_a_single_virtual_advance():
+    outage = SimulatorTransportError(
+        'Simulator request failed: /v1/cloud/destination/logical-transfer: HTTP 503: '
+        '{"detail":{"code":"SIMULATED_NETWORK_UNAVAILABLE",'
+        '"retry_after_virtual_seconds":3563}}'
+    )
+    assert simulated_network_retry_after(outage) == 3563
+    assert simulated_network_retry_after(SimulatorTransportError("HTTP 503: unavailable")) is None
 
 
 def test_restore_forecast_uses_the_documented_bulk_reference_not_fujin_precision(monkeypatch):
@@ -74,6 +157,77 @@ def test_restore_forecast_is_not_rewritten_by_a_fujin_profile(monkeypatch):
 def test_bulk_restore_fallback_is_48_hours():
     assert restore_forecast_seconds("BULK") == (48 * 3600, 48 * 3600)
     assert restore_forecast_seconds("STANDARD") == (12 * 3600, 12 * 3600)
+
+
+def test_observability_excludes_recovered_failures_and_restore_poll_cycles():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc)
+    with Session() as session:
+        source = Source(id=901, name="observability", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        recovered = Wave(id=902, source_id=source.id, name="recovered", max_bytes=1,
+                         restore_days=1, restore_tier="BULK", status="COMPLETED")
+        polling = Wave(id=903, source_id=source.id, name="polling", max_bytes=1,
+                       restore_days=1, restore_tier="BULK", status="RESTORING")
+        retrying = Wave(id=904, source_id=source.id, name="retrying", max_bytes=1,
+                        restore_days=1, restore_tier="BULK", status="RESTORED")
+        session.add_all([source, recovered, polling, retrying]); session.flush()
+        session.add_all([
+            Task(id=905, wave_id=recovered.id, kind="SUBMIT_BATCH_RESTORE", state=TaskState.FAILED,
+                 attempts=1, error="historic TLS failure", available_at=now),
+            Task(id=906, wave_id=recovered.id, kind="SUBMIT_BATCH_RESTORE", state=TaskState.SUCCEEDED,
+                 attempts=1, available_at=now),
+            Task(id=907, wave_id=polling.id, kind="POLL_RESTORE", state=TaskState.READY,
+                 attempts=25, error="objects still unavailable", available_at=now),
+            Task(id=908, wave_id=retrying.id, kind="TRANSFER_CONTINUOUS", state=TaskState.READY,
+                 attempts=2, error="temporary provider failure", available_at=now),
+        ])
+        session.commit()
+
+        result = observability(session)
+
+    assert result["tasks"]["failed"] == 0
+    assert result["tasks"]["retrying"] == 1
+
+
+def test_observability_details_exposes_failure_evidence_on_demand():
+    import app.main as main
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc)
+    with Session() as session:
+        source = Source(name="failure-source", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        wave = Wave(name="failure-wave", max_bytes=1, restore_days=1,
+                    restore_tier="BULK", status="FAILED", source=source)
+        session.add_all([source, wave]); session.flush()
+        session.add(Event(source_id=source.id, wave_id=wave.id, kind="TRANSFER_FAILED",
+                          message="provider timeout", created_at=now))
+        session.add(Task(wave_id=wave.id, kind="TRANSFER_CONTINUOUS", state=TaskState.SUCCEEDED,
+                         attempts=1, available_at=now + timedelta(seconds=5),
+                         created_at=now + timedelta(seconds=5)))
+        session.commit()
+
+        result = main.observability_details("failures_24h", session=session)
+
+    assert result["indicator"] == "failures_24h"
+    assert result["rows"][0]["source"] == "failure-source"
+    assert result["rows"][0]["wave"] == "failure-wave"
+    assert result["rows"][0]["message"] == "provider timeout"
+    assert result["rows"][0]["status"] == "RECOVERED"
+
+
+def test_real_aws_clients_use_refreshable_assume_role_credentials():
+    worker = Path("app/real_worker.py").read_text(encoding="utf-8")
+    function = worker[worker.index("def aws_clients("):worker.index("\n\ndef worker_can_reclaim_lease")]
+    assert "RefreshableCredentials.create_from_metadata" in function
+    assert "refresh_using=refresh_assumed_role" in function
+    assert 'method="sts-assume-role"' in function
+    assert 'DurationSeconds=3600' in function
+    assert "boto3.Session(botocore_session=botocore_session)" in function
 
 
 def test_runtime_clock_reports_simulator_timeout_without_a_500(monkeypatch):
@@ -161,6 +315,17 @@ def test_raikou_holds_scale_up_below_configured_marginal_gain():
         decision = _continuous_raiju_worker_count(session, source, 20, 110, settings=settings, details=True)
         assert decision["target"] == 5
         assert "scale-up held" in decision["reason"]
+
+
+def test_continuous_lane_allocates_fair_rate_when_large_first_claim_fills_later_slots():
+    from app.real_worker import _continuous_new_stream_rate
+
+    total = 1100 * 125000
+    per_raiju = total / 4
+    assert _continuous_new_stream_rate(total, 4) == per_raiju
+    assert _continuous_new_stream_rate(total, 4, [per_raiju]) == per_raiju
+    assert _continuous_new_stream_rate(total, 4, [per_raiju, per_raiju]) == per_raiju
+    assert _continuous_new_stream_rate(total, 4, [per_raiju] * 3) == per_raiju
 
 
 def test_wave_transfer_release_policy_is_durable_and_only_accepts_known_modes():
@@ -273,7 +438,7 @@ def test_operations_overview_reports_raiju_and_raikou_occupancy():
 
         workers = operations_overview(session)["workers"]
 
-        assert workers["raiju"] == {"active": 5, "busy": 1, "idle": 4}
+        assert workers["raiju"] == {"active": 1, "busy": 1, "idle": 0}
         assert workers["raikou"] == {"busy": 1}
 
 
@@ -377,6 +542,15 @@ def test_continuous_lane_dispatch_batches_and_cooperative_preemption_are_durable
     assert "never an admission threshold" in worker
 
 
+def test_simulation_lane_advances_only_after_a_bounded_raiju_fill():
+    """Simulation must not retain virtual time for an unbounded local loop."""
+    worker = Path("app/real_worker.py").read_text(encoding="utf-8")
+    assert "max(len(initial), worker_ceiling) if runtime_context.is_simulation else None" in worker
+    assert "def simulation_cycle_has_capacity()" in worker
+    assert "if not simulation_cycle_has_capacity():" in worker
+    assert '"continuous transfer lane occupancy"' in worker
+
+
 def test_completed_object_lease_is_reconciled_after_raiju_interruption():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -387,17 +561,186 @@ def test_completed_object_lease_is_reconciled_after_raiju_interruption():
         wave = Wave(source_id=source.id, name="wave", max_bytes=1024, restore_days=1, restore_tier="BULK", status="TRANSFERRING")
         session.add(wave); session.flush()
         obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="done", size_bytes=1024,
-                           state=ObjectState.TRANSFERRED, transferred_at=datetime.now(timezone.utc))
+                           state=ObjectState.TRANSFERRED,
+                           transferred_at=datetime.now(timezone.utc) - timedelta(
+                               seconds=CONTINUOUS_SETTLEMENT_GRACE_SECONDS + 1
+                           ))
         session.add(obj); session.flush()
+        batch = TransferDispatchBatch(source_id=source.id, wave_id=wave.id, state="CLAIMED")
+        session.add(batch); session.flush()
         item = TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=obj.id, size_bytes=1024,
-                                 state=TransferQueueState.LEASED, lease_owner="interrupted-raiju")
-        session.add(item); session.commit()
+                                 state=TransferQueueState.LEASED, lease_owner="interrupted-raiju",
+                                 dispatch_batch_id=batch.id)
+        session.add(item); session.flush()
+        segment = TransferLaneSegment(source_id=source.id, wave_id=wave.id,
+                                      queue_item_id=item.id, started_at=datetime.now(timezone.utc))
+        session.add(segment); session.commit()
 
         assert reconcile_completed_continuous_item_leases(session, source) == 1
         session.commit()
         recovered = session.get(TransferQueueItem, item.id)
         assert recovered.state == TransferQueueState.TRANSFERRED
         assert recovered.lease_owner is None
+        assert session.get(TransferLaneSegment, segment.id).completed_at is not None
+        assert session.get(TransferLaneSegment, segment.id).bytes_transferred == obj.size_bytes
+        assert session.get(TransferDispatchBatch, batch.id).state == "COMPLETED"
+
+
+def test_recent_completed_object_keeps_its_lease_during_normal_settlement():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="settlement-grace", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="wave", max_bytes=1, restore_days=1,
+                    restore_tier="BULK", status="TRANSFERRING")
+        session.add(wave); session.flush()
+        obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="recent", size_bytes=1,
+                           state=ObjectState.TRANSFERRED, transferred_at=datetime.now(timezone.utc))
+        session.add(obj); session.flush()
+        item = TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=obj.id,
+                                 size_bytes=1, state=TransferQueueState.LEASED,
+                                 lease_owner="active-raiju")
+        session.add(item); session.commit()
+        assert reconcile_completed_continuous_item_leases(session, source) == 0
+        assert session.get(TransferQueueItem, item.id).state == TransferQueueState.LEASED
+
+
+def test_critical_bandwidth_plan_prioritizes_expiry_without_exceeding_lane():
+    plan = ContinuousBandwidthPlan(1100 * 125000, critical_priority=90)
+    for object_id in range(1, 6):
+        plan.register(object_id, 100 if object_id == 1 else 60)
+    rates = [plan.rate_for(object_id) for object_id in range(1, 6)]
+    assert rates[0] > rates[1] * 100
+    assert sum(rates) <= 1100 * 125000
+    plan.update(2, 95)
+    rates = [plan.rate_for(object_id) for object_id in range(1, 6)]
+    assert rates[0] == rates[1]
+    assert sum(rates) <= 1100 * 125000
+    plan.unregister(1)
+    plan.unregister(2)
+    ordinary = [plan.rate_for(object_id) for object_id in range(3, 6)]
+    assert len(set(ordinary)) == 1
+
+
+def test_critical_concurrency_starts_small_and_expands_only_after_stable_underuse():
+    controller = CriticalConcurrencyController(initial_workers=8, link_mbps=1100)
+    assert controller.desired_workers(25, critical=True, active_workers=25, observed_mbps=1100)[0] == 8
+    assert controller.desired_workers(25, critical=True, active_workers=8, observed_mbps=800)[0] == 8
+    assert controller.desired_workers(25, critical=True, active_workers=8, observed_mbps=800)[0] == 8
+    target, reason = controller.desired_workers(25, critical=True, active_workers=8, observed_mbps=800)
+    assert target == 9
+    assert "increased" in reason
+
+
+def test_critical_concurrency_reduces_only_when_one_fewer_preserves_link():
+    controller = CriticalConcurrencyController(initial_workers=8, link_mbps=1100)
+    controller.target = 10
+    for _ in range(2):
+        assert controller.desired_workers(25, critical=True, active_workers=10, observed_mbps=1100)[0] == 10
+    target, reason = controller.desired_workers(25, critical=True, active_workers=10, observed_mbps=1100)
+    assert target == 9
+    assert "reduced" in reason
+    assert controller.desired_workers(25, critical=False, active_workers=9, observed_mbps=1100)[0] == 25
+
+
+def test_terminal_queue_item_repairs_orphaned_lane_history_without_an_active_lease():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="orphan-history", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="wave", max_bytes=10, restore_days=1,
+                    restore_tier="BULK", status="TRANSFER_DRAINING")
+        session.add(wave); session.flush()
+        obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="done", size_bytes=10,
+                           state=ObjectState.TRANSFERRED, transferred_at=datetime.now(timezone.utc))
+        batch = TransferDispatchBatch(source_id=source.id, wave_id=wave.id, state="CLAIMED")
+        session.add_all([obj, batch]); session.flush()
+        item = TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=obj.id,
+                                 size_bytes=10, state=TransferQueueState.TRANSFERRED,
+                                 transferred_at=obj.transferred_at)
+        session.add(item); session.flush()
+        segment = TransferLaneSegment(source_id=source.id, wave_id=wave.id,
+                                      queue_item_id=item.id, started_at=obj.transferred_at)
+        session.add(segment); session.commit()
+
+        assert reconcile_continuous_lane_history(session, source) == (1, 1)
+        assert segment.completed_at is not None
+        assert segment.bytes_transferred == 10
+        assert batch.state == "COMPLETED"
+
+
+def test_final_expired_lease_is_recovered_and_requeues_a_dispatcher_after_interruption():
+    """A final stranded lease must not require a pre-existing Raiju task."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc)
+    with Session() as session:
+        source = Source(name="expired-final-lease", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="wave", max_bytes=1024, restore_days=1, restore_tier="BULK", status="TRANSFER_DRAINING")
+        session.add(wave); session.flush()
+        obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="final.bin", size_bytes=1024,
+                           state=ObjectState.TRANSFERRING, transfer_progress_at=now - timedelta(minutes=11))
+        session.add(obj); session.flush()
+        item = TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=obj.id, size_bytes=1024,
+                                 state=TransferQueueState.LEASED, lease_owner="interrupted-raiju",
+                                 lease_expires_at=now - timedelta(seconds=1))
+        session.add(item); session.commit()
+
+        stalled_lane = transfer_queue(session)["continuous_lane"]
+        assert stalled_lane["stalled_items"] == 1
+        assert stalled_lane["stalled"][0]["object_key"] == "final.bin"
+        assert ensure_transfer_task(session, wave) is True
+        session.commit()
+        recovered = session.get(TransferQueueItem, item.id)
+        assert recovered.state == TransferQueueState.MULTIPART_RESUME
+        assert recovered.lease_owner is None
+        assert session.scalar(select(Task.id).where(Task.wave_id == wave.id, Task.kind == "TRANSFER_CONTINUOUS")) is not None
+        lane = transfer_queue(session)["continuous_lane"]
+        assert lane["stalled_items"] == 0
+
+
+def test_executor_owned_transfer_without_checkpoint_is_not_heartbeat_protected_forever():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc)
+    with Session() as session:
+        source = Source(name="blocked-raiju", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="wave", max_bytes=1024, restore_days=1,
+                    restore_tier="BULK", status="TRANSFER_DRAINING")
+        session.add(wave); session.flush()
+        stalled = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="stalled.bin",
+                               size_bytes=1024, state=ObjectState.TRANSFERRING,
+                               transfer_progress_at=now - timedelta(minutes=11))
+        healthy = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="healthy.bin",
+                               size_bytes=1024, state=ObjectState.TRANSFERRING,
+                               transfer_progress_at=now - timedelta(seconds=30))
+        session.add_all([stalled, healthy]); session.flush()
+        items = [
+            TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=obj.id,
+                              size_bytes=obj.size_bytes, state=TransferQueueState.LEASED,
+                              last_dispatched_at=now - timedelta(minutes=12))
+            for obj in (stalled, healthy)
+        ]
+        session.add_all(items); session.flush()
+        assert stalled_transfer_future_item_ids(
+            session, [item.id for item in items], now=now
+        ) == [items[0].id]
+
+
+def test_simulated_transfer_hold_defers_restore_polling_without_one_second_spin():
+    assert SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS >= 30
+    worker = Path("app/real_worker.py").read_text(encoding="utf-8")
+    assert "SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS" in worker
 
 
 def test_cooperative_preemption_targets_lowest_remaining_raiju_and_honors_cooldown():
@@ -449,6 +792,8 @@ def test_remote_discovery_has_a_durable_observable_queue_and_adaptive_throttle()
     assert "time.sleep(min(30, 2 ** throttle_attempt))" in worker
     app_source = Path("app/main.py").read_text(encoding="utf-8")
     assert '@app.get("/api/discovery-queue")' in app_source
+    assert "def discovery_queue(limit: int = 5" in app_source
+    assert "limit = min(max(limit, 1), 5)" in app_source
     assert "Remote discovery cannot replace or merge an existing inventory" in app_source
 
 
@@ -778,6 +1123,10 @@ def test_multipart_size_runtime_setting_has_safe_bounds():
         RuntimeSettingsUpdate(**(payload | {"multipart_part_size_mib": 15}))
     with pytest.raises(ValidationError):
         RuntimeSettingsUpdate(**(payload | {"multipart_part_size_mib": 513}))
+    with pytest.raises(ValidationError):
+        RuntimeSettingsUpdate(**(payload | {"restore_forecast_bulk_complete_seconds": 36 * 3600}))
+    with pytest.raises(ValidationError):
+        RuntimeSettingsUpdate(**(payload | {"continuous_transfer_min_marginal_gain_mbps": 5.5}))
 
 
 def test_dynamic_wave_contract_keeps_prediction_and_scheduling_durable():
@@ -849,12 +1198,41 @@ def test_continuous_lane_capacity_keeps_overlapping_waves_in_one_window():
                                 started_at=started, completed_at=started + timedelta(seconds=10), bytes_transferred=125_000_000),
         ])
         session.flush()
+        # A live heartbeat is intentionally volatile and must not replace the
+        # durable aggregate-lane measurement used by the planner.
+        session.add(ObjectRecord(
+            source_id=source.id, object_key="active", size_bytes=1,
+            state=ObjectState.TRANSFERRING, transfer_rate_mbps=900,
+            transfer_progress_at=datetime.now(timezone.utc),
+        ))
+        session.flush()
         profile = continuous_lane_capacity_profile(session, source.id, 1100)
     # 250 MB crossed the source-wide lane in ten seconds: 200 Mbps.  It must
     # not become two independent 100 Mbps samples merely because two waves
     # supplied the files concurrently.
     assert profile["samples"] == 1
     assert profile["p25_mbps"] == 200
+    assert profile["basis"] == "DURABLE_LANE_HISTORY"
+
+
+def test_active_lane_snapshot_is_not_durable_restore_scaling_evidence():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="live-only", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        session.add(ObjectRecord(
+            source_id=source.id, object_key="active", size_bytes=1,
+            state=ObjectState.TRANSFERRING, transfer_rate_mbps=975,
+            transfer_progress_at=datetime.now(timezone.utc),
+        ))
+        session.flush()
+        profile = continuous_lane_capacity_profile(session, source.id, 1100)
+    assert profile["basis"] == "ACTIVE_SNAPSHOT"
+    assert profile["effective_mbps"] == 975
+    assert profile["samples"] == 0
 
 
 def test_dynamic_planner_uses_scalar_boundaries_and_assigns_every_object_once():
@@ -924,6 +1302,8 @@ def test_dynamic_flight_board_uses_local_planned_and_actual_wave_timing():
     assert 'function showFlightBoard()' in frontend
     assert 'flight-board-legend' in frontend
     assert 'forecast_restore = phase("RESTORE", restore_end, expected_available_at, planned=True,' in source
+    assert '"restore_window_started": True' in source
+    assert '"restore_window_started_at": restore_start' in source
     assert 'timeline_start = min(submitted_points)' in source
     assert 'or row_source.id in source_clock_now' in source
     assert 'except (OSError, TimeoutError, ValueError):' in source
@@ -1030,12 +1410,126 @@ def test_flight_board_marks_unused_completed_restore_window_as_time_saved():
         saving = next(phase for phase in board["waves"][0]["phases"]
                       if phase["kind"] == "RESTORE_SAVING")
         assert saving["time_saved"] is True
+        assert saving["planned"] is False
         assert saving["start_at"] == now + timedelta(hours=36)
         assert saving["end_at"] == now + timedelta(hours=48)
         assert saving["elapsed_seconds"] == 12 * 3600
         restore = next(phase for phase in board["waves"][0]["phases"] if phase["kind"] == "RESTORE")
         assert restore["continues_to_time_saved"] is True
         assert saving["continues_from_restore"] is True
+
+
+def test_flight_board_does_not_mark_partial_restore_as_complete_or_time_saved():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session() as session:
+        source = Source(name="partial-restore", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="still-restoring", max_bytes=2048,
+                    restore_days=1, restore_tier="BULK", planner_mode="DYNAMIC",
+                    status="RESTORING", planned_restore_at=now)
+        session.add(wave); session.flush()
+        session.add_all([
+            ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="ready.bin",
+                         size_bytes=1024, state=ObjectState.RESTORED,
+                         restore_requested_at=now, restored_at=now + timedelta(hours=36)),
+            ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="pending.bin",
+                         size_bytes=1024, state=ObjectState.RESTORING,
+                         restore_requested_at=now),
+        ])
+        session.commit()
+
+        result = flight_board(source_id=source.id, run_id=None, session=session)["waves"][0]
+
+        assert result["status"] == "RESTORING"
+        assert result["first_restore_available_at"] == now + timedelta(hours=36)
+        assert result["restore_available_at"] is None
+        assert not [phase for phase in result["phases"] if phase["kind"] == "RESTORE_SAVING"]
+
+
+def test_flight_board_materializes_overdue_unsubmitted_restore_as_projection():
+    """Eligibility is not execution, but the planning reference remains visible."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session() as session:
+        source = Source(name="waiting-capacity", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="eligible", max_bytes=1024,
+                    restore_days=1, restore_tier="BULK", planner_mode="DYNAMIC",
+                    status="RESTORE_SCHEDULED",
+                    planned_restore_at=now - timedelta(hours=1),
+                    planned_transfer_start_at=now + timedelta(hours=47))
+        session.add(wave); session.commit()
+
+        board = flight_board(source_id=source.id, run_id=None, session=session)
+
+        result = board["waves"][0]
+        assert result["started_at"] is None
+        assert result["restore_requested_at"] is None
+        assert result["restore_eligible_at"] == wave.planned_restore_at
+        assert result["restore_waiting_for_capacity"] is True
+        assert result["restore_hold_reason"] == "GOVERNANCE_PENDING"
+        assert result["projected_restore_submission_at"] >= now
+        assert result["expected_restore_available_at"] == result["projected_restore_submission_at"] + timedelta(hours=48)
+        assert [phase["kind"] for phase in result["phases"]] == ["QUEUE", "RESTORE"]
+        assert result["phases"][0]["planned"] is False
+        assert result["phases"][1]["planned"] is True
+        assert result["phases"][0]["end_at"] == result["phases"][1]["start_at"]
+
+
+def test_flight_board_projects_scheduled_wave_after_earliest_active_restore_slot():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session() as session:
+        session.add(RuntimeSettings(dynamic_restore_max_slots=2)); session.flush()
+        source = Source(name="projected-slot", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        run = DynamicPipelineRun(source_id=source.id, status="RUNNING", restore_tier="BULK")
+        session.add(run); session.flush()
+        later = Wave(source_id=source.id, pipeline_run_id=run.id, name="active-later",
+                     max_bytes=1024, restore_days=1, restore_tier="BULK",
+                     planner_mode="DYNAMIC", status="RESTORING", created_at=now - timedelta(days=2))
+        earlier = Wave(source_id=source.id, pipeline_run_id=run.id, name="active-earlier",
+                       max_bytes=1024, restore_days=1, restore_tier="BULK",
+                       planner_mode="DYNAMIC", status="RESTORING", created_at=now - timedelta(days=2))
+        waiting = Wave(source_id=source.id, pipeline_run_id=run.id, name="waiting",
+                       max_bytes=1024, restore_days=1, restore_tier="BULK",
+                       planner_mode="DYNAMIC", status="RESTORE_SCHEDULED",
+                       created_at=now - timedelta(hours=1), planned_restore_at=now - timedelta(hours=1))
+        session.add_all([later, earlier, waiting]); session.flush()
+        session.add_all([
+            ObjectRecord(source_id=source.id, wave_id=later.id, object_key="later.bin",
+                         size_bytes=1024, state=ObjectState.RESTORING,
+                         restore_requested_at=now - timedelta(hours=2)),
+            ObjectRecord(source_id=source.id, wave_id=earlier.id, object_key="earlier.bin",
+                         size_bytes=1024, state=ObjectState.RESTORING,
+                         restore_requested_at=now - timedelta(hours=4)),
+        ])
+        session.commit()
+
+        result = next(item for item in flight_board(source_id=source.id, run_id=None, session=session)["waves"]
+                      if item["wave_id"] == waiting.id)
+
+        assert result["restore_projection_basis"] == "EARLIEST_ACTIVE_RESTORE_SLOT"
+        assert result["projected_restore_submission_at"] == now + timedelta(hours=44)
+        assert result["expected_restore_available_at"] == now + timedelta(hours=92)
+        assert [phase["kind"] for phase in result["phases"]] == ["QUEUE", "QUEUE", "RESTORE"]
+        historical_queue, future_queue, projected_restore = result["phases"]
+        assert historical_queue["planned"] is False
+        assert future_queue["planned"] is True
+        assert projected_restore["planned"] is True
+        assert historical_queue["start_at"] == now - timedelta(hours=1)
+        assert historical_queue["end_at"] == future_queue["start_at"]
+        assert future_queue["end_at"] == projected_restore["start_at"] == now + timedelta(hours=44)
 
 
 def test_flight_board_projects_only_durable_ready_backlog_and_recovers_zero_width_segments():
@@ -1236,6 +1730,9 @@ def test_source_arrival_report_uses_calendar_windows_and_frozen_link_estimate():
                                 started_at=now, completed_at=now + timedelta(seconds=60), bytes_transferred=one.size_bytes),
             TransferLaneSegment(source_id=source.id, wave_id=second.id, queue_item_id=second_item.id,
                                 started_at=now + timedelta(seconds=30), completed_at=now + timedelta(seconds=90), bytes_transferred=two.size_bytes),
+            TransferDispatchBatch(source_id=source.id, worker_target=2, observed_lane_mbps=80),
+            TransferDispatchBatch(source_id=source.id, worker_target=2, observed_lane_mbps=100),
+            TransferDispatchBatch(source_id=source.id, worker_target=2, observed_lane_mbps=120),
         ])
         session.flush()
         report = source_completion_statistics(session, source, completed=True)
@@ -1244,11 +1741,57 @@ def test_source_arrival_report_uses_calendar_windows_and_frozen_link_estimate():
         assert report["transfer"]["actual_seconds"] == 90
         assert report["transfer"]["difference_seconds"] == -10
         assert report["transfer"]["effective_mbps"] == round(1_000_000_000 * 8 / 90 / 1_000_000, 2)
+        assert report["transfer"]["observed_link_mbps"] == {
+            "minimum": 80.0, "average": 100.0, "maximum": 120.0, "samples": 3,
+        }
+        chart = source_throughput_samples(source.id, buckets=24, session=session)
+        assert chart["limit_mbps"] == 80
+        assert chart["samples"] == 2
+        assert chart["basis"] == "DURABLE_TRANSFERRED_BYTES_PER_LANE_INTERVAL"
+        assert max(point["maximum_mbps"] for point in chart["points"]) == 80.0
         assert report["transfer"]["utilization_percent"] > 100
         assert report["restore"]["actual_seconds"] == 24 * 3600
         assert report["idle"]["restore_queue_seconds"] == 3600
         assert report["idle"]["transfer_lane_seconds"] == 0
-        assert report["estimate_basis"]["restore_forecast"]["standard"]["complete_seconds"] == 18 * 3600
+        assert report["estimate_basis"]["schema"] == 3
+        assert report["estimate_basis"]["planner"] == "v10-documented-service-window"
+        assert report["estimate_basis"]["restore_forecast"] == {
+            "bulk": {"first_seconds": 48 * 3600, "complete_seconds": 48 * 3600},
+            "standard": {"first_seconds": 12 * 3600, "complete_seconds": 12 * 3600},
+        }
+
+
+def test_simulated_throughput_chart_uses_virtual_lane_timestamps():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    wall_clock = datetime.now(timezone.utc).replace(microsecond=0)
+    virtual_clock = datetime(2032, 4, 5, 12, tzinfo=timezone.utc)
+    with Session() as session:
+        session.add(RuntimeSettings(max_throughput_mbps=100))
+        source = Source(name="virtual-throughput", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", backend_kind="SIMULATED")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="wave", max_bytes=100, restore_days=1,
+                    restore_tier="BULK")
+        session.add(wave); session.flush()
+        obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="object", size_bytes=100,
+                           state=ObjectState.TRANSFERRED)
+        session.add(obj); session.flush()
+        batch = TransferDispatchBatch(source_id=source.id, wave_id=wave.id,
+                                      started_at=wall_clock, observed_lane_mbps=75)
+        session.add(batch); session.flush()
+        item = TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=obj.id, size_bytes=100,
+                                 dispatch_batch_id=batch.id, state=TransferQueueState.TRANSFERRED)
+        session.add(item); session.flush()
+        session.add(TransferLaneSegment(source_id=source.id, wave_id=wave.id, queue_item_id=item.id,
+                                        started_at=virtual_clock,
+                                        completed_at=virtual_clock + timedelta(seconds=1), bytes_transferred=100))
+        session.flush()
+        chart = source_throughput_samples(source.id, buckets=24, session=session)
+        assert chart["samples"] == 1
+        assert chart["started_at"] == virtual_clock
+        assert chart["completed_at"] == virtual_clock + timedelta(seconds=1)
 
 
 def test_source_arrival_report_is_hidden_until_integrity_completion():
@@ -1342,7 +1885,7 @@ def test_dynamic_scheduler_uses_a_durable_restore_horizon_and_not_all_jobs_at_on
     assert "release_dynamic_restore_horizon(session, settings)" in worker
 
 
-def test_dynamic_pipeline_materializes_only_the_horizon_then_adapts_next_wave():
+def test_dynamic_pipeline_restore_horizon_advances_while_prior_transfer_drains():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
@@ -1364,7 +1907,9 @@ def test_dynamic_pipeline_materializes_only_the_horizon_then_adapts_next_wave():
         assert len(first_batch) == 2
         assert session.scalar(select(func.count(Wave.id)).where(Wave.pipeline_run_id == run.id)) == 2
         assert session.scalar(select(func.count(ObjectRecord.id)).where(ObjectRecord.wave_id.is_not(None))) == 2
-        first_batch[0].status = "COMPLETED"
+        # Restore has released every object; the independent transfer lane is
+        # still draining and must not consume the next restore-planning slot.
+        first_batch[0].status = "TRANSFER_DRAINING"
         second_batch = materialize_dynamic_pipeline_horizon(session, settings, run, now=now)
         assert len(second_batch) == 1
         assert session.scalar(select(func.count(Wave.id)).where(Wave.pipeline_run_id == run.id)) == 3
@@ -1376,7 +1921,7 @@ def test_dynamic_replan_preserves_submitted_waves_and_exposes_forecast():
     worker = Path("app/real_worker.py").read_text(encoding="utf-8")
     assert "def replan_dynamic_pipeline" in source
     assert 'Task.kind == "SUBMIT_BATCH_RESTORE"' in source
-    assert 'if not has_batch_task and wave.status == "RESTORE_SCHEDULED":' in source
+    assert 'and not has_batch_task\n                        and wave.status == "RESTORE_SCHEDULED"):' in source
     assert '"pipeline_completion_at"' in source
     assert "replan_dynamic_pipeline(session, settings)" in worker
 
@@ -1558,11 +2103,155 @@ def test_simulated_replan_keeps_future_restore_behind_two_occupied_slots():
         assert future.planned_restore_at == initial + timedelta(hours=48)
 
 
+def test_real_replan_keeps_overdue_restore_eligibility_stable_while_capacity_is_occupied():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    initial = datetime(2026, 8, 25, 12, 0)
+    with Session() as session:
+        source = Source(id=1103, name="real-capacity-wait", s3_bucket="source",
+                        aws_region="us-east-1", destination_bucket="destination",
+                        backend_kind="REAL")
+        settings = RuntimeSettings(id=1, max_throughput_mbps=1100)
+        run = DynamicPipelineRun(id=1104, source_id=source.id, status="SCHEDULED",
+                                 scheduled_restores=True, restore_safety_seconds=0)
+        active = Wave(id=1105, source_id=source.id, pipeline_run_id=run.id,
+                      name="active", max_bytes=1, restore_days=1, restore_tier="BULK",
+                      status="RESTORING", planner_mode="DYNAMIC",
+                      predicted_transfer_seconds=60,
+                      restore_requested_virtual_at=initial,
+                      planned_restore_at=initial,
+                      planned_transfer_start_at=initial + timedelta(hours=48))
+        waiting = Wave(id=1106, source_id=source.id, pipeline_run_id=run.id,
+                       name="waiting", max_bytes=1, restore_days=1, restore_tier="BULK",
+                       status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
+                       predicted_transfer_seconds=60,
+                       planned_restore_at=initial + timedelta(days=7),
+                       planned_transfer_start_at=initial + timedelta(days=8))
+        session.add_all([source, settings, run, active, waiting])
+        session.flush()
+        session.add(Task(wave_id=active.id, kind="SUBMIT_BATCH_RESTORE",
+                         state=TaskState.SUCCEEDED))
+        session.flush()
+
+        assert replan_dynamic_pipeline(session, settings, now=initial) >= 1
+        eligible_at = waiting.planned_restore_at
+        events_after_material_change = session.scalar(select(func.count(Event.id)).where(
+            Event.kind == "DYNAMIC_WAVE_REPLANNED", Event.wave_id == waiting.id,
+        ))
+
+        assert replan_dynamic_pipeline(
+            session, settings, now=initial + timedelta(minutes=1)
+        ) == 0
+        assert waiting.planned_restore_at == eligible_at == initial
+        assert session.scalar(select(func.count(Event.id)).where(
+            Event.kind == "DYNAMIC_WAVE_REPLANNED", Event.wave_id == waiting.id,
+        )) == events_after_material_change
+
+
 def test_dynamic_restore_slot_correction_is_persisted_independently_of_lane_forecast():
     source = Path("app/main.py").read_text(encoding="utf-8")
-    assert "transfer_shifted >= 60 or restore_shifted >= 60" in source
-    assert "if transfer_shifted >= 60:" in source
+    assert "schedule_shift_threshold = 60 if simulated else DYNAMIC_SCHEDULE_MIN_SHIFT_SECONDS" in source
+    assert "transfer_shifted >= schedule_shift_threshold" in source
+    assert "restore_shifted >= schedule_shift_threshold" in source
     assert "replan_dynamic_pipeline(session, settings, now=source_scheduler_clock(source).effective_now)" in source
+
+
+def test_real_reforecast_anchors_submitted_wave_to_observed_restore_request():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    initial = datetime(2026, 8, 25, 12, 0)
+    with Session() as session:
+        source = Source(id=1110, name="real-request-anchor", s3_bucket="source",
+                        aws_region="us-east-1", destination_bucket="destination",
+                        backend_kind="REAL")
+        settings = RuntimeSettings(id=1, max_throughput_mbps=1100)
+        run = DynamicPipelineRun(
+            id=1111, source_id=source.id, status="SCHEDULED",
+            scheduled_restores=True, restore_safety_seconds=0,
+            planner_version="v8-lane-capacity",
+        )
+        wave = Wave(
+            id=1112, source_id=source.id, pipeline_run_id=run.id,
+            name="restoring", max_bytes=1, restore_days=7,
+            restore_tier="BULK", status="RESTORING", planner_mode="DYNAMIC",
+            predicted_transfer_seconds=3600,
+            planned_restore_at=initial - timedelta(days=2),
+            planned_transfer_start_at=initial + timedelta(days=8),
+        )
+        obj = ObjectRecord(
+            id=1113, source_id=source.id, wave_id=wave.id,
+            object_key="archive.bin", size_bytes=1,
+            state=ObjectState.RESTORE_REQUESTED,
+            restore_requested_at=initial,
+        )
+        session.add_all([source, settings, run, wave, obj]); session.flush()
+        session.add(Task(wave_id=wave.id, kind="SUBMIT_BATCH_RESTORE",
+                         state=TaskState.SUCCEEDED))
+        session.flush()
+
+        assert replan_dynamic_pipeline(session, settings, now=initial) == 1
+        assert wave.planned_transfer_start_at == initial + timedelta(hours=48)
+
+
+def test_restore_release_checks_maximum_buffer_after_adding_candidate_wave():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    initial = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    with Session() as session:
+        source = Source(id=1120, name="post-release-ceiling", s3_bucket="source",
+                        aws_region="us-east-1", destination_bucket="destination")
+        settings = RuntimeSettings(
+            id=1, max_throughput_mbps=1100,
+            dynamic_restore_max_slots=2,
+            continuous_transfer_min_buffer_seconds=3 * 3600,
+            continuous_transfer_target_buffer_seconds=6 * 3600,
+            continuous_transfer_max_buffer_seconds=24 * 3600,
+        )
+        run = DynamicPipelineRun(
+            id=1121, source_id=source.id, status="SCHEDULED",
+            scheduled_restores=True, restore_horizon_waves=3,
+            restore_days=7, restore_tier="BULK",
+        )
+        waves = [
+            Wave(
+                id=1122 + index, source_id=source.id, pipeline_run_id=run.id,
+                name=f"wave-{index + 1}", max_bytes=1, restore_days=7,
+                restore_tier="BULK", status="RESTORE_SCHEDULED",
+                planner_mode="DYNAMIC", planned_restore_at=initial,
+                planned_transfer_start_at=initial + timedelta(hours=48),
+                predicted_transfer_seconds=20 * 3600,
+                predicted_restore_first_seconds=48 * 3600,
+            )
+            for index in range(2)
+        ]
+        session.add_all([source, settings, run, *waves]); session.flush()
+        session.add_all([
+            ObjectRecord(
+                id=1130 + index, source_id=source.id, wave_id=wave.id,
+                object_key=f"archive-{index}.bin", size_bytes=1,
+                state=ObjectState.WAVE_ASSIGNED,
+            )
+            for index, wave in enumerate(waves)
+        ])
+        session.flush()
+
+        assert release_dynamic_restore_horizon(session, settings, now=initial) == 1
+        released_wave_ids = set(session.scalars(select(Task.wave_id).where(
+            Task.kind == "SUBMIT_BATCH_RESTORE"
+        )))
+        assert released_wave_ids == {waves[0].id}
+
+
+def test_dynamic_repacking_is_debounced_and_forecasts_require_material_change():
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    assert "DYNAMIC_REPACK_MIN_NEW_SAMPLES = 100" in source
+    assert "DYNAMIC_REPACK_MIN_INTERVAL_SECONDS = 3600" in source
+    assert "materially_changed_duration(" in source
+    assert "Hysteresis must govern both persistence and placement" in source
+    assert "already-earned restore eligibility follow the wall clock" in source
 
 
 def test_dynamic_replan_anchors_submitted_restore_to_its_actual_service_window():
@@ -1690,6 +2379,32 @@ def test_continuous_lane_admission_is_idempotent_and_bounded_for_large_waves():
         assert session.scalar(select(func.count(TransferQueueItem.id))) == 1_001
 
 
+def test_reapproved_restore_reuses_cancelled_lane_item_without_deleting_segments():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(id=994, name="reapproved", s3_bucket="source",
+                        aws_region="us-east-1", destination_bucket="destination")
+        wave = Wave(id=995, source_id=source.id, name="wave-001", max_bytes=10,
+                    restore_days=1, restore_tier="BULK", status="RESTORING")
+        obj = ObjectRecord(id=996, source_id=source.id, wave_id=wave.id,
+                           object_key="again.bin", size_bytes=10,
+                           state=ObjectState.RESTORED)
+        session.add_all([source, wave, obj]); session.flush()
+        item = TransferQueueItem(id=997, source_id=source.id, wave_id=wave.id,
+                                 object_id=obj.id, size_bytes=10,
+                                 state=TransferQueueState.CANCELLED)
+        session.add(item); session.flush()
+        session.add(TransferLaneSegment(source_id=source.id, wave_id=wave.id,
+                                        queue_item_id=item.id, bytes_transferred=10))
+        session.flush()
+        assert enqueue_available_transfer_objects(session, wave) == 1
+        assert session.scalar(select(func.count(TransferQueueItem.id))) == 1
+        assert session.get(TransferQueueItem, item.id).state == TransferQueueState.READY
+        assert session.scalar(select(func.count(TransferLaneSegment.id))) == 1
+
+
 def test_transfer_lane_priority_and_claim_paths_use_bounded_candidate_pages():
     source = Path("app/main.py").read_text(encoding="utf-8")
     worker = Path("app/real_worker.py").read_text(encoding="utf-8")
@@ -1721,6 +2436,35 @@ def test_transfer_queue_explains_the_next_durable_raikou_decision():
         assert decision["reason"] == "restore expiry risk"
 
 
+def test_priority_refresh_preserves_last_transfer_error_evidence():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc)
+    with Session() as session:
+        source = Source(name="retry-evidence", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        settings = RuntimeSettings(id=1, max_throughput_mbps=1100)
+        session.add_all([source, settings]); session.flush()
+        wave = Wave(source_id=source.id, name="wave", max_bytes=1, restore_days=1,
+                    restore_tier="BULK", status="TRANSFER_DRAINING")
+        session.add(wave); session.flush()
+        obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="retry.bin",
+                           size_bytes=1, state=ObjectState.RESTORED, restored_at=now)
+        session.add(obj); session.flush()
+        evidence = {"message": "provider reset the stream", "attempt": 3, "at": now.isoformat()}
+        item = TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=obj.id,
+                                 size_bytes=1, state=TransferQueueState.RETRY_WAIT,
+                                 available_at=now, priority_details_json=json.dumps({
+                                     "last_transfer_error": evidence,
+                                 }))
+        session.add(item); session.flush()
+
+        refresh_transfer_queue_priorities(session, source.id, now=now + timedelta(minutes=1))
+        details = json.loads(item.priority_details_json)
+        assert details["last_transfer_error"] == evidence
+
+
 def test_transfer_queue_keeps_restore_lifecycle_distinct_from_worker_task_state():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -1735,6 +2479,23 @@ def test_transfer_queue_keeps_restore_lifecycle_distinct_from_worker_task_state(
         queued = transfer_queue(session)["waves"]
         assert queued[0]["task_state"] == TaskState.READY
         assert queued[0]["operational_state"] == "RESTORING"
+
+
+def test_transfer_queue_omits_completed_wave_even_with_stale_ready_task():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="history-only", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="completed", max_bytes=1, restore_days=1,
+                    restore_tier="BULK", status="COMPLETED")
+        session.add(wave); session.flush()
+        session.add(Task(wave_id=wave.id, kind="TRANSFER_CONTINUOUS", state=TaskState.READY,
+                         available_at=datetime.now(timezone.utc)))
+        session.commit()
+        assert transfer_queue(session)["waves"] == []
 
 
 def test_transfer_queue_exposes_source_scoped_raiju_lane_not_an_active_wave_owner():
@@ -1764,7 +2525,13 @@ def test_transfer_queue_exposes_source_scoped_raiju_lane_not_an_active_wave_owne
 
         lane = transfer_queue(session)["continuous_lane"]
 
-        assert lane["worker_capacity"] == 7
+        assert lane["worker_capacity"] == 5
+        assert lane["active_items"] == 2
+        assert lane["active_bytes"] == 300
+        assert lane["reserved_items"] == 0
+        assert lane["reserved_bytes"] == 0
+        assert lane["reference_mbps"] == 23
+        assert lane["reference_mbps_basis"] == "ACTIVE_SNAPSHOT"
         assert [(worker["wave_id"], worker["object_key"]) for worker in lane["workers"]] == [
             (first.id, "a.bin"), (second.id, "b.bin"),
         ]
@@ -1787,6 +2554,65 @@ def test_adaptive_restore_capacity_keeps_cold_source_at_two_slots_without_lane_e
         ])
         session.flush()
         assert adaptive_restore_slot_limit(session, run, settings) == 2
+
+
+def test_adaptive_restore_capacity_does_not_double_count_released_backlog(monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="released-stock", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        run = DynamicPipelineRun(source_id=source.id, scheduled_restores=True,
+                                 restore_days=7, restore_tier="BULK")
+        settings = RuntimeSettings(id=1, dynamic_restore_max_slots=3,
+                                   continuous_transfer_target_buffer_seconds=3 * 3600)
+        session.add_all([run, settings]); session.flush()
+        wave = Wave(source_id=source.id, pipeline_run_id=run.id, name="active", max_bytes=10 * 10**12,
+                    restore_days=7, restore_tier="BULK", status="RESTORING")
+        session.add(wave); session.flush()
+        session.add(ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="released.bin",
+                                 size_bytes=10 * 10**12, state=ObjectState.RESTORED))
+        session.flush()
+        monkeypatch.setattr("app.main.continuous_lane_capacity_profile", lambda *_args: {
+            "samples": 1, "effective_mbps": 1000, "basis": "TEST"
+        })
+        monkeypatch.setattr("app.main.continuous_lane_backlog_seconds", lambda *_args: 30 * 3600)
+        assert adaptive_restore_slot_limit(session, run, settings) == 3
+
+
+def test_observed_restore_forecast_learns_p75_but_keeps_service_ceiling():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    requested = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    with Session() as session:
+        source = Source(name="restore-history", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        for index, complete_hours in enumerate((39, 42), start=1):
+            wave = Wave(source_id=source.id, name=f"wave-{index}", max_bytes=2,
+                        restore_days=7, restore_tier="BULK", status="RESTORED")
+            session.add(wave); session.flush()
+            session.add_all([
+                ObjectRecord(source_id=source.id, wave_id=wave.id, object_key=f"{index}-first",
+                             size_bytes=1, state=ObjectState.RESTORED,
+                             restore_requested_at=requested,
+                             restored_at=requested + timedelta(hours=37 + index)),
+                ObjectRecord(source_id=source.id, wave_id=wave.id, object_key=f"{index}-last",
+                             size_bytes=1, state=ObjectState.RESTORED,
+                             restore_requested_at=requested,
+                             restored_at=requested + timedelta(hours=complete_hours)),
+            ])
+        session.flush()
+        first, complete, samples = observed_restore_forecast_seconds(
+            session, source.id, "BULK"
+        )
+        assert samples == 2
+        assert first == 39 * 3600
+        assert complete == 42 * 3600
+        assert complete <= restore_forecast_seconds("BULK")[1]
 
 
 def test_failed_dynamic_wave_stops_future_restore_releases():
@@ -1879,6 +2705,115 @@ def test_aws_connection_secret_schema_requires_matching_account_role_arns():
     payload["migration_role_arn"] = "arn:aws:iam::000000000000:role/migration"
     with pytest.raises(ValueError, match="aws_account_id"):
         parse_aws_connection_payload(__import__("json").dumps(payload))
+
+
+def test_aws_connection_secret_accepts_an_optional_complete_private_endpoint_profile():
+    payload = {
+        "schema_version": AWS_CONNECTION_SCHEMA_VERSION, "connection_name": "Private S3",
+        "aws_account_id": "123456789012", "default_region": "us-east-1",
+        "bootstrap_access_key_id": "AKIAEXAMPLE", "bootstrap_secret_access_key": "secret",
+        "migration_role_arn": "arn:aws:iam::123456789012:role/migration",
+        "batch_operations_role_arn": "arn:aws:iam::123456789012:role/batch",
+        "control_bucket": "private-raijin-control",
+        "private_endpoint": {
+            "sts_endpoint_url": "https://sts.us-east-1.example.internal/",
+            "s3_endpoint_url": "https://vpce-example.s3.us-east-1.example.internal",
+            "s3control_endpoint_url": "https://control.vpce-example.s3.us-east-1.example.internal",
+            "s3_addressing_style": "virtual",
+            "tls_ca_bundle_path": "/etc/private-cloud/ca.crt",
+        },
+    }
+    parsed = parse_aws_connection_payload(__import__("json").dumps(payload))
+    assert parsed["private_endpoint"]["sts_endpoint_url"] == "https://sts.us-east-1.example.internal"
+    assert parsed["private_endpoint"]["s3_addressing_style"] == "virtual"
+    payload["private_endpoint"].pop("s3control_endpoint_url")
+    with pytest.raises(ValueError, match="s3control_endpoint_url"):
+        parse_aws_connection_payload(__import__("json").dumps(payload))
+
+
+def test_aws_connection_secret_without_private_endpoint_remains_compatible():
+    payload = {
+        "schema_version": AWS_CONNECTION_SCHEMA_VERSION, "connection_name": "Public S3",
+        "aws_account_id": "123456789012", "default_region": "us-east-1",
+        "bootstrap_access_key_id": "AKIAEXAMPLE", "bootstrap_secret_access_key": "secret",
+        "migration_role_arn": "arn:aws:iam::123456789012:role/migration",
+        "batch_operations_role_arn": "arn:aws:iam::123456789012:role/batch",
+        "control_bucket": "public-raijin-control",
+    }
+    assert parse_aws_connection_payload(__import__("json").dumps(payload))["private_endpoint"] is None
+
+
+def test_aws_connection_registration_uses_private_endpoint_from_secret(tmp_path, monkeypatch):
+    import app.main as module
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'private-endpoint.db'}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    secret_ocid = "ocid1.vaultsecret.oc1..privateendpoint"
+    secret = {
+        "schema_version": 1, "connection_name": "Private S3", "aws_account_id": "123456789012",
+        "default_region": "us-east-1", "bootstrap_access_key_id": "AKIAEXAMPLE",
+        "bootstrap_secret_access_key": "secret",
+        "migration_role_arn": "arn:aws:iam::123456789012:role/migration",
+        "batch_operations_role_arn": "arn:aws:iam::123456789012:role/batch",
+        "control_bucket": "private-raijin-control",
+        "private_endpoint": {
+            "sts_endpoint_url": "https://sts.example.internal",
+            "s3_endpoint_url": "https://s3.example.internal",
+            "s3control_endpoint_url": "https://s3control.example.internal",
+            "s3_addressing_style": "virtual", "tls_ca_bundle_path": "/etc/private/ca.crt",
+        },
+    }
+    monkeypatch.setattr(module, "aws_secret_payload", lambda _ocid: parse_aws_connection_payload(__import__("json").dumps(secret)))
+    monkeypatch.setattr(module, "record_event", lambda *_args, **_kwargs: None)
+    with Session() as session:
+        session.add(module.AwsSecretCache(secret_ocid=secret_ocid, name="private",
+                                          compartment_id="ocid1.compartment.oc1..test", valid=True))
+        session.commit()
+        result = module.create_aws_connection(module.AwsConnectionCreate(secret_ocid=secret_ocid, label="Private"), session)
+        connection = session.get(AwsConnection, result["id"])
+        assert connection.s3_endpoint_url == "https://s3.example.internal"
+        assert connection.s3_addressing_style == "virtual"
+        assert connection.tls_ca_bundle_path == "/etc/private/ca.crt"
+
+
+def test_archived_connection_releases_reused_secret_for_new_identity(tmp_path, monkeypatch):
+    import app.main as module
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'secret-reuse.db'}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    secret_ocid = "ocid1.vaultsecret.oc1..reusedlocalbucket"
+    secret = {
+        "schema_version": 1, "connection_name": "Replacement LOCAL bucket",
+        "aws_account_id": "222222222222", "default_region": "us-east-1",
+        "bootstrap_access_key_id": "AKIAREPLACEMENT", "bootstrap_secret_access_key": "secret",
+        "migration_role_arn": "arn:aws:iam::222222222222:role/migration",
+        "batch_operations_role_arn": "arn:aws:iam::222222222222:role/batch",
+        "control_bucket": "replacement-control-bucket",
+    }
+    monkeypatch.setattr(module, "aws_secret_payload", lambda _ocid: secret)
+    monkeypatch.setattr(module, "record_event", lambda *_args, **_kwargs: None)
+    with Session() as session:
+        old = AwsConnection(
+            label="Old", secret_ocid=secret_ocid, aws_account_id="111111111111",
+            default_region="us-east-1", control_bucket="old-control-bucket",
+            archived_at=module.utcnow(),
+        )
+        session.add_all([
+            old,
+            module.AwsSecretCache(secret_ocid=secret_ocid, name="reused",
+                                  compartment_id="ocid1.compartment.oc1..test", valid=True),
+        ])
+        session.commit()
+
+        result = module.create_aws_connection(
+            module.AwsConnectionCreate(secret_ocid=secret_ocid, label="Replacement"), session,
+        )
+
+        session.refresh(old)
+        assert old.secret_ocid.startswith("retired-secret://aws-connection/")
+        replacement = session.get(AwsConnection, result["id"])
+        assert replacement.secret_ocid == secret_ocid
+        assert replacement.aws_account_id == "222222222222"
 
 
 def test_oci_secret_discovery_uses_the_vaultsecret_resource_type():
@@ -2046,6 +2981,11 @@ def test_expired_restored_copy_requires_explicit_operator_approval_before_reproc
     assert "WaveReprocessRequest" in handler
     assert "restore_reapproval_required" in handler
     assert "explicitly approve the new restore" in handler
+    # An explicit reprocess of an already completed/audited wave must make
+    # every object eligible for the next restore.  Otherwise submit_restore
+    # observes no archive object and leaves the wave stranded at RESTORED.
+    assert "ObjectState.TRANSFERRED" in handler
+    assert "ObjectState.VERIFIED" in handler
 
 
 def test_dynamic_repack_keeps_non_nullable_object_predictions_valid():

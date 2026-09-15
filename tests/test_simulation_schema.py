@@ -22,6 +22,8 @@ def test_simulation_schema_is_created_only_by_explicit_migration():
     assert "sim_scenarios" in names
     assert "sim_virtual_objects" in names
     assert "sim_generator_releases" in names
+    assert "sim_payload_datasets" in names
+    assert "sim_payload_files" in names
     assert "sources" not in names
     assert "tasks" not in names
 
@@ -33,7 +35,7 @@ def test_simulation_migration_is_idempotent():
 
     with Session(engine) as session:
         revisions = session.scalars(select(SimulationSchemaRevision)).all()
-    assert [item.version for item in revisions] == [1, 2, 3, 4]
+    assert [item.version for item in revisions] == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_virtual_object_checksum_accepts_control_evidence_prefix():

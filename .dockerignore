@@ -1,0 +1,15 @@
+.git
+.env
+.tenancy_oci_auth
+.terraform
+.tools
+.s3-data-bucket
+operacional
+releases
+__pycache__
+*.pyc
+*.pem
+*.key
+*.tfstate
+*.tfstate.*
+*.tfplan

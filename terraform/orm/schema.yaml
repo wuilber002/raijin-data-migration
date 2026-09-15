@@ -14,6 +14,7 @@ groupings:
       - ocpus
       - memory_in_gbs
       - boot_volume_size_in_gbs
+      - fujin_payload_volume_size_in_gbs
       - ssh_public_key
       - assign_public_ip
       - resource_name_prefix
@@ -89,6 +90,12 @@ variables:
     type: number
     default: 500
     required: true
+  fujin_payload_volume_size_in_gbs:
+    title: Fujin physical-payload volume (GB)
+    type: number
+    default: 15360
+    required: true
+    description: Dedicated 15 TB Block Volume used only by the Fujin simulator to generate physical source samples. It is separate from boot, PostgreSQL, logs and releases and is never mounted in REAL mode.
   ssh_public_key:
     title: SSH public key
     type: string

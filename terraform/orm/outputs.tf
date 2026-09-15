@@ -41,3 +41,8 @@ output "boot_volume_backup_policy_id" {
   value       = local.effective_backup_policy_id
   description = "Automatic boot-volume backup policy attached to the migration VM, if configured."
 }
+
+output "fujin_payload_volume_id" {
+  value       = oci_core_volume.fujin_payloads.id
+  description = "Dedicated 15 TB OCI Block Volume mounted only for Fujin physical simulation payloads."
+}

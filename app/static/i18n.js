@@ -84,6 +84,7 @@
     'Idioma': 'Language', 'Português': 'Portuguese',
     'Fontes': 'Sources', 'Inventário': 'Inventory', 'Fila pronta': 'Ready queue', 'Fila em execução': 'Running queue', 'Espaço livre': 'Free space',
     'Serviços da VM': 'VM services', 'Serviço da plataforma': 'Platform service', 'Aplicação web': 'Web application',
+    'Fujin — simulação': 'Fujin — simulation',
     'Timer de backup PostgreSQL': 'PostgreSQL backup timer', 'Timer de estado': 'Status timer',
     'Nenhuma auditoria profunda aguardando ou em execução.': 'No deep audit is queued or running.',
     'Valida as Secrets OCI e os ARNs configurados localmente. Quando preenchidos, testa a credencial AWS e a role de migração sem listar ou restaurar objetos.': 'Validates locally configured OCI Secrets and ARNs. When supplied, it tests the AWS credential and migration role without listing or restoring objects.',
