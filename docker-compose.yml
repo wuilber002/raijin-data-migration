@@ -162,6 +162,26 @@ services:
         ipv4_address: 172.30.0.10
       fujin-local-ui: {}
 
+  # The provider serves immutable source bytes read-only.  Materialization is
+  # a separate Fujin-owned control worker, with no data-plane port and no
+  # Raijin mount, so an interrupted generation cannot expose a partial
+  # dataset through S3 LOCAL.
+  fujin-local-materializer:
+    build: *raijin-build
+    profiles: ["local"]
+    restart: unless-stopped
+    depends_on:
+      fujin-local:
+        condition: service_started
+    environment:
+      FUJIN_LOCAL_DATABASE_URL: sqlite+pysqlite:////var/lib/fujin-local/catalog.db
+      FUJIN_LOCAL_PAYLOAD_ROOT: /var/lib/fujin-local/payloads
+    command: ["python3", "-m", "app.fujin_local_materializer"]
+    volumes:
+      - /var/lib/s3-oci-migration/fujin-local:/var/lib/fujin-local
+      - /var/lib/s3-oci-migration/fujin-payloads:/var/lib/fujin-local/payloads:rw
+    networks: [default]
+
   fujin-local-dns:
     image: coredns/coredns:1.11.3
     profiles: ["local"]

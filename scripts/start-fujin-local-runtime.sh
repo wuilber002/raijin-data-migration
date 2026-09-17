@@ -64,15 +64,30 @@ podman run -d --name s3-oci-fujin-local-dns --replace --restart unless-stopped \
   docker.io/coredns/coredns:1.11.3 -conf /etc/coredns/Corefile
 podman network connect --ip 172.30.0.53 "$data_network" s3-oci-fujin-local-dns
 
+# The provider and materializer share the durable SQLite catalog.  `:z` gives
+# both containers the same SELinux label; `:Z` would relabel it for whichever
+# one started last and make the other fail to open the database.
 podman run -d --name s3-oci-fujin-local --replace --restart unless-stopped \
   --network "$data_network" --ip 172.30.0.10 --network-alias fujin-local \
   -e FUJIN_LOCAL_DATABASE_URL=sqlite+pysqlite:////var/lib/fujin-local/catalog.db \
   -e FUJIN_LOCAL_PAYLOAD_ROOT=/var/lib/fujin-local/payloads \
   -e FUJIN_LOCAL_STAGING_ROOT=/var/lib/fujin-local/staging \
   -e FUJIN_LOCAL_AWS_REGION=us-east-1 -e FUJIN_LOCAL_OCI_REGION=sa-saopaulo-1 -e FUJIN_LOCAL_VPCE_ID=vpce-fujin-local \
-  -v "$data_root/fujin-local:/var/lib/fujin-local:Z" \
+  -v "$data_root/fujin-local:/var/lib/fujin-local:z" \
   -v "$data_root/fujin-payloads:/var/lib/fujin-local/payloads:ro,z" \
   "$image" scripts/run-fujin-local.sh
+
+# Dataset bytes are owned by Fujin LOCAL, never by Simulation or Raijin.  Keep
+# the S3 provider read-only and give the separate durable materializer the
+# only read/write mount.  It has no listener and is not attached to any
+# Raijin-facing network.
+podman run -d --name s3-oci-fujin-local-materializer --replace --restart unless-stopped \
+  -e FUJIN_LOCAL_DATABASE_URL=sqlite+pysqlite:////var/lib/fujin-local/catalog.db \
+  -e FUJIN_LOCAL_PAYLOAD_ROOT=/var/lib/fujin-local/payloads \
+  -e FUJIN_LOCAL_STAGING_ROOT=/var/lib/fujin-local/staging \
+  -v "$data_root/fujin-local:/var/lib/fujin-local:z" \
+  -v "$data_root/fujin-payloads:/var/lib/fujin-local/payloads:rw,z" \
+  "$image" python3 -m app.fujin_local_materializer
 podman network connect --alias fujin-local "$ui_network" s3-oci-fujin-local 2>/dev/null || true
 # Publish the same private alias on Raijin's internal network.  This is still
 # not host/LAN exposed, and lets the gateway use the reliable main resolver

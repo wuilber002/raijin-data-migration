@@ -42,7 +42,7 @@ trap cleanup_failed_bootstrap EXIT
 # publish a second process on 8080 would incorrectly mark the platform service
 # failed even though every required container is running.
 local_runtime_complete=true
-for container in s3-oci-postgres s3-oci-app s3-oci-governance-worker s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-dns s3-oci-local-ui-gateway; do
+for container in s3-oci-postgres s3-oci-app s3-oci-governance-worker s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer s3-oci-fujin-local-dns s3-oci-local-ui-gateway; do
   if [[ "$(podman inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]]; then
     local_runtime_complete=false
     break

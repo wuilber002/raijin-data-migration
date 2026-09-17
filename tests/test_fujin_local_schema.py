@@ -11,7 +11,7 @@ def test_local_catalogue_is_separate_from_simulation_and_raijin(tmp_path):
     url = f"sqlite+pysqlite:///{Path(tmp_path) / 'fujin-local.db'}"
     migrate(url)
     names = set(inspect(create_engine(url)).get_table_names())
-    assert {"local_datasets", "local_s3_buckets", "local_oci_buckets", "local_audit_events", "local_cloud_provider_states"} <= names
+    assert {"local_datasets", "local_dataset_generation_jobs", "local_s3_buckets", "local_oci_buckets", "local_audit_events", "local_cloud_provider_states"} <= names
     assert "local_governance_templates" not in names
     assert not any(name.startswith("sim_") for name in names)
     assert "sources" not in names

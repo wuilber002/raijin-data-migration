@@ -19,7 +19,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shutil
 import sqlite3
 from time import perf_counter, sleep
 import threading
@@ -39,7 +38,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
 from app.aws_restore_semantics import s3_restore_expiry, utc_datetime
-from app.fujin_local_schema import LocalAuditEvent, LocalBatchJob, LocalCloudProviderState, LocalControlObject, LocalDataset, LocalMultipartPart, LocalMultipartUpload, LocalOciBucket, LocalOciObject, LocalProviderState, LocalRestore, LocalS3Bucket, LocalStsSession, migrate
+from app.fujin_local_schema import LocalAuditEvent, LocalBatchJob, LocalCloudProviderState, LocalControlObject, LocalDataset, LocalDatasetGenerationJob, LocalMultipartPart, LocalMultipartUpload, LocalOciBucket, LocalOciObject, LocalProviderState, LocalRestore, LocalS3Bucket, LocalStsSession, migrate
+from app.fujin_local_materializer import LocalMaterializationError, normalized_profile
 
 
 DATABASE_URL = os.environ.get("FUJIN_LOCAL_DATABASE_URL", "sqlite+pysqlite:////tmp/fujin-local.db")
@@ -1001,6 +1001,14 @@ class DatasetPackageCreate(BaseModel):
     repository_relative_path: str = Field(min_length=1, max_length=1024)
 
 
+class DatasetGenerateCreate(BaseModel):
+    """High-level LOCAL dataset request; it deliberately contains no path."""
+    name: str = Field(min_length=1, max_length=255)
+    quota_bytes: int = Field(gt=0)
+    seed: str = Field(min_length=1, max_length=255)
+    profile: dict = Field(default_factory=dict)
+
+
 class S3BucketCreate(BaseModel):
     name: str
     dataset_id: str
@@ -1211,7 +1219,7 @@ const initialUrlState=new URLSearchParams(location.search),auditFilterNames=['re
 function updateUrlState(values={},remove=[]){const url=new URL(location.href);for(const key of remove)url.searchParams.delete(key);for(const [key,value]of Object.entries(values)){if(value===undefined||value===null||value==='')url.searchParams.delete(key);else url.searchParams.set(key,String(value))}history.replaceState(null,'',url)}
 function selectUrlItem(type,id){updateUrlState({selected:type,selected_id:id})}
 function clearUrlItem(){updateUrlState({},['selected','selected_id'])}
-const paths={overview:'/api/local/overview',packages:'/api/local/dataset-packages',datasets:'/api/local/datasets',s3:'/api/local/s3-buckets',oci:'/api/local/oci-buckets'};
+const paths={overview:'/api/local/overview',datasets:'/api/local/datasets',s3:'/api/local/s3-buckets',oci:'/api/local/oci-buckets'};
 const html=value=>String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
 const localDate=value=>value?new Date(value).toLocaleString('pt-BR'):'—';
 const localBytes=value=>{const bytes=Number(value||0);if(!bytes)return'0 B';const units=['B','KiB','MiB','GiB','TiB'];const index=Math.min(units.length-1,Math.floor(Math.log(bytes)/Math.log(1024)));return`${new Intl.NumberFormat('pt-BR',{maximumFractionDigits:2}).format(bytes/(1024**index))} ${units[index]}`};
@@ -1257,11 +1265,7 @@ async function loadAuditBuckets(){const response=await fetch(base+'/api/local/au
 function renderAuditDetails(row){if(!row)return;selectUrlItem('audit',row.request_id);document.getElementById('audit-details-modal-title').textContent=`Auditoria — ${row.operation}`;const field=(label,value)=>`<div class="fujin-connection-field"><small>${label}</small><b>${html(value??'—')}</b></div>`;document.getElementById('audit-details-modal-content').innerHTML=`<section class="fujin-connection-panel"><div class="fujin-connection-grid">${field('Data',localDate(row.created_at))}${field('Resultado HTTP',row.status_code)}${field('Request ID',row.request_id)}${field('Operação',row.operation)}${field('Bucket',row.bucket)}${field('Chave do objeto',row.object_key)}${field('Endpoint',row.endpoint)}${field('Latência',row.latency_ms==null?'—':row.latency_ms+' ms')}${field('Bytes transferidos',row.bytes_transferred==null?'—':localBytes(row.bytes_transferred))}${field('Tentativas',row.retry_count)}${field('Identidade chamadora',row.caller_identity)}${field('Código de erro',row.error_code)}</div><div class="fujin-connection-field"><small>Descrição</small><b>${html(row.detail||'Sem informação adicional.')}</b></div></section>`;openFujinModal('audit-details-modal')}
 function datasetMessage(message,error=false){const target=document.getElementById('dataset-message');target.textContent=message||'';target.classList.toggle('error',error)}
 const datasetForm=document.getElementById('dataset-form');
-datasetForm.innerHTML=`<label><span class="with-help">Nome do dataset<span class="help" tabindex="0" data-help="Nome amigável e único para identificar o conjunto físico no Fujin. O nome não altera os arquivos nem será usado como caminho no disco.">i</span></span><input name="name" placeholder="arquivos-representative-10tb" required></label><label><span class="with-help">Origem dos arquivos<span class="help" tabindex="0" data-help="Selecione um pacote físico disponível no repositório do Fujin. Pacotes já registrados por outro dataset não aparecem nesta lista.">i</span></span><select id="dataset-package-select" name="repository_relative_path" required><option value="">Carregando pacotes disponíveis…</option></select></label><div id="dataset-package-summary" class="fujin-connection-field"><small>Resumo detectado</small><b>Selecione um pacote físico.</b></div><label class="fujin-checkbox-row"><input type="checkbox" checked disabled> <span><b>Validar automaticamente após criar</b><br><small>O Fujin calculará manifesto, snapshot SHA-256, quantidade de objetos e volume total.</small></span></label><button>Criar e validar dataset</button>`;
-let datasetPackages=[];
-function syncDatasetPackages(packages){datasetPackages=Array.isArray(packages)?packages:[];const select=document.getElementById('dataset-package-select'),selected=select.value;select.innerHTML=`<option value="">${datasetPackages.length?'Selecione um pacote físico':'Nenhum pacote físico disponível'}</option>${datasetPackages.map(item=>`<option value="${html(item.repository_relative_path)}">${html(item.repository_relative_path)} · ${html(localBytes(item.bytes))} · ${html(item.objects)} objeto(s)</option>`).join('')}`;if(datasetPackages.some(item=>item.repository_relative_path===selected))select.value=selected;select.disabled=!datasetPackages.length;renderDatasetPackageSummary()}
-function renderDatasetPackageSummary(){const selected=document.getElementById('dataset-package-select').value,item=datasetPackages.find(value=>value.repository_relative_path===selected),target=document.getElementById('dataset-package-summary');target.innerHTML=item?`<small>Resumo detectado</small><b>${html(item.objects)} objeto(s) · ${html(localBytes(item.bytes))}</b><span>${html(item.repository_relative_path)}</span>`:'<small>Resumo detectado</small><b>Selecione um pacote físico.</b>'}
-document.getElementById('dataset-package-select').addEventListener('change',renderDatasetPackageSummary);
+datasetForm.innerHTML=`<label><span class="with-help">Nome do dataset<span class="help" tabindex="0" data-help="Nome amigável e único. O Fujin cria e administra o conteúdo físico; nenhum caminho do host é aceito ou exibido.">i</span></span><input name="name" placeholder="arquivos-representative-10tb" required></label><label><span class="with-help">Seed<span class="help" tabindex="0" data-help="Valor estável usado pelo Fujin para gerar bytes determinísticos de alta entropia. O seed não é um caminho nem uma referência externa.">i</span></span><input name="seed" value="fujin-local-dataset-001" required></label><label><span class="with-help">Objetos<span class="help" tabindex="0" data-help="Quantidade de arquivos reais que o Fujin criará no volume LOCAL gerenciado.">i</span></span><input name="file_count" type="number" min="1" max="100000" step="1" value="10" required></label><label><span class="with-help">Tamanho por objeto (MiB)<span class="help" tabindex="0" data-help="Tamanho de cada arquivo físico real criado pelo Fujin LOCAL.">i</span></span><input name="file_size_mib" type="number" min="1" max="102400" step="1" value="100" required></label><label><span class="with-help">Quota (GiB)<span class="help" tabindex="0" data-help="Limite declarado para o dataset. Deve cobrir todo o perfil solicitado.">i</span></span><input name="quota_gib" type="number" min="1" step="1" value="10" required></label><div class="fujin-connection-field"><small>Criação controlada</small><b>O worker LOCAL grava, versiona e valida o dataset; o provedor só o lê após READY.</b></div><button>Criar dataset LOCAL</button>`;
 let s3ReadyDatasets=[];
 function renderS3LogicalSummary(){const dataset=s3ReadyDatasets.find(item=>item.id===document.getElementById('s3-dataset-select')?.value),multiplier=Math.max(1,Number(document.getElementById('s3-logical-multiplier')?.value||1)),target=document.getElementById('s3-logical-summary');if(!target)return;target.innerHTML=dataset?`<small>Projeção lógica do bucket</small><b>${html(multiplier)}× · ${html(new Intl.NumberFormat('pt-BR').format(Number(dataset.validated_objects||0)*multiplier))} objeto(s) · ${html(localBytes(Number(dataset.validated_bytes||0)*multiplier))}</b><span>Dados físicos preservados: ${html(localBytes(dataset.validated_bytes))} · ${html(dataset.validated_objects)} objeto(s)</span>`:'<small>Projeção lógica</small><b>Selecione um dataset READY.</b>'}
 function syncS3DatasetOptions(datasets){const select=document.getElementById('s3-dataset-select');if(!select)return;const selected=select.value;s3ReadyDatasets=(Array.isArray(datasets)?datasets:[]).filter(dataset=>dataset.state==='READY'&&dataset.model==='REPRESENTATIVE');select.innerHTML=`<option value="">Selecione um dataset READY</option>${s3ReadyDatasets.map(dataset=>`<option value="${html(dataset.id)}">${html(dataset.name)} · ${html(localBytes(dataset.validated_bytes))} · ${html(dataset.validated_objects)} objeto(s)</option>`).join('')}`;if(s3ReadyDatasets.some(dataset=>dataset.id===selected))select.value=selected;select.disabled=!s3ReadyDatasets.length;renderS3LogicalSummary()}
@@ -1272,10 +1276,10 @@ function renderDatasets(datasets){
   const target=document.getElementById('datasets');
   syncS3DatasetOptions(datasets);
   if(!Array.isArray(datasets)||!datasets.length){target.innerHTML='<div class="fujin-empty">Nenhum dataset criado.</div>';return}
-  target.innerHTML=`<div class="fujin-table-wrap"><table class="fujin-table"><thead><tr><th>Status</th><th>Nome</th><th>Modelo</th><th>Snapshot</th><th>Objetos</th><th>Volume validado</th><th>Validado em</th><th>Ações</th></tr></thead><tbody>${datasets.map(dataset=>{const state=String(dataset.state||'').toLowerCase().replaceAll('_','-');return`<tr><td><span class="fujin-status ${state}">${html(dataset.state)}</span></td><td><b>${html(dataset.name)}</b></td><td>${html(dataset.model)}</td><td title="${html(dataset.snapshot_id)}">${html(dataset.snapshot_id)}</td><td>${html(dataset.validated_objects)}</td><td>${html(localBytes(dataset.validated_bytes))}</td><td>${html(localDate(dataset.last_validated_at))}</td><td><button type="button" class="fujin-action-trigger dataset-action-trigger" data-dataset-id="${html(dataset.id)}" data-dataset-name="${html(dataset.name)}">Ações ▾</button></td></tr>`}).join('')}</tbody></table></div>`;
+  target.innerHTML=`<div class="fujin-table-wrap"><table class="fujin-table"><thead><tr><th>Status</th><th>Nome</th><th>Modelo</th><th>Snapshot</th><th>Objetos</th><th>Volume validado</th><th>Validado em</th><th>Ações</th></tr></thead><tbody>${datasets.map(dataset=>{const state=String(dataset.state||'').toLowerCase().replaceAll('_','-'),generation=dataset.generation,progress=generation?`<small><br>${html(generation.state)} · ${html(generation.files_written)}/${html(generation.files_total)} arquivo(s) · ${html(localBytes(generation.bytes_written))}</small>`:'';return`<tr><td><span class="fujin-status ${state}">${html(dataset.state)}</span>${progress}</td><td><b>${html(dataset.name)}</b></td><td>${html(dataset.model)}</td><td title="${html(dataset.snapshot_id)}">${html(dataset.snapshot_id)}</td><td>${html(dataset.validated_objects)}</td><td>${html(localBytes(dataset.validated_bytes))}</td><td>${html(localDate(dataset.last_validated_at))}</td><td><button type="button" class="fujin-action-trigger dataset-action-trigger" data-dataset-id="${html(dataset.id)}" data-dataset-name="${html(dataset.name)}">Ações ▾</button></td></tr>`}).join('')}</tbody></table></div>`;
   target.querySelectorAll('.dataset-action-trigger').forEach(button=>button.addEventListener('click',event=>openDatasetActionMenu(event,button)));
   clearTimeout(datasetRefreshTimer);
-  if(datasets.some(dataset=>dataset.state==='VALIDATING'))datasetRefreshTimer=setTimeout(async()=>{try{const [packagesResponse,datasetsResponse]=await Promise.all([fetch(base+paths.packages,{headers:headers()}),fetch(base+paths.datasets,{headers:headers()})]);if(packagesResponse.ok)syncDatasetPackages(await packagesResponse.json());if(datasetsResponse.ok)renderDatasets(await datasetsResponse.json())}catch(error){datasetMessage(`Não foi possível atualizar o progresso: ${error.message||error}`,true)}},5000);
+  if(datasets.some(dataset=>['GENERATING','VALIDATING'].includes(dataset.state)))datasetRefreshTimer=setTimeout(async()=>{try{const response=await fetch(base+paths.datasets,{headers:headers()});if(response.ok)renderDatasets(await response.json())}catch(error){datasetMessage(`Não foi possível atualizar o progresso: ${error.message||error}`,true)}},5000);
 }
 function mountActionMenu(menu,trigger){menu.style.visibility='hidden';menu.style.left='0px';menu.style.top='0px';document.body.append(menu);const rect=trigger.getBoundingClientRect(),bounds=menu.getBoundingClientRect(),margin=8;menu.style.left=`${Math.max(margin,Math.min(rect.right-bounds.width,window.innerWidth-bounds.width-margin))}px`;menu.style.top=`${window.innerHeight-rect.bottom>=bounds.height+margin?rect.bottom+4:Math.max(margin,rect.top-bounds.height-4)}px`;menu.style.visibility='visible';trigger.setAttribute('aria-expanded','true')}
 function openDatasetActionMenu(event,trigger){event.preventDefault();event.stopPropagation();const wasOpen=trigger.getAttribute('aria-expanded')==='true';closeS3ActionMenu();if(wasOpen)return;const menu=document.createElement('div');menu.className='fujin-action-popover';menu.setAttribute('role','menu');const actions=[['details','Detalhes',false,''],['validate','Validar',false,'Lê os payloads físicos e confere tamanho e SHA-256'],['edit','Editar',true,'Snapshot, caminho e manifesto são imutáveis após a criação'],['delete','Excluir',false,'']];for(const [action,label,disabled,title] of actions){const button=document.createElement('button');button.type='button';button.textContent=label;button.disabled=disabled;if(title)button.title=title;if(action==='delete')button.className='danger';button.addEventListener('click',async actionEvent=>{actionEvent.preventDefault();actionEvent.stopPropagation();const id=trigger.dataset.datasetId,name=trigger.dataset.datasetName;closeS3ActionMenu();await datasetAction(action,id,name)});menu.append(button)}mountActionMenu(menu,trigger)}
@@ -1365,10 +1369,10 @@ async function s3BucketAction(action,id,name){
 }
 document.body.insertAdjacentHTML('beforeend',`<div id="s3-restore-policy-modal" class="fujin-modal hidden" role="dialog" aria-modal="true" aria-labelledby="s3-restore-policy-modal-title" onclick="if(event.target===this)closeFujinModal('s3-restore-policy-modal')"><section class="fujin-modal-panel"><header class="fujin-modal-header"><h2 id="s3-restore-policy-modal-title">Disponibilização após restore</h2><button type="button" class="secondary fujin-modal-close" onclick="closeFujinModal('s3-restore-policy-modal')">Fechar</button></header><form id="s3-restore-policy-form"><input id="s3-restore-policy-bucket-id" name="bucket_id" type="hidden"><p id="s3-restore-policy-note" class="fujin-inline-message"></p><div class="fujin-connection-grid"><label><span>Tempo mínimo para o primeiro arquivo (horas)</span><input id="s3-restore-policy-minimum" name="minimum_delay_hours" type="number" min="0" max="48" step="0.25" required></label><label><span>Variação aleatória do início (horas)</span><input id="s3-restore-policy-variation" name="random_variation_hours" type="number" min="0" max="48" step="0.25" required></label><label><span>Disponibilização gradual mínima (horas)</span><input id="s3-restore-policy-gradual-min" name="gradual_window_min_hours" type="number" min="0" max="48" step="0.25" required></label><label><span>Disponibilização gradual máxima (horas)</span><input id="s3-restore-policy-gradual-max" name="gradual_window_max_hours" type="number" min="0" max="48" step="0.25" required></label></div><p class="fujin-inline-message">O pior caso — início mínimo + variação + entrega gradual máxima — deve ser de até 48 horas.</p><button type="submit">Salvar disponibilização</button></form></section></div>`);
 document.getElementById('s3-restore-policy-form').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,id=form.elements.bucket_id.value,policy={minimum_delay_hours:Number(form.elements.minimum_delay_hours.value),random_variation_hours:Number(form.elements.random_variation_hours.value),gradual_window_min_hours:Number(form.elements.gradual_window_min_hours.value),gradual_window_max_hours:Number(form.elements.gradual_window_max_hours.value)};const response=await fetch(base+'/api/local/s3-buckets/'+encodeURIComponent(id)+'/restore-policy',{method:'PUT',headers:{...headers(),'content-type':'application/json'},body:JSON.stringify({restore_policy:policy})});if(!response.ok){document.getElementById('s3-restore-policy-note').textContent=await apiError(response);return}const result=await response.json();document.getElementById('s3-restore-policy-note').textContent=result.changed?'Política atualizada para novas solicitações. Restores ativos não foram alterados.':'A política informada já estava ativa; nenhum restore foi alterado.';await refresh()};
-async function refresh(){for(const [id,path]of Object.entries(paths)){const response=await fetch(base+path,{headers:headers()});const value=await response.json();if(id==='overview')renderOverview(value);else if(id==='packages')syncDatasetPackages(value);else if(id==='datasets')renderDatasets(value);else if(id==='s3')renderS3Buckets(value);else if(id==='oci')renderOciBuckets(value);else{const target=document.getElementById(id),next=JSON.stringify(value,null,2);if(target.textContent!==next)target.textContent=next}if(id==='overview'){for(const provider of ['AWS','OCI']){const toggle=providerToggles[provider],enabled=value[provider.toLowerCase()+'_data_plane_enabled'];toggle.textContent=enabled?'Desativar endpoints '+provider:'Ativar endpoints '+provider;toggle.dataset.enabled=enabled}}}await loadAuditBuckets();if(auditQuery)await loadAuditPage(auditPage)}
+async function refresh(){for(const [id,path]of Object.entries(paths)){const response=await fetch(base+path,{headers:headers()});const value=await response.json();if(id==='overview')renderOverview(value);else if(id==='datasets')renderDatasets(value);else if(id==='s3')renderS3Buckets(value);else if(id==='oci')renderOciBuckets(value);else{const target=document.getElementById(id),next=JSON.stringify(value,null,2);if(target.textContent!==next)target.textContent=next}if(id==='overview'){for(const provider of ['AWS','OCI']){const toggle=providerToggles[provider],enabled=value[provider.toLowerCase()+'_data_plane_enabled'];toggle.textContent=enabled?'Desativar endpoints '+provider:'Ativar endpoints '+provider;toggle.dataset.enabled=enabled}}}await loadAuditBuckets();if(auditQuery)await loadAuditPage(auditPage)}
 for(const [provider,toggle]of Object.entries(providerToggles))toggle.onclick=async()=>{const action=toggle.dataset.enabled==='true'?'deactivate':'activate';const response=await fetch(base+'/api/local/providers/'+provider.toLowerCase()+'/'+action,{method:'POST',headers:headers()});if(!response.ok){alert(await response.text());return}refresh()};
 async function post(form,path,fields,transform=value=>value){let value=Object.fromEntries(new FormData(form));for(const field of fields)try{value[field]=value[field]?JSON.parse(value[field]):{}}catch(error){alert('JSON inválido em '+field);return}if(value.quota_bytes)value.quota_bytes=Number(value.quota_bytes);value=transform(value);const response=await fetch(base+path,{method:'POST',headers:{...headers(),'content-type':'application/json'},body:JSON.stringify(value)});if(!response.ok){alert(await apiError(response));return}form.reset();refresh()}
-document.getElementById('dataset-form').onsubmit=event=>{event.preventDefault();post(event.target,'/api/local/datasets/from-package',[])};
+document.getElementById('dataset-form').onsubmit=event=>{event.preventDefault();const data=Object.fromEntries(new FormData(event.target));const fileCount=Number(data.file_count),fileSizeBytes=Number(data.file_size_mib)*1024*1024,quotaBytes=Number(data.quota_gib)*1024*1024*1024;if(!Number.isInteger(fileCount)||fileCount<1||!Number.isInteger(fileSizeBytes)||fileSizeBytes<1||!Number.isInteger(quotaBytes)||quotaBytes<1){datasetMessage('Informe valores inteiros e positivos para o perfil.',true);return}post(event.target,'/api/local/datasets/generate',[],()=>({name:data.name,seed:data.seed,quota_bytes:quotaBytes,profile:{file_count:fileCount,file_size_bytes:fileSizeBytes}}))};
 document.getElementById('s3-form').onsubmit=event=>{event.preventDefault();post(event.target,'/api/local/s3-buckets',[],value=>{value.logical_multiplier=Number(value.logical_multiplier||1);value.restore_policy={minimum_delay_hours:Number(value.restore_minimum_hours),random_variation_hours:Number(value.restore_random_variation_hours),gradual_window_min_hours:Number(value.restore_gradual_min_hours),gradual_window_max_hours:Number(value.restore_gradual_max_hours)};for(const field of ['restore_minimum_hours','restore_random_variation_hours','restore_gradual_min_hours','restore_gradual_max_hours'])delete value[field];return value})};
 document.getElementById('oci-form').onsubmit=event=>{event.preventDefault();post(event.target,'/api/local/oci-buckets',[])};
 async function restoreUrlSelection(){const state=new URLSearchParams(location.search),type=state.get('selected'),id=state.get('selected_id');if(!type||!id)return;if(type==='dataset'){const response=await fetch(base+'/api/local/datasets/'+encodeURIComponent(id),{headers:headers()});if(response.ok)renderDatasetDetails(await response.json());else clearUrlItem();return}if(type==='audit'){const query=new URLSearchParams({request_id:id,limit:'1'}),response=await fetch(base+'/api/local/audit?'+query,{headers:headers()});if(response.ok){const rows=await response.json();if(rows[0])renderAuditDetails(rows[0]);else clearUrlItem()}return}if(type==='s3'){const trigger=[...document.querySelectorAll('#s3 [data-bucket-id]')].find(item=>item.dataset.bucketId===id);if(trigger)await s3BucketAction('connection',id,trigger.dataset.bucketName);else clearUrlItem();return}if(type==='oci'){const trigger=[...document.querySelectorAll('#oci [data-bucket-id]')].find(item=>item.dataset.bucketId===id);if(trigger)await ociBucketAction('connection',id,trigger.dataset.bucketName);else clearUrlItem()}}
@@ -1384,12 +1388,25 @@ refresh().then(restoreUrlSelection).catch(error=>alert(error));
 @app.get("/api/local/datasets")
 def list_datasets(request: Request, session: Session = Depends(get_session)) -> list[dict]:
     require_admin(request)
-    return [{"id": item.id, "name": item.name, "state": item.state, "model": item.model,
-             "snapshot_id": item.snapshot_id, "quota_bytes": item.quota_bytes,
-             "last_validated_at": item.last_validated_at, "last_validation_error": item.last_validation_error,
-             "validated_objects": item.validated_objects, "validated_bytes": item.validated_bytes,
-             "created_at": item.created_at}
-            for item in session.scalars(select(LocalDataset).where(LocalDataset.deleted_at.is_(None)).order_by(LocalDataset.name))]
+    jobs = {
+        item.dataset_id: item for item in session.scalars(select(LocalDatasetGenerationJob))
+    }
+    rows = []
+    for item in session.scalars(select(LocalDataset).where(LocalDataset.deleted_at.is_(None)).order_by(LocalDataset.name)):
+        job = jobs.get(item.id)
+        rows.append({
+            "id": item.id, "name": item.name, "state": item.state, "model": item.model,
+            "snapshot_id": item.snapshot_id, "quota_bytes": item.quota_bytes,
+            "last_validated_at": item.last_validated_at, "last_validation_error": item.last_validation_error,
+            "validated_objects": item.validated_objects, "validated_bytes": item.validated_bytes,
+            "created_at": item.created_at,
+            "generation": None if job is None else {
+                "state": job.state, "files_total": job.files_total,
+                "files_written": job.next_file_index, "bytes_written": job.bytes_written,
+                "last_error": job.last_error,
+            },
+        })
+    return rows
 
 
 def physical_package_files(relative_path: str) -> tuple[Path, list[Path]]:
@@ -1485,13 +1502,17 @@ def index_and_validate_physical_package(dataset_id: str) -> None:
 @app.get("/api/local/dataset-packages")
 def list_dataset_packages(request: Request, session: Session = Depends(get_session)) -> list[dict]:
     require_admin(request)
-    return available_dataset_packages(session)
+    raise HTTPException(410, "External physical packages are disabled; create the dataset through Fujin LOCAL")
 
 
 @app.post("/api/local/datasets/from-package", status_code=202)
 def create_dataset_from_package(payload: DatasetPackageCreate, background_tasks: BackgroundTasks,
                                 request: Request, session: Session = Depends(get_session)) -> dict:
     require_admin(request)
+    raise HTTPException(410, "External physical packages are disabled; create the dataset through Fujin LOCAL")
+
+    # Kept below temporarily as migration reference for existing catalogues.
+    # It is unreachable: new LOCAL datasets must be Fujin-owned generations.
     name = payload.name.strip()
     if not name:
         raise HTTPException(422, "Dataset name is required")
@@ -1806,6 +1827,10 @@ def list_oci_buckets(request: Request, session: Session = Depends(get_session)) 
 @app.post("/api/local/datasets", status_code=201)
 def create_dataset(request: Request, payload: DatasetCreate, session: Session = Depends(get_session)) -> dict:
     require_admin(request)
+    raise HTTPException(410, "External payload paths are disabled; use /api/local/datasets/generate")
+
+    # Kept below temporarily as migration reference for existing catalogues.
+    # It is unreachable: new LOCAL datasets must be Fujin-owned generations.
     relative = payload.repository_relative_path.strip().strip("/")
     if not relative or ".." in relative.split("/") or relative.startswith("/"):
         raise HTTPException(422, "repository_relative_path must stay below the Fujin payload root")
@@ -1822,12 +1847,51 @@ def create_dataset(request: Request, payload: DatasetCreate, session: Session = 
     return {"id": item.id, "request_id": identifier, "state": item.state, "model": item.model}
 
 
+@app.post("/api/local/datasets/generate", status_code=202)
+def generate_dataset(request: Request, payload: DatasetGenerateCreate,
+                     session: Session = Depends(get_session)) -> dict:
+    """Queue a Fujin-owned physical dataset without accepting a host path."""
+    require_admin(request)
+    try:
+        profile = normalized_profile(payload.profile)
+    except (TypeError, ValueError, LocalMaterializationError) as error:
+        raise HTTPException(422, str(error)) from error
+    requested_bytes = sum(int(item["size_bytes"]) for item in profile["files"])
+    if requested_bytes > payload.quota_bytes:
+        raise HTTPException(422, "dataset profile exceeds the requested quota")
+    dataset = LocalDataset(
+        name=payload.name.strip(), state="GENERATING", model="REPRESENTATIVE",
+        snapshot_id=f"pending-{uuid.uuid4().hex}", repository_relative_path="pending",
+        manifest_json=json.dumps({"format_version": 1, "objects": []}),
+        quota_bytes=payload.quota_bytes,
+    )
+    session.add(dataset)
+    try:
+        session.flush()
+        dataset.repository_relative_path = f"datasets/{dataset.id}"
+        job = LocalDatasetGenerationJob(
+            dataset_id=dataset.id, state="READY", seed=payload.seed,
+            profile_json=json.dumps(profile, sort_keys=True), files_total=len(profile["files"]),
+        )
+        session.add(job)
+        identifier = audit(session, "LOCAL_DATASET_GENERATION_QUEUED", 202,
+                           detail=f"{dataset.name}; files={len(profile['files'])}; bytes={requested_bytes}")
+        session.commit()
+    except Exception as error:
+        session.rollback()
+        raise HTTPException(409, "Dataset name already exists") from error
+    return {"id": dataset.id, "job_id": job.id, "request_id": identifier,
+            "state": dataset.state, "files": len(profile["files"]), "bytes": requested_bytes}
+
+
 @app.post("/api/local/datasets/{dataset_id}/validate")
 def validate_dataset(dataset_id: str, request: Request, session: Session = Depends(get_session)) -> dict:
     require_admin(request)
     dataset = session.get(LocalDataset, dataset_id)
     if not dataset or dataset.deleted_at:
         raise HTTPException(404, "LOCAL dataset not found")
+    if dataset.state == "GENERATING":
+        raise HTTPException(409, "Dataset generation is still in progress")
     try:
         objects, byte_count = validate_representative_dataset(dataset)
     except HTTPException as error:
@@ -2082,7 +2146,22 @@ def delete_dataset(dataset_id: str, request: Request, session: Session = Depends
     linked_oci = session.scalar(select(LocalOciObject).where(LocalOciObject.dataset_id == dataset.id))
     if linked_s3 or linked_oci:
         raise HTTPException(409, "Dataset is referenced by an active S3 bucket or OCI LOCAL object")
+    # The S3 provider deliberately mounts payloads read-only.  The durable
+    # materializer is the only process allowed to remove a Fujin-owned
+    # generated directory, so request cleanup instead of attempting host I/O
+    # here. Historical catalog-only datasets retain their old soft-delete
+    # behavior because they predate Fujin-owned physical generation.
+    expected_relative = Path("datasets") / dataset.id
+    remove_generated_files = dataset.repository_relative_path == expected_relative.as_posix()
+    job = session.scalar(select(LocalDatasetGenerationJob).where(
+        LocalDatasetGenerationJob.dataset_id == dataset.id
+    ))
     dataset.deleted_at = utcnow()
+    if remove_generated_files and job is not None:
+        job.state, job.last_error, job.updated_at = "CLEANUP_PENDING", None, utcnow()
+        identifier = audit(session, "LOCAL_DATASET_CLEANUP_QUEUED", 202, detail=dataset.name)
+        session.commit()
+        return Response(status_code=202, headers={"x-fujin-request-id": identifier})
     identifier = audit(session, "LOCAL_DATASET_DELETED", 204, detail=dataset.name)
     session.commit()
     return Response(status_code=204, headers={"x-fujin-request-id": identifier})

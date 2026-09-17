@@ -165,6 +165,12 @@ com AWS/OCI. Antes de ativá-lo, provisione e monte o volume em
 `/var/lib/s3-oci-migration/fujin-payloads`, gere `oci-runtime-local.json` e
 execute o [runbook de aceite Fujin LOCAL](../operacional/runbook-fujin-local-acceptance.md).
 
+Na topologia LOCAL, `fujin-local-materializer` é o único serviço com escrita
+no volume de payloads: ele cria datasets solicitados na console Fujin e só os
+publica após manifesto e SHA-256. O serviço `fujin-local` que expõe S3 monta o
+mesmo volume em somente leitura. Não adicione esse volume aos containers do
+Raijin nem ao modo `SIMULATION`.
+
 `s3-oci-start-fujin-local-runtime` é uma transição de topologia: faça drain e
 parada controlada do runtime normal antes de executá-lo. Nunca faça essa troca
 durante transferência ativa.

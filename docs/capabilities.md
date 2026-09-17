@@ -271,6 +271,14 @@ execuções, replanejamento pelas durações lógicas observadas e timeline visu
 previsto/observado com decisões do scheduler. O catálogo `CONTROL` foi validado
 com 100 TB lógicos e 640 mil objetos sem persistir payload.
 
+O isolamento de payload também é explícito: `SIMULATION` usa somente bytes
+determinísticos virtuais — não recebe mount, rota, configuração ou leitor de
+arquivo físico. No modo `LOCAL`, o Fujin cria datasets reais a partir de perfil
+e seed sem aceitar caminho do navegador ou do Raijin. Um worker próprio grava
+cada arquivo com publicação atômica, persiste manifesto e SHA-256 e só marca o
+dataset como `READY` quando ele está íntegro. O provedor S3 LOCAL monta esse
+volume em somente leitura; o Raijin continua em `REAL` e não monta o volume.
+
 ### Modos e isolamento
 
 - O RAIJIN operará em modo `REAL` ou `SIMULATION`, nunca nos dois ao mesmo
@@ -457,6 +465,9 @@ com 100 TB lógicos e 640 mil objetos sem persistir payload.
   templates, orçamento físico do modo `DATA`, relógio virtual, falhas injetadas,
   evidências, replay e housekeeping. Discovery, estratégia, waves e queue
   permanecem exclusivamente em **Migrations** e **Queue**.
+- `DATA` continua exercitando streaming e checksum, mas o seu orçamento limita
+  bytes determinísticos processados; ele não cria dataset físico. Datasets
+  físicos pertencem exclusivamente à console Fujin LOCAL.
 - A página **Simulation** mantém o mesmo rodapé operacional das demais telas,
   sem ações contextuais próprias. Condições importantes percorrem o ticker
   enquanto verdadeiras e são removidas somente após sua resolução.

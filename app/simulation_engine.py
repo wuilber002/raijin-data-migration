@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
-import time
 from typing import Iterator
 
 from sqlalchemy import and_, func, select, update
@@ -28,8 +27,6 @@ from app.backend_contracts import (
 )
 from app.aws_restore_semantics import s3_restore_expiry
 from app.simulation_schema import (
-    FujinPayloadDataset,
-    FujinPayloadFile,
     SimulationClock,
     SimulationExecution,
     InjectedFault,
@@ -41,15 +38,6 @@ from app.simulation_schema import (
     SimulatedMultipartUpload,
     VirtualBucket,
     VirtualObject,
-)
-from app.fujin_payloads import (
-    DeterministicPayloadReader,
-    LocalFilesystemPayloadReader,
-    PayloadReference,
-    PayloadSnapshotError,
-    normalized_payload_configuration,
-    payload_read_limits,
-    repository_root,
 )
 from app.simulated_data import (
     SimulatedDataIntegrityError,
@@ -322,42 +310,6 @@ class SimulationEngine:
                 "DATA physical byte budget exhausted; increase it before creating a new scenario"
             )
 
-    def _record_physical_read(
-        self, execution_id: str, *, bytes_read: int, elapsed_seconds: float,
-        snapshot_failure: bool = False,
-    ) -> None:
-        """Persist reader telemetry after the stream has been consumed.
-
-        It is deliberately outside the request transaction: holding a DB
-        transaction open while a multi-part upload streams a large file would
-        make the simulator less safe, not more observable.
-        """
-        with self.store.sessions() as session:
-            execution = session.get(SimulationExecution, execution_id)
-            if execution is None:
-                return
-            execution.physical_read_operations = int(execution.physical_read_operations or 0) + 1
-            execution.physical_local_bytes_read = int(execution.physical_local_bytes_read or 0) + max(0, bytes_read)
-            execution.physical_read_seconds = float(execution.physical_read_seconds or 0.0) + max(0.0, elapsed_seconds)
-            if snapshot_failure:
-                execution.physical_snapshot_failures = int(execution.physical_snapshot_failures or 0) + 1
-            session.commit()
-
-    @staticmethod
-    def _record_physical_read_in_session(
-        execution: SimulationExecution,
-        *,
-        bytes_read: int,
-        elapsed_seconds: float,
-        snapshot_failure: bool = False,
-    ) -> None:
-        """Account for a physical read already performed in this transaction."""
-        execution.physical_read_operations = int(execution.physical_read_operations or 0) + 1
-        execution.physical_local_bytes_read = int(execution.physical_local_bytes_read or 0) + max(0, bytes_read)
-        execution.physical_read_seconds = float(execution.physical_read_seconds or 0.0) + max(0.0, elapsed_seconds)
-        if snapshot_failure:
-            execution.physical_snapshot_failures = int(execution.physical_snapshot_failures or 0) + 1
-
     def materialize(
         self,
         scenario_id: str,
@@ -380,36 +332,18 @@ class SimulationEngine:
         normalized_prefixes = [value.strip().strip("/") for value in prefixes if value.strip()]
         normalized_prefixes = normalized_prefixes or ["simulation"]
         payload_model = payload_model.strip().upper()
-        if payload_model not in {"VIRTUAL", "REPRESENTATIVE", "HYBRID"}:
-            raise ValueError("payload_model must be VIRTUAL, REPRESENTATIVE or HYBRID")
-        if payload_model == "VIRTUAL" and (payload_dataset_id or physical_object_indices):
-            raise ValueError("VIRTUAL materialization cannot reference a physical dataset")
-        if payload_model != "VIRTUAL" and not payload_dataset_id:
-            raise ValueError("A physical payload dataset is required for this model")
-        selected_indices = sorted(set(int(index) for index in (physical_object_indices or [])))
-        if payload_model == "REPRESENTATIVE":
-            selected_indices = list(range(object_count))
-        if payload_model == "HYBRID" and not selected_indices:
-            raise ValueError("HYBRID materialization requires explicit physical object indices")
-        if any(index < 0 or index >= object_count for index in selected_indices):
-            raise ValueError("Physical object index is outside the materialized catalog")
+        # Simulation is intentionally logical-only. Physical datasets belong
+        # to Fujin LOCAL, where their lifecycle is durable and isolated from
+        # the virtual clock. Keep this guard even for internal callers so no
+        # API refactor can accidentally reintroduce host I/O here.
+        if payload_model != "VIRTUAL" or payload_dataset_id or physical_object_indices:
+            raise ValueError("SIMULATION accepts deterministic VIRTUAL payloads only; use Fujin LOCAL for physical datasets")
+        selected_indices: list[int] = []
 
         with self.store.sessions() as session:
             scenario = session.get(SimulationScenario, scenario_id)
             if scenario is None:
                 raise LookupError("Scenario not found")
-            if scenario.fidelity != "DATA" and payload_model != "VIRTUAL":
-                raise ValueError("Physical payload models are available only in DATA scenarios")
-            if payload_model != "VIRTUAL":
-                # Physical-reader controls become part of the immutable
-                # scenario before its execution snapshot is created. Keep
-                # logical-only legacy scenarios byte-for-byte compatible.
-                configuration = normalized_payload_configuration(
-                    json.loads(scenario.configuration_json)
-                )
-                scenario.configuration_json = json.dumps(
-                    configuration, sort_keys=True, separators=(",", ":")
-                )
             if session.scalar(select(SimulationExecution.id).where(
                 SimulationExecution.scenario_id == scenario_id
             ).limit(1)):
@@ -429,43 +363,15 @@ class SimulationEngine:
             session.add_all([source, destination])
             session.flush()
 
-            physical_files: list[FujinPayloadFile] = []
-            dataset: FujinPayloadDataset | None = None
-            if payload_model != "VIRTUAL":
-                dataset = session.get(FujinPayloadDataset, payload_dataset_id)
-                if dataset is None or dataset.state != "READY":
-                    raise ValueError("Fujin payload dataset is not READY")
-                physical_files = list(session.scalars(select(FujinPayloadFile).where(
-                    FujinPayloadFile.dataset_id == dataset.id
-                ).order_by(FujinPayloadFile.relative_path)))
-                if not physical_files:
-                    raise ValueError("Fujin payload dataset has no generated files")
-            physical_by_index = {
-                index: physical_files[position % len(physical_files)]
-                for position, index in enumerate(selected_indices)
-            }
-            physical_total = sum(item.size_bytes for item in physical_by_index.values())
-            if physical_total > logical_size_bytes:
-                raise ValueError("Selected physical payload exceeds logical catalog size")
-            virtual_indices = [index for index in range(object_count) if index not in physical_by_index]
-            if payload_model == "REPRESENTATIVE" and physical_total != logical_size_bytes:
-                raise ValueError(
-                    "REPRESENTATIVE logical size must equal the deterministic repeated physical sample size"
-                )
-            weight_total = sum(_weight(scenario.seed, index) for index in virtual_indices) or 1
+            weight_total = sum(_weight(scenario.seed, index) for index in range(object_count)) or 1
             cumulative_weight = 0
             allocated = 0
-            remaining_logical_bytes = logical_size_bytes - physical_total
             rows: list[dict] = []
             for index in range(object_count):
-                physical_file = physical_by_index.get(index)
-                if physical_file is not None:
-                    size = physical_file.size_bytes
-                else:
-                    cumulative_weight += _weight(scenario.seed, index)
-                    next_allocated = remaining_logical_bytes * cumulative_weight // weight_total
-                    size = next_allocated - allocated
-                    allocated = next_allocated
+                cumulative_weight += _weight(scenario.seed, index)
+                next_allocated = logical_size_bytes * cumulative_weight // weight_total
+                size = next_allocated - allocated
+                allocated = next_allocated
                 prefix = normalized_prefixes[index % len(normalized_prefixes)]
                 content_object_id = hashlib.sha256(
                     f"{scenario.seed}:{index}".encode("utf-8")
@@ -489,19 +395,6 @@ class SimulationEngine:
                         "content_object_id": content_object_id,
                         "restore_state": "ARCHIVED",
                     }
-                if physical_file is not None:
-                    # Raijin's existing transfer evidence is base64 SHA-256.
-                    row.update({
-                        "source_sha256": base64.b64encode(bytes.fromhex(physical_file.sha256)).decode("ascii"),
-                        "payload_kind": "LOCAL_FILE",
-                        "payload_dataset_id": dataset.id if dataset else None,
-                        "payload_file_id": physical_file.id,
-                        "payload_relative_path": physical_file.relative_path,
-                        "payload_size_bytes": physical_file.size_bytes,
-                        "payload_mtime_ns": physical_file.mtime_ns,
-                        "payload_identity": physical_file.identity,
-                        "payload_sha256": physical_file.sha256,
-                    })
                 rows.append(row)
                 if len(rows) == 5000:
                     session.bulk_insert_mappings(VirtualObject, rows)
@@ -519,16 +412,11 @@ class SimulationEngine:
                 "prefixes": normalized_prefixes,
                 "storage_class": storage_class,
                 "payload_model": payload_model,
-                "payload_dataset_id": dataset.id if dataset else None,
-                "payload_dataset": ({
-                    "id": dataset.id,
-                    "manifest_sha256": dataset.manifest_sha256,
-                    "files_total": dataset.files_total,
-                    "physical_bytes": dataset.physical_bytes,
-                } if dataset else None),
-                "physical_object_indices": selected_indices,
-                "physical_logical_bytes": physical_total,
-                "virtual_logical_bytes": remaining_logical_bytes,
+                "payload_dataset_id": None,
+                "payload_dataset": None,
+                "physical_object_indices": [],
+                "physical_logical_bytes": 0,
+                "virtual_logical_bytes": logical_size_bytes,
             }
             scenario.configuration_json = json.dumps(
                 configuration, sort_keys=True, separators=(",", ":")
@@ -540,7 +428,7 @@ class SimulationEngine:
                 "objects": object_count,
                 "logical_size_bytes": logical_size_bytes,
                 "payload_model": payload_model,
-                "physical_object_count": len(selected_indices),
+                "physical_object_count": 0,
             }
 
     def list_objects(
@@ -1107,44 +995,20 @@ class SimulationEngine:
                 self._reserve_physical_bytes(session, execution, length)
             session.commit()
             descriptor = self._content_descriptor(item)
-            reference = self._payload_reference(item)
-            limits = payload_read_limits(json.loads(scenario.configuration_json))
         if fault and fault["action"] == "FAIL":
             raise ConnectionError("Injected deterministic source stream failure")
-        reader = (
-            LocalFilesystemPayloadReader(repository_root(), reference, limits=limits)
-            if reference is not None else DeterministicPayloadReader(descriptor)
-        )
-        chunks = reader.stream_range(offset=offset, length=length)
-        physical = reference is not None
-        started = time.monotonic()
-        snapshot_failure = False
-        bytes_read = 0
-        try:
-            if fault and fault["action"] == "CORRUPT":
-                corrupted = False
-                for chunk in chunks:
-                    if not corrupted and chunk:
-                        mutable = bytearray(chunk)
-                        mutable[0] ^= 0x01
-                        chunk, corrupted = bytes(mutable), True
-                    bytes_read += len(chunk)
-                    yield chunk
-                return
+        chunks = iter_deterministic_range(descriptor, offset=offset, length=length)
+        if fault and fault["action"] == "CORRUPT":
+            corrupted = False
             for chunk in chunks:
-                bytes_read += len(chunk)
+                if not corrupted and chunk:
+                    mutable = bytearray(chunk)
+                    mutable[0] ^= 0x01
+                    chunk, corrupted = bytes(mutable), True
                 yield chunk
-        except Exception as error:
-            snapshot_failure = physical and isinstance(error, PayloadSnapshotError)
-            raise
-        finally:
-            if physical:
-                self._record_physical_read(
-                    execution_id,
-                    bytes_read=bytes_read,
-                    elapsed_seconds=time.monotonic() - started,
-                    snapshot_failure=snapshot_failure,
-                )
+            return
+        for chunk in chunks:
+            yield chunk
 
     @staticmethod
     def _content_descriptor(item: VirtualObject) -> VirtualContentDescriptor:
@@ -1157,34 +1021,10 @@ class SimulationEngine:
             generator_version=item.generator_version,
         )
 
-    @staticmethod
-    def _payload_reference(item: VirtualObject) -> PayloadReference | None:
-        if item.payload_kind != "LOCAL_FILE":
-            return None
-        required = (
-            item.payload_dataset_id, item.payload_relative_path, item.payload_size_bytes,
-            item.payload_mtime_ns, item.payload_identity, item.payload_sha256,
-        )
-        if any(value is None for value in required):
-            raise RuntimeError("LOCAL_FILE object has an incomplete immutable payload snapshot")
-        return PayloadReference(
-            dataset_id=item.payload_dataset_id,
-            relative_path=item.payload_relative_path,
-            size_bytes=int(item.payload_size_bytes),
-            mtime_ns=int(item.payload_mtime_ns),
-            identity=item.payload_identity,
-            sha256=item.payload_sha256,
-        )
-
     def _stream_item_range(
         self, item: VirtualObject, *, offset: int, length: int, configuration: dict | None = None,
     ) -> Iterator[bytes]:
-        reference = self._payload_reference(item)
-        if reference is not None:
-            return LocalFilesystemPayloadReader(
-                repository_root(), reference, limits=payload_read_limits(configuration),
-            ).stream_range(offset, length)
-        return DeterministicPayloadReader(self._content_descriptor(item)).stream_range(offset, length)
+        return iter_deterministic_range(self._content_descriptor(item), offset=offset, length=length)
 
     def _destination_scope(self, session, execution_id: str, bucket_name: str, key: str):
         _, scenario, _ = self._execution_scope(session, execution_id)
@@ -1512,30 +1352,13 @@ class SimulationEngine:
             size_bytes = received.size_bytes
             if offset + size_bytes > upload.expected_size_bytes:
                 raise ValueError("Multipart part exceeds expected object size")
-            reference = self._payload_reference(source)
-            started = time.monotonic()
-            snapshot_failure = False
             expected_bytes = 0
-            try:
-                def verified_chunks():
-                    nonlocal expected_bytes
-                    for chunk in self._stream_item_range(
-                        source, offset=offset, length=size_bytes, configuration=json.loads(scenario.configuration_json),
-                    ):
-                        expected_bytes += len(chunk)
-                        yield chunk
-                expected = consume_and_discard(verified_chunks())
-            except Exception as error:
-                snapshot_failure = reference is not None and isinstance(error, PayloadSnapshotError)
-                raise
-            finally:
-                if reference is not None:
-                    self._record_physical_read_in_session(
-                        execution,
-                        bytes_read=expected_bytes,
-                        elapsed_seconds=time.monotonic() - started,
-                        snapshot_failure=snapshot_failure,
-                    )
+            def verified_chunks():
+                nonlocal expected_bytes
+                for chunk in self._stream_item_range(source, offset=offset, length=size_bytes):
+                    expected_bytes += len(chunk)
+                    yield chunk
+            expected = consume_and_discard(verified_chunks())
             if received.checksum_sha256 != expected.checksum_sha256:
                 raise SimulatedDataIntegrityError(
                     "Multipart part differs from independently generated source range"

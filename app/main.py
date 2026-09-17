@@ -1150,9 +1150,6 @@ class SimulationScenarioBootstrap(BaseModel):
     region: str = Field(default="us-east-1", min_length=1, max_length=64)
     prefixes: list[str] = Field(default_factory=lambda: ["simulation"], min_length=1, max_length=1000)
     storage_class: str = Field(default="DEEP_ARCHIVE", max_length=64)
-    payload_model: str = Field(default="VIRTUAL", pattern="^(VIRTUAL|REPRESENTATIVE|HYBRID)$")
-    payload_dataset_id: str | None = None
-    physical_object_indices: list[int] = Field(default_factory=list, max_length=10_000_000)
     template_id: str | None = None
     configuration: dict = Field(default_factory=dict)
     fault_rules: list = Field(default_factory=list)
@@ -1175,14 +1172,6 @@ class SimulationTemplateWrite(BaseModel):
     fidelity: str = Field(pattern="^(CONTROL|DATA)$")
     configuration: dict = Field(default_factory=dict)
     fault_rules: list = Field(default_factory=list)
-
-
-class SimulationPayloadDatasetCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
-    quota_bytes: int = Field(gt=0)
-    seed: str = Field(min_length=1, max_length=255)
-    profile: dict = Field(default_factory=dict)
-    model: str = Field(default="REPRESENTATIVE", pattern="^(REPRESENTATIVE|HYBRID)$")
 
 
 class OperationModeSwitchRequest(BaseModel):
@@ -2939,37 +2928,6 @@ def simulation_templates() -> list[dict]:
     return SimulatorAdminClient(runtime_context.simulator_base_url).list_templates()
 
 
-@app.get("/api/simulation/payload-datasets")
-def simulation_payload_datasets() -> list[dict]:
-    require_simulation_mode()
-    cloud_backend.readiness(require_operations=True)
-    return SimulatorAdminClient(runtime_context.simulator_base_url).list_payload_datasets()
-
-
-@app.post("/api/simulation/payload-datasets", status_code=201)
-def create_simulation_payload_dataset(payload: SimulationPayloadDatasetCreate) -> dict:
-    require_simulation_mode()
-    cloud_backend.readiness(require_operations=True)
-    try:
-        return SimulatorAdminClient(runtime_context.simulator_base_url).create_payload_dataset(
-            payload.model_dump()
-        )
-    except SimulatorAdminError as error:
-        status_code = error.status_code if error.status_code and 400 <= error.status_code < 500 else 502
-        raise HTTPException(status_code=status_code, detail=error.detail) from error
-
-
-@app.post("/api/simulation/payload-datasets/{dataset_id}/validate")
-def validate_simulation_payload_dataset(dataset_id: str) -> dict:
-    require_simulation_mode()
-    cloud_backend.readiness(require_operations=True)
-    try:
-        return SimulatorAdminClient(runtime_context.simulator_base_url).validate_payload_dataset(dataset_id)
-    except SimulatorAdminError as error:
-        status_code = error.status_code if error.status_code and 400 <= error.status_code < 500 else 502
-        raise HTTPException(status_code=status_code, detail=error.detail) from error
-
-
 @app.post("/api/simulation/templates", status_code=201)
 def create_simulation_template(payload: SimulationTemplateWrite) -> dict:
     require_simulation_mode()
@@ -3089,9 +3047,6 @@ def create_simulation_scenario(
             "logical_size_bytes": payload.logical_size_bytes,
             "prefixes": prefixes,
             "storage_class": payload.storage_class,
-            "payload_model": payload.payload_model,
-            "payload_dataset_id": payload.payload_dataset_id,
-            "physical_object_indices": payload.physical_object_indices,
         },
     )
     execution = admin.create_execution(scenario["id"])

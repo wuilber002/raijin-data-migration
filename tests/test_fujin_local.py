@@ -23,7 +23,7 @@ import boto3
 from botocore.config import Config
 import oci
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -41,8 +41,16 @@ def _request(method, path, headers=(), query=b"", body=b""):
 
 
 def _create_ready_dataset(module, request, payload, session):
-    """LOCAL buckets may use only a physically validated Representative set."""
-    dataset = module.create_dataset(request, payload, session=session)
+    """Fixture-only legacy catalogue seed; public creation is Fujin-owned."""
+    dataset_row = module.LocalDataset(
+        name=payload.name, snapshot_id=payload.snapshot_id,
+        repository_relative_path=payload.repository_relative_path,
+        manifest_json=json.dumps(payload.manifest, sort_keys=True),
+        quota_bytes=payload.quota_bytes, state="PENDING_VALIDATION",
+    )
+    session.add(dataset_row)
+    session.commit()
+    dataset = {"id": dataset_row.id}
     module.validate_dataset(dataset["id"], _request("POST", "/api/local/datasets/validate"), session=session)
     return dataset
 
@@ -69,6 +77,93 @@ def test_sqlite_catalogue_uses_wal_and_bounded_busy_wait(tmp_path, monkeypatch):
             assert connection.exec_driver_sql("PRAGMA synchronous").scalar() == 1
         assert module.SQLITE_LOCK_RETRY_ATTEMPTS == 3
         assert module.sqlite_locked(sqlite3.OperationalError("database is locked"))
+    finally:
+        module.engine.dispose()
+
+
+def test_local_dataset_generation_is_queued_without_a_host_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'generation.db'}")
+    import app.fujin_local as module
+    module = importlib.reload(module); module.startup()
+    try:
+        with module.SessionLocal() as session:
+            result = module.generate_dataset(
+                _request("POST", "/api/local/datasets/generate"),
+                module.DatasetGenerateCreate(
+                    name="generated-locally", quota_bytes=2048, seed="stable-seed",
+                    profile={"file_count": 2, "file_size_bytes": 1024},
+                ),
+                session,
+            )
+            dataset = session.get(module.LocalDataset, result["id"])
+            job = session.get(module.LocalDatasetGenerationJob, result["job_id"])
+            assert result["state"] == "GENERATING"
+            assert dataset.repository_relative_path == f"datasets/{dataset.id}"
+            assert job.state == "READY" and job.files_total == 2
+        with module.SessionLocal() as session:
+            rows = module.list_datasets(_request("GET", "/api/local/datasets"), session)
+            assert rows[0]["generation"] == {
+                "state": "READY", "files_total": 2, "files_written": 0,
+                "bytes_written": 0, "last_error": None,
+            }
+    finally:
+        module.engine.dispose()
+
+
+def test_local_rejects_external_dataset_paths_and_packages(tmp_path, monkeypatch):
+    monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'no-import.db'}")
+    import app.fujin_local as module
+    module = importlib.reload(module); module.startup()
+    try:
+        with module.SessionLocal() as session:
+            with pytest.raises(HTTPException) as package_error:
+                module.list_dataset_packages(_request("GET", "/api/local/dataset-packages"), session)
+            assert package_error.value.status_code == 410
+            with pytest.raises(HTTPException) as path_error:
+                module.create_dataset(
+                    _request("POST", "/api/local/datasets"),
+                    module.DatasetCreate(
+                        name="external", snapshot_id="external", repository_relative_path="outside",
+                        quota_bytes=1,
+                    ), session,
+                )
+            assert path_error.value.status_code == 410
+    finally:
+        module.engine.dispose()
+
+
+def test_deleting_a_generated_dataset_removes_its_owned_files(tmp_path, monkeypatch):
+    database = Path(tmp_path) / "delete-generated.db"
+    root = Path(tmp_path) / "payloads"
+    monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{database}")
+    monkeypatch.setenv("FUJIN_LOCAL_PAYLOAD_ROOT", str(root))
+    import app.fujin_local as module
+    from app.fujin_local_materializer import process_generation_jobs
+    module = importlib.reload(module); module.startup()
+    try:
+        with module.SessionLocal() as session:
+            created = module.generate_dataset(
+                _request("POST", "/api/local/datasets/generate"),
+                module.DatasetGenerateCreate(
+                    name="remove-generated", quota_bytes=9, seed="seed",
+                    profile={"file_count": 1, "file_size_bytes": 9},
+                ), session,
+            )
+        process_generation_jobs(module.DATABASE_URL, root=root, max_files=2)
+        with module.SessionLocal() as session:
+            dataset = session.get(module.LocalDataset, created["id"])
+            directory = root / dataset.repository_relative_path
+            assert dataset.state == "READY" and directory.is_dir()
+            response = module.delete_dataset(created["id"], _request("DELETE", "/api/local/datasets/id"), session)
+            assert response.status_code == 202
+            assert directory.is_dir()
+        process_generation_jobs(module.DATABASE_URL, root=root, max_files=1)
+        with module.SessionLocal() as session:
+            job = session.scalar(select(module.LocalDatasetGenerationJob).where(
+                module.LocalDatasetGenerationJob.dataset_id == created["id"]
+            ))
+            assert job.state == "CLEANUP_SUCCEEDED"
+            assert not directory.exists()
     finally:
         module.engine.dispose()
 
@@ -195,9 +290,10 @@ def test_local_console_exposes_only_local_administration_controls():
     assert "id='oci-private-region'" in page
     assert "name='configuration'" not in page
     assert "bucket_configuration" not in page
-    assert "dataset-package-select" in page
-    assert "Criar e validar dataset" in page
-    assert "/api/local/datasets/from-package" in page
+    assert "file_count" in page and "file_size_mib" in page
+    assert "Criar dataset LOCAL" in page
+    assert "/api/local/datasets/generate" in page
+    assert "/api/local/datasets/from-package" not in page
     assert page.count("class='help'") >= 9
     assert "enableHelpTooltips()" in page
     assert "fujin-table" in page
@@ -334,9 +430,13 @@ def test_local_oci_runtime_profile_keeps_real_configuration_isolated(tmp_path):
     assert json.loads(source.read_text(encoding="utf-8"))["object_storage_namespace"] == "real"
 
 
-def test_local_compose_mounts_physical_payloads_read_only():
+def test_local_compose_isolates_the_fujin_materializer_from_the_read_only_provider():
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
     assert "- /var/lib/s3-oci-migration/fujin-payloads:/var/lib/fujin-local/payloads:ro" in compose
+    materializer = compose.split("  fujin-local-materializer:\n", 1)[1].split("  fujin-local-dns:\n", 1)[0]
+    assert 'command: ["python3", "-m", "app.fujin_local_materializer"]' in materializer
+    assert "- /var/lib/s3-oci-migration/fujin-payloads:/var/lib/fujin-local/payloads:rw" in materializer
+    assert "ports:" not in materializer
 
 
 def test_local_compose_exposes_only_the_loopback_ui_gateway():
@@ -379,6 +479,11 @@ def test_oracle_linux_podman_launcher_keeps_raijin_real_and_the_data_plane_priva
     assert 'mountpoint -q "$data_root/fujin-payloads"' in launcher
     assert "-p 127.0.0.1:8080:8080" in launcher
     assert "s3-oci-fujin-local" in launcher and "fujin-payloads:/var/lib/fujin-local/payloads:ro" in launcher
+    assert "s3-oci-fujin-local-materializer" in launcher
+    assert 'fujin-local:/var/lib/fujin-local:z' in launcher
+    assert 'fujin-local:/var/lib/fujin-local:Z' not in launcher
+    assert 'fujin-payloads:/var/lib/fujin-local/payloads:rw,z' in launcher
+    assert '"$image" python3 -m app.fujin_local_materializer' in launcher
     assert 'podman network connect --alias local-app "$ui_network" s3-oci-app' in launcher
     assert '--network "$main_network" -p 127.0.0.1:8080:8080' in launcher
     assert 'ui_resolver_ip=' in launcher and 'gateway_resolv_conf=' in launcher
@@ -410,6 +515,7 @@ def test_oracle_linux_podman_launcher_executes_the_private_topology_in_dry_run(t
     assert "LOCAL private cloud is ready" in run.stdout
     assert "network create --internal --subnet 172.30.0.0/24" in commands
     assert "--name s3-oci-fujin-local" in commands
+    assert "--name s3-oci-fujin-local-materializer" in commands
     assert "--name s3-oci-app" in commands and "RAIJIN_OPERATION_MODE=REAL" in commands
     assert "/run/platform-status:ro,z" in commands
     assert "--name s3-oci-local-ui-gateway" in commands and "-p 127.0.0.1:8080:8080" in commands
@@ -766,35 +872,32 @@ def test_deleted_s3_bucket_name_can_be_recreated_with_new_projection(tmp_path, m
         session.close()
 
 
-def test_user_friendly_dataset_package_flow_builds_metadata_and_validates(tmp_path, monkeypatch):
+def test_user_friendly_local_generation_builds_metadata_and_validates(tmp_path, monkeypatch):
     root = Path(tmp_path) / "payloads"
-    package = root / "datasets" / "package-001"
-    package.mkdir(parents=True)
-    (package / "first.bin").write_bytes(b"first")
-    (package / "nested").mkdir()
-    (package / "nested" / "second.bin").write_bytes(b"second")
     monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'package-flow.db'}")
     monkeypatch.setenv("FUJIN_LOCAL_PAYLOAD_ROOT", str(root))
     import app.fujin_local as module
+    from app.fujin_local_materializer import process_generation_jobs
     module = importlib.reload(module); module.startup(); session = module.SessionLocal()
     try:
-        request = _request("POST", "/api/local/datasets/from-package")
-        packages = module.list_dataset_packages(request, session)
-        assert packages == [{"repository_relative_path": "datasets/package-001", "objects": 2, "bytes": 11}]
-        background = module.BackgroundTasks()
-        created = module.create_dataset_from_package(
-            module.DatasetPackageCreate(name="Friendly package", repository_relative_path="datasets/package-001"),
-            background, request, session,
+        request = _request("POST", "/api/local/datasets/generate")
+        created = module.generate_dataset(
+            request, module.DatasetGenerateCreate(
+                name="Friendly package", quota_bytes=11, seed="local-test",
+                profile={"files": [{"name": "first.bin", "size_bytes": 5}, {"name": "second.bin", "size_bytes": 6}]},
+            ), session,
         )
-        assert created["state"] == "VALIDATING" and created["objects"] == 2 and created["bytes"] == 11
-        module.index_and_validate_physical_package(created["id"])
+        assert created["state"] == "GENERATING" and created["files"] == 2 and created["bytes"] == 11
+        database_url = module.DATABASE_URL
+        process_generation_jobs(database_url, root=root, max_files=1)
+        process_generation_jobs(database_url, root=root, max_files=1)
+        process_generation_jobs(database_url, root=root, max_files=1)
         session.expire_all()
         dataset = session.get(module.LocalDataset, created["id"])
         manifest = json.loads(dataset.manifest_json)
         assert dataset.state == "READY" and dataset.quota_bytes == 11
         assert dataset.validated_objects == 2 and dataset.validated_bytes == 11
         assert len(dataset.snapshot_id) == 64 and len(manifest["objects"]) == 2
-        assert module.list_dataset_packages(request, session) == []
     finally:
         session.close()
 
@@ -960,7 +1063,9 @@ def test_representative_dataset_validation_records_physical_evidence(tmp_path, m
     module = importlib.reload(module); module.startup(); session = module.SessionLocal()
     try:
         request = _request("POST", "/api/local/datasets")
-        dataset = module.create_dataset(request, module.DatasetCreate(name="validated", snapshot_id="validated-snapshot", repository_relative_path="snap", quota_bytes=len(payload), manifest={"objects":[{"key":"object.bin","relative_path":"snap/object.bin","size_bytes":len(payload),"sha256":digest}]}), session)
+        seeded = module.LocalDataset(name="validated", snapshot_id="validated-snapshot", state="PENDING_VALIDATION", repository_relative_path="snap", quota_bytes=len(payload), manifest_json=json.dumps({"objects":[{"key":"object.bin","relative_path":"snap/object.bin","size_bytes":len(payload),"sha256":digest}]}))
+        session.add(seeded); session.commit()
+        dataset = {"id": seeded.id, "state": seeded.state}
         before = module.dataset_details(dataset["id"], request, session)
         assert before["state"] == "PENDING_VALIDATION" and before["manifest_objects"] == 1
         assert "manifest" not in before and before["repository_relative_path"] == "snap"

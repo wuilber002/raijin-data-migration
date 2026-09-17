@@ -17,7 +17,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from app.aws_restore_semantics import s3_restore_expiry, utc_datetime
 
 
-LOCAL_SCHEMA_VERSION = 19
+LOCAL_SCHEMA_VERSION = 20
 
 
 def utcnow() -> datetime:
@@ -79,6 +79,28 @@ class LocalDataset(LocalBase):
     last_validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     validated_objects: Mapped[int] = mapped_column(Integer, default=0)
     validated_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+
+
+class LocalDatasetGenerationJob(LocalBase):
+    """Durable, Fujin-owned materialization work for a LOCAL dataset.
+
+    The S3 provider only ever mounts the resulting source read-only.  A
+    separate LOCAL control worker owns writes and advances exactly one file at
+    a time, so restart cannot turn a partly generated sample into READY.
+    """
+    __tablename__ = "local_dataset_generation_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("local_datasets.id"), unique=True, index=True)
+    state: Mapped[str] = mapped_column(String(24), default="READY", index=True)
+    seed: Mapped[str] = mapped_column(String(255))
+    profile_json: Mapped[str] = mapped_column(Text)
+    next_file_index: Mapped[int] = mapped_column(Integer, default=0)
+    files_total: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_written: Mapped[int] = mapped_column(BigInteger, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class LocalS3Bucket(LocalBase):
