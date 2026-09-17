@@ -42,4 +42,5 @@ fi
 ## isolated provider network so boto3 and the OCI SDK need no LOCAL-specific
 ## endpoint alteration.
 exec python3 -m uvicorn app.fujin_local:app --host 0.0.0.0 --port 443 \
-  --ssl-certfile "$cert_file" --ssl-keyfile "$key_file"
+  --ssl-certfile "$cert_file" --ssl-keyfile "$key_file" \
+  --timeout-graceful-shutdown 90

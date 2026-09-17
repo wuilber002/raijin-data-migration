@@ -28,7 +28,10 @@ Validar o ciclo completo sem gerar custo de recuperação durante discovery e an
 3. Conferir que discovery não executou `GetObject`, `RestoreObject` ou `HeadObject` por objeto.
 4. Criar uma onda contendo todo o inventário e gerar o manifesto CSV imutável.
 5. Criar uma única S3 Batch Operations Restore job em modo Bulk.
-6. Acompanhar a job com backoff; depois acompanhar disponibilidade com listagens paginadas que incluam `RestoreStatus`.
+6. Acompanhar a job com backoff; depois confirmar que, após a evidência Batch,
+   o Raijin consulta apenas os objetos arquivados pendentes da própria wave por
+   `HeadObject`, respeitando os limites de taxa e concorrência. Não deve haver
+   varredura do prefixo para polling de restore.
 7. Durante o restore, reiniciar a VM uma vez e confirmar que a job e o estado local são retomados sem criar uma nova job de restore.
 8. Transferir os objetos restaurados em streaming para OCI e calcular SHA-256/MD5 durante a leitura.
 9. Durante a transferência, reiniciar a VM uma vez; confirmar retomada idempotente, sem marcar objetos incompletos como concluídos.

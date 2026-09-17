@@ -5,6 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from botocore.exceptions import ClientError
+import pytest
 from app.simulator_admin import SimulatorAdminError
 
 
@@ -25,11 +26,24 @@ from app.real_worker import (
     effective_multipart_part_size,
     expected_part_size,
     multipart_audit_matches,
+    reconcile_multipart_checkpoint,
+    multipart_upload_is_definitively_missing,
     multipart_parts_on_oci,
     reusable_multipart_part,
+    request_worker_shutdown,
     utcnow,
+    worker_shutdown_requested,
+    _worker_shutdown_requested,
     worker_can_reclaim_lease,
 )
+
+
+def test_worker_shutdown_request_is_a_cooperative_flag():
+    _worker_shutdown_requested.clear()
+    assert not worker_shutdown_requested()
+    request_worker_shutdown()
+    assert worker_shutdown_requested()
+    _worker_shutdown_requested.clear()
 
 
 class Part:
@@ -87,10 +101,48 @@ def test_multipart_parts_listing_accepts_the_oci_sdk_bare_list_shape():
     assert multipart_parts_on_oci(Client(), "ns", "bucket", "key", "upload") == {1: {"etag": "etag-1", "size": 64}}
 
 
+def test_multipart_parts_listing_accepts_fujin_json_mapping_shape():
+    class Client:
+        def list_multipart_upload_parts(self, *_args, **_kwargs):
+            return type("Response", (), {
+                "data": {"parts": [{"partNumber": 1, "etag": "etag-1", "size": 64}]},
+                "headers": {},
+            })()
+
+    assert multipart_parts_on_oci(Client(), "ns", "bucket", "key", "upload") == {1: {"etag": "etag-1", "size": 64}}
+
+
 def test_resume_skips_only_a_remote_part_with_persisted_sha_evidence():
     assert reusable_multipart_part({"etag": "etag", "size": 64}, {"sha256": "digest"}, 64)
     assert not reusable_multipart_part({"etag": "etag", "size": 63}, {"sha256": "digest"}, 64)
     assert not reusable_multipart_part({"etag": "etag", "size": 64}, {}, 64)
+
+
+def test_only_an_explicit_oci_not_found_may_discard_a_multipart_checkpoint():
+    import oci
+
+    missing = oci.exceptions.ServiceError(404, "MultipartUploadNotFound", {}, "gone")
+    unavailable = oci.exceptions.ServiceError(503, "ServiceUnavailable", {}, "retry later")
+    assert multipart_upload_is_definitively_missing(missing)
+    assert not multipart_upload_is_definitively_missing(unavailable)
+    assert not multipart_upload_is_definitively_missing(ConnectionError("temporary TLS failure"))
+
+
+def test_transient_part_listing_error_preserves_the_checkpoint_for_retry():
+    import oci
+
+    class UnavailableClient:
+        def list_multipart_upload_parts(self, *_args, **_kwargs):
+            raise oci.exceptions.ServiceError(503, "ServiceUnavailable", {}, "retry later")
+
+    with pytest.raises(RuntimeError, match="preserving it for retry"):
+        reconcile_multipart_checkpoint(UnavailableClient(), "ns", "bucket", "key", "upload")
+
+    class MissingClient:
+        def list_multipart_upload_parts(self, *_args, **_kwargs):
+            raise oci.exceptions.ServiceError(404, "MultipartUploadNotFound", {}, "gone")
+
+    assert reconcile_multipart_checkpoint(MissingClient(), "ns", "bucket", "key", "upload") is None
 
 
 def test_resumed_multipart_deep_audit_uses_part_evidence_without_source_reread():

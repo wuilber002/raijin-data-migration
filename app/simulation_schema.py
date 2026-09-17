@@ -19,7 +19,7 @@ from app.runtime_context import SIMULATOR_CONTRACT_VERSION
 from app.simulated_data import GENERATOR_VERSION
 
 
-SIMULATION_SCHEMA_VERSION = 8
+SIMULATION_SCHEMA_VERSION = 9
 DEFAULT_DATA_PHYSICAL_BUDGET_BYTES = 1_000_000_000_000
 DEFAULT_RETENTION_DAYS = 60
 DEFAULT_QUARANTINE_DAYS = 30
@@ -305,7 +305,11 @@ class VirtualObject(SimulationBase):
     restore_state: Mapped[str] = mapped_column(String(32), default="ARCHIVED", index=True)
     restore_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     restore_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    restore_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    restore_expiry_basis_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     restore_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    restore_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    restore_tier: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class SimulatedRestoreJob(SimulationBase):

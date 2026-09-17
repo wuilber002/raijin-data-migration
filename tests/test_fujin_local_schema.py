@@ -1,8 +1,10 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import Session
 
-from app.fujin_local_schema import migrate
+from app.fujin_local_schema import LocalRestore, migrate, repair_restore_expiries
 
 
 def test_local_catalogue_is_separate_from_simulation_and_raijin(tmp_path):
@@ -65,3 +67,49 @@ def test_schema_upgrade_clears_false_transferred_bytes_from_head_audits(tmp_path
             "SELECT operation, bytes_transferred FROM local_audit_events ORDER BY operation"
         )).all())
     assert values == {"S3_GET_OBJECT": 1000, "S3_HEAD_OBJECT": None}
+
+
+def test_restore_expiry_repair_has_dry_run_and_reopens_false_expiry(tmp_path):
+    url = f"sqlite+pysqlite:///{Path(tmp_path) / 'restore-repair.db'}"
+    migrate(url)
+    engine = create_engine(url)
+    available = datetime(2026, 9, 12, 16, 55, 26, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        session.add(LocalRestore(
+            bucket_id="bucket", object_key="object", state="EXPIRED",
+            requested_at=available, available_at=available, completed_at=available,
+            expiry_basis_at=available,
+            expires_at=datetime(2026, 9, 15, 16, 55, 26, tzinfo=timezone.utc),
+            retention_days=3, restore_tier="BULK",
+        ))
+        session.commit()
+
+    preview = repair_restore_expiries(
+        url, dry_run=True, now=datetime(2026, 9, 15, 19, 0, tzinfo=timezone.utc)
+    )
+    assert preview["changed_expiries"] == 1 and preview["reopened"] == 1
+    with Session(engine) as session:
+        assert session.query(LocalRestore).one().state == "EXPIRED"
+
+    applied = repair_restore_expiries(
+        url, dry_run=False, now=datetime(2026, 9, 15, 19, 0, tzinfo=timezone.utc)
+    )
+    assert applied["dry_run"] is False and applied["reopened"] == 1
+    with Session(engine) as session:
+        restored = session.query(LocalRestore).one()
+        assert restored.state == "AVAILABLE"
+        assert restored.expires_at.replace(tzinfo=timezone.utc) == datetime(
+            2026, 9, 16, 0, 0, tzinfo=timezone.utc
+        )
+
+    repeated = repair_restore_expiries(
+        url, dry_run=False, now=datetime(2026, 9, 15, 19, 0, tzinfo=timezone.utc)
+    )
+    assert repeated["changed_expiries"] == 0
+    assert repeated["reopened"] == 0
+    with Session(engine) as session:
+        restored = session.query(LocalRestore).one()
+        assert restored.state == "AVAILABLE"
+        assert restored.expires_at.replace(tzinfo=timezone.utc) == datetime(
+            2026, 9, 16, 0, 0, tzinfo=timezone.utc
+        )

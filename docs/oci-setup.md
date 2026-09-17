@@ -358,7 +358,7 @@ cliente.
 Crie ou associe uma policy de backup do boot volume, diária, com retenção
 inicial de 35 dias. Isso protege a VM e o disco contra exclusão ou falha
 acidental. Os backups lógicos e sua configuração fazem parte da instalação da
-plataforma e estão no [guia de instalação](installation.md).
+plataforma e estão no [guia de deploy e instalação](deployment.md).
 
 Na Console OCI:
 
@@ -378,7 +378,7 @@ Para um novo compartment de destino, acrescente os dois statements desse
 compartment (`inspect buckets` e `manage objects`). Para um novo compartment de
 *Secrets*, acrescente os dois statements de leitura. A atualização da
 configuração de runtime e o reinício controlado do serviço são descritos no
-[guia de instalação](installation.md).
+[guia de deploy e instalação](deployment.md).
 
 ## Anexo A — Lista de abreviaturas, siglas e termos
 

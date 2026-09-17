@@ -26,6 +26,7 @@ from app.backend_contracts import (
     WriteEvidence,
     LogicalTransferResult,
 )
+from app.aws_restore_semantics import s3_restore_expiry
 from app.simulation_schema import (
     FujinPayloadDataset,
     FujinPayloadFile,
@@ -122,6 +123,12 @@ def _expire_restore_if_needed(item: VirtualObject, now: datetime) -> bool:
         item.restore_state = "EXPIRED"
         return True
     return False
+
+
+def _restore_tier_rank(tier: str | None) -> int:
+    return {"BULK": 1, "STANDARD": 2, "EXPEDITED": 3}.get(
+        str(tier or "BULK").upper(), 0
+    )
 
 
 class SimulatedNetworkUnavailable(ConnectionError):
@@ -612,6 +619,7 @@ class SimulationEngine:
                 session.commit()
             elif available and item.restore_state != "AVAILABLE":
                 item.restore_state = "AVAILABLE"
+                item.restore_completed_at = item.restore_completed_at or item.restore_available_at
                 session.commit()
             return HeadObjectResult(
                 exists=True,
@@ -669,6 +677,7 @@ class SimulationEngine:
                 elif available:
                     if row.restore_state != "AVAILABLE":
                         row.restore_state = "AVAILABLE"
+                        row.restore_completed_at = row.restore_completed_at or row.restore_available_at
                         changed = True
                     if row.restore_expires_at:
                         ready.append(RestoreAvailabilityItem(
@@ -725,11 +734,38 @@ class SimulationEngine:
             if _expire_restore_if_needed(item, now):
                 item.restore_requested_at = None
                 item.restore_available_at = None
+                item.restore_completed_at = None
+                item.restore_expiry_basis_at = None
                 item.restore_expires_at = None
             if item.restore_requested_at:
+                if item.restore_state == "AVAILABLE":
+                    item.restore_retention_days = retention_days
+                    item.restore_tier = tier.upper()
+                    item.restore_expiry_basis_at = now
+                    item.restore_expires_at = s3_restore_expiry(now, retention_days)
+                    session.commit()
+                    return RestoreObjectResult(accepted=True, request_id=idempotency_key)
+                if int(item.restore_retention_days or retention_days) != retention_days:
+                    return RestoreObjectResult(
+                        accepted=False,
+                        already_in_progress=True,
+                        request_id=idempotency_key,
+                        error_code="RestoreAlreadyInProgress",
+                        error_message="Retention cannot change while restore is running",
+                    )
+                if _restore_tier_rank(tier) <= _restore_tier_rank(item.restore_tier):
+                    return RestoreObjectResult(
+                        accepted=False,
+                        already_in_progress=True,
+                        request_id=idempotency_key,
+                        error_code="RestoreAlreadyInProgress",
+                        error_message="Restore is already running at the same or a faster tier",
+                    )
+                item.restore_tier = tier.upper()
+                session.commit()
                 return RestoreObjectResult(
                     accepted=True,
-                    already_in_progress=item.restore_state != "AVAILABLE",
+                    already_in_progress=True,
                     request_id=idempotency_key,
                 )
             fault, attempt = self._matching_fault(
@@ -765,7 +801,11 @@ class SimulationEngine:
             available_at = requested_at + timedelta(hours=delay)
             item.restore_requested_at = requested_at
             item.restore_available_at = available_at
-            item.restore_expires_at = available_at + timedelta(days=retention_days)
+            item.restore_completed_at = None
+            item.restore_expiry_basis_at = available_at
+            item.restore_retention_days = retention_days
+            item.restore_tier = tier_name
+            item.restore_expires_at = s3_restore_expiry(item.restore_expiry_basis_at, retention_days)
             item.restore_state = "RESTORING"
             session.commit()
             return RestoreObjectResult(accepted=True, request_id=idempotency_key)
@@ -866,6 +906,8 @@ class SimulationEngine:
                 if _expire_restore_if_needed(item, now):
                     item.restore_requested_at = None
                     item.restore_available_at = None
+                    item.restore_completed_at = None
+                    item.restore_expiry_basis_at = None
                     item.restore_expires_at = None
                 already = bool(item.restore_requested_at)
                 fault, _ = self._matching_fault(
@@ -890,7 +932,29 @@ class SimulationEngine:
                         )
                     )
                     continue
-                if not already:
+                if already and item.restore_state == "AVAILABLE":
+                    item.restore_retention_days = job.retention_days
+                    item.restore_tier = tier_name
+                    item.restore_expiry_basis_at = now
+                    item.restore_expires_at = s3_restore_expiry(now, job.retention_days)
+                elif already and (
+                    int(item.restore_retention_days or job.retention_days) != job.retention_days
+                    or _restore_tier_rank(tier_name) <= _restore_tier_rank(item.restore_tier)
+                ):
+                    session.add(SimulatedRestoreObjectResult(
+                        job_id=job.id,
+                        object_id=item.id,
+                        object_key=key,
+                        version_id=item.version_id,
+                        accepted=False,
+                        already_in_progress=True,
+                        error_code="RestoreAlreadyInProgress",
+                        error_message="Incompatible overlapping restore",
+                    ))
+                    continue
+                elif already:
+                    item.restore_tier = tier_name
+                else:
                     delay = minimum + (maximum - minimum) * _fraction(
                         f"{scenario.seed}:restore:{item.content_object_id or item.object_key}"
                     )
@@ -899,8 +963,12 @@ class SimulationEngine:
                     requested_at = virtual_now(clock)
                     item.restore_requested_at = requested_at
                     item.restore_available_at = requested_at + timedelta(hours=delay)
-                    item.restore_expires_at = item.restore_available_at + timedelta(
-                        days=job.retention_days
+                    item.restore_completed_at = None
+                    item.restore_expiry_basis_at = item.restore_available_at
+                    item.restore_retention_days = job.retention_days
+                    item.restore_tier = tier_name
+                    item.restore_expires_at = s3_restore_expiry(
+                        item.restore_expiry_basis_at, job.retention_days
                     )
                     item.restore_state = "RESTORING"
                 session.add(

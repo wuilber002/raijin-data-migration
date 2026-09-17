@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import timezone
+
 from sqlalchemy import Engine, inspect, select, text
 from sqlalchemy.orm import Session
 
+from app.aws_restore_semantics import s3_restore_expiry
 from app.simulation_schema import (
     FujinPayloadDataset,
     FujinPayloadFile,
@@ -14,6 +17,7 @@ from app.simulation_schema import (
     SIMULATION_SCHEMA_VERSION,
     SimulationBase,
     SimulationSchemaRevision,
+    VirtualObject,
 )
 
 
@@ -186,4 +190,56 @@ def migrate(engine: Engine) -> int:
             ))
             session.commit()
         revision = 8
+    if revision < 9:
+        columns = {item["name"] for item in inspect(engine).get_columns("sim_virtual_objects")}
+        timestamp_type = "TIMESTAMP WITH TIME ZONE" if engine.dialect.name == "postgresql" else "DATETIME"
+        additions = {
+            "restore_completed_at": timestamp_type,
+            "restore_expiry_basis_at": timestamp_type,
+            "restore_retention_days": "INTEGER",
+            "restore_tier": "VARCHAR(16)",
+        }
+        with engine.begin() as connection:
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.execute(text(
+                        f"ALTER TABLE sim_virtual_objects ADD COLUMN {name} {definition}"
+                    ))
+            connection.execute(text(
+                "UPDATE sim_virtual_objects "
+                "SET restore_expiry_basis_at = restore_available_at "
+                "WHERE restore_expiry_basis_at IS NULL AND restore_available_at IS NOT NULL"
+            ))
+        # Prior revisions stored the old exact available+days timestamp but
+        # not the request parameters. Recover the integer retention before a
+        # later repair applies UTC-midnight semantics.
+        with Session(engine) as session:
+            for item in session.query(VirtualObject).filter(
+                VirtualObject.restore_available_at.is_not(None)
+            ):
+                if not item.restore_retention_days and item.restore_expires_at:
+                    available = item.restore_available_at
+                    expires = item.restore_expires_at
+                    if available.tzinfo is None:
+                        available = available.replace(tzinfo=timezone.utc)
+                    if expires.tzinfo is None:
+                        expires = expires.replace(tzinfo=timezone.utc)
+                    item.restore_retention_days = max(
+                        1, int(round((expires - available).total_seconds() / 86400))
+                    )
+                item.restore_tier = item.restore_tier or "BULK"
+                if item.restore_state == "AVAILABLE":
+                    item.restore_completed_at = item.restore_completed_at or item.restore_available_at
+                if item.restore_expiry_basis_at and item.restore_retention_days:
+                    item.restore_expires_at = s3_restore_expiry(
+                        item.restore_expiry_basis_at, item.restore_retention_days
+                    )
+            session.commit()
+        with Session(engine) as session:
+            session.add(SimulationSchemaRevision(
+                version=9,
+                description="AWS UTC-midnight restore expiry evidence",
+            ))
+            session.commit()
+        revision = 9
     return SIMULATION_SCHEMA_VERSION

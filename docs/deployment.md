@@ -1,8 +1,18 @@
-# Provisionamento e bootstrap
+# Deploy e instalação do Raijin
+
+Este é o procedimento canônico e único para provisionar, instalar, validar e
+atualizar o RAIJIN em uma VM OCI. Uma instalação nova inicia um plano de
+controle vazio: não importa PostgreSQL, catálogo Fujin, payloads ou filas de
+outro host. Para recuperar uma instalação existente, consulte o
+[runbook de recuperação](recovery-runbook.md).
+
+O deploy padrão inicia PostgreSQL, API, Raikou e Raiju em `REAL`. Fujin LOCAL é
+uma topologia opcional de pré-produção e só é ativada depois do aceite do
+runtime normal.
 
 ## Pré-requisitos do cliente
 
-- Subnet existente com saída HTTPS para AWS S3/STS, AWS Price List (`pricing.us-east-1.amazonaws.com`), OCI Vault/Object Storage e GitHub Releases.
+- Subnet existente com saída HTTPS para AWS S3/STS, AWS Price List (`pricing.us-east-1.amazonaws.com`), OCI Vault/Object Storage, repositório Git aprovado, registry de imagens e PyPI na primeira construção.
 - Acesso SSH à VM pela rede corporativa.
 - Permissões para executar o stack no OCI Resource Manager e criar os recursos selecionados.
 - Policy automática de backup do boot volume existente, ou autorização para criá-la/associá-la.
@@ -23,6 +33,150 @@ Depois do deploy, abra **Configurações → Inventário de buckets OCI** e use 
 O PostgreSQL é iniciado com `--shm-size=512m`. Esse limite evita que consultas de consolidação do Resultado final e da timeline esgotem o `/dev/shm` padrão de containers em sources com muitos segmentos de transferência.
 
 Uma origem com apenas cadastro, discovery, inventário ou ondas ainda não executadas pode ser excluída definitivamente, removendo também esses dados de preview. Depois que um worker assumir qualquer onda, a interface disponibiliza somente **Arquivar**: ela pausa ondas não concluídas, remove a origem da lista diária e mantém todo o histórico para auditoria.
+
+## Instalação em uma nova VM
+
+Conclua antes o [OCI Setup](oci-setup.md), incluindo VM, Instance Principal,
+Dynamic Group, policies, buckets OCI, Vault, Secrets e backup do boot volume.
+Para uma origem AWS real, conclua também [AWS Setup](aws-setup.md) ou o roteiro
+equivalente por [AWS CLI](aws-cli-setup.md). A conectividade OCI–AWS, rotas,
+DNS e firewall do caminho de dados são pré-requisitos do cliente.
+
+Registre estes valores antes de acessar o host:
+
+| Código | Finalidade |
+|---|---|
+| `<LINUX_USER>` / `<VM_HOST>` | Usuário Linux com chave SSH e IP/nome administrativo da VM. |
+| `<REPOSITORY_URL>` / `<RELEASE_REF>` | Repositório aprovado e tag ou commit imutável aprovado. |
+| `<OBJECT_STORAGE_NAMESPACE>` | Namespace Object Storage do tenancy. |
+| `<SECRETS_COMPARTMENT_OCID>` | Compartment dos Secrets da plataforma. |
+| `<DESTINATION_COMPARTMENT_OCID>` | Compartment dos buckets OCI autorizados. |
+| `<POSTGRES_SECRET_OCID>` | Secret `postgres_password`. |
+| `<SIMULATION_POSTGRES_SECRET_OCID>` | Secret `simulation_postgres_password`. |
+
+### 1. Preparar o host
+
+Conecte-se com a chave SSH aprovada e instale as dependências de bootstrap:
+
+```bash
+ssh <LINUX_USER>@<VM_HOST>
+sudo dnf install -y git podman
+git --version
+podman --version
+```
+
+Não abra TCP/8080 no NSG, security list ou firewall. A interface é publicada
+somente em `127.0.0.1:8080` e será acessada pelo túnel SSH.
+
+### 2. Criar a configuração de runtime OCI
+
+O arquivo contém somente OCIDs e metadados; nunca valores de senha, access key
+ou outro conteúdo de Secret:
+
+```bash
+sudo install -d -m 0755 /etc/s3-oci-migration
+sudo vi /etc/s3-oci-migration/oci-runtime.json
+```
+
+Substitua todos os valores entre `<...>` e proteja o arquivo:
+
+```json
+{
+  "object_storage_namespace": "<OBJECT_STORAGE_NAMESPACE>",
+  "object_storage_endpoint_url": "",
+  "object_storage_ca_bundle_path": "",
+  "destination_compartment_names": {
+    "<DESTINATION_COMPARTMENT_OCID>": "<DESTINATION_COMPARTMENT_NAME>"
+  },
+  "secret_ocids": {
+    "postgres_password": "<POSTGRES_SECRET_OCID>",
+    "simulation_postgres_password": "<SIMULATION_POSTGRES_SECRET_OCID>"
+  },
+  "secrets_compartment_ocid": "<SECRETS_COMPARTMENT_OCID>",
+  "secret_compartment_ocids": ["<SECRETS_COMPARTMENT_OCID>"]
+}
+```
+
+```bash
+sudo chmod 0600 /etc/s3-oci-migration/oci-runtime.json
+```
+
+Deixe endpoint e CA vazios para OCI público. Em OCI privado, informe a URL
+HTTPS e o bundle da CA interna. Para Secrets em compartments adicionais,
+inclua cada OCID em `secret_compartment_ocids` e confirme as policies OCI.
+
+### 3. Materializar uma release imutável
+
+O bootstrap exige `/opt/s3-oci-migration/release`. A primeira construção usa
+Podman no host; por isso exige acesso ao repositório, registries e PyPI. Um
+artefato offline completo ainda não é um caminho de instalação suportado.
+
+```bash
+sudo install -d -m 0755 /opt/s3-oci-migration
+sudo git clone '<REPOSITORY_URL>' /opt/s3-oci-migration/release
+sudo git -C /opt/s3-oci-migration/release checkout --detach '<RELEASE_REF>'
+sudo git -C /opt/s3-oci-migration/release rev-parse HEAD
+```
+
+Registre o hash retornado como evidência da instalação.
+
+### 4. Bootstrap e validação técnica
+
+```bash
+sudo /opt/s3-oci-migration/release/scripts/bootstrap.sh
+sudo systemctl enable --now s3-oci-migration.service
+
+sudo systemctl is-active s3-oci-migration.service
+curl --fail --silent http://127.0.0.1:8080/healthz
+curl --fail --silent http://127.0.0.1:8080/api/runtime
+sudo podman ps --format '{{.Names}} | {{.Status}}'
+sudo systemctl list-timers 's3-oci-*' --all
+```
+
+O bootstrap lê os Secrets pelo Instance Principal, prepara PostgreSQL
+persistente, rede Podman, API, Raikou, Raiju, launchers e timers. Em falha,
+registre logs sem expor Secrets:
+
+```bash
+sudo journalctl -u s3-oci-migration.service -n 200 --no-pager
+```
+
+### 5. Aceite funcional inicial
+
+Abra o túnel na estação administrativa:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 <LINUX_USER>@<VM_HOST>
+```
+
+Abra `http://127.0.0.1:8080`. Em **Configurações**, atualize o inventário de
+buckets OCI, cadastre a conexão AWS por Secret e execute o pré-check. Faça
+discovery de uma source de teste e valide eventos, fila e observabilidade. O
+pré-check não restaura, lista nem baixa objetos AWS.
+
+Se o bucket não aparecer ou o pré-check falhar, confirme Dynamic Group, policy
+e compartment corretos, propagação IAM, nome exato do bucket e os OCIDs do
+arquivo `oci-runtime.json`.
+
+### 6. Fujin LOCAL opcional
+
+Fujin LOCAL mantém o Raijin em `REAL` e fornece endpoints privados compatíveis
+com AWS/OCI. Antes de ativá-lo, provisione e monte o volume em
+`/var/lib/s3-oci-migration/fujin-payloads`, gere `oci-runtime-local.json` e
+execute o [runbook de aceite Fujin LOCAL](../operacional/runbook-fujin-local-acceptance.md).
+
+`s3-oci-start-fujin-local-runtime` é uma transição de topologia: faça drain e
+parada controlada do runtime normal antes de executá-lo. Nunca faça essa troca
+durante transferência ativa.
+
+### 7. Atualizar uma instalação existente
+
+Atualização não é instalação nova. Em janela operacional, preserve PostgreSQL
+e `/var/lib/s3-oci-migration`, prepare a release em diretório separado, valide
+a imagem, mantenha a release anterior para rollback e faça drain antes da
+ativação. Não use `s3-oci-stop-runtime` durante cópias: ele remove a topologia
+ativa. Em caso de falha ou restauração de backup, siga o
+[runbook de recuperação](recovery-runbook.md).
 
 ## Acesso local à interface
 
@@ -97,10 +251,11 @@ expõe a porta local. Não há Secret Fujin adicional, e nada é entregue ao
 Raijin.
 
 Na VM Oracle Linux, o bootstrap também instala o launcher equivalente ao
-perfil Compose. Depois de drenar a execução corrente, execute
-`sudo /usr/local/sbin/s3-oci-stop-runtime`, gere o perfil OCI LOCAL e execute
-`sudo /usr/local/sbin/s3-oci-start-fujin-local-runtime`. O launcher recria o
-PostgreSQL durável quando ele foi removido pela parada controlada.
+perfil Compose. Depois de drenar a execução corrente, faça uma parada
+controlada, gere o perfil OCI LOCAL e execute
+`sudo /usr/local/sbin/s3-oci-start-fujin-local-runtime`. O launcher recusa
+substituir containers ativos e recria o PostgreSQL durável somente quando ele
+foi removido pela parada controlada.
 Ele sobe Raijin em `REAL`, os workers, Fujin, DNS privado e o gateway em
 loopback; não existe modo LOCAL no Raijin.
 
@@ -166,7 +321,7 @@ informadas antes de repetir a chamada.
 
 O painel de saúde também mostra o estado do serviço systemd da plataforma, dos containers PostgreSQL e aplicação, do timer de backup lógico e do timer que atualiza esse estado. O host gera um pequeno JSON em `/run/s3-oci-migration` a cada minuto; o container web apenas o lê, sem acesso ao socket Podman, systemd ou privilégios de host.
 
-O stack anexa o Block Volume `*-fujin-payloads` de 15 TB como `/dev/oracleoci/oraclevdb`. O bootstrap o formata como XFS apenas se estiver vazio e o monta em `/var/lib/s3-oci-migration/fujin-payloads` com permissões `0700`. Esse diretório só é bind-mounted no container Fujin durante **SIMULATION**; PostgreSQL, Raijin workers, API e **REAL** não o recebem. Ao aplicar a alteração em uma VM já existente, execute uma vez `sudo /opt/s3-oci-migration/release/scripts/bootstrap.sh` após a attachment ficar `ATTACHED`.
+O stack anexa o Block Volume `*-fujin-payloads` de 15 TB como `/dev/oracleoci/oraclevdb`. O bootstrap o formata como XFS apenas se estiver vazio e o monta em `/var/lib/s3-oci-migration/fujin-payloads` com permissões `0700`. Esse diretório é bind-mounted somente no container Fujin da topologia **LOCAL**; PostgreSQL, API e workers Raijin nunca o recebem. Em operação REAL normal, nenhum container o monta. LOCAL mantém RAIJIN em REAL, mas direciona seus SDKs aos endpoints privados do Fujin. Ao aplicar a alteração em uma VM já existente, execute uma vez `sudo /opt/s3-oci-migration/release/scripts/bootstrap.sh` após a attachment ficar `ATTACHED`.
 
 Embora o boot volume seja provisionado com 500 GB, a imagem OCI pode iniciar com a partição LVM ainda no tamanho original. No primeiro boot, o cloud-init expande a partição e o PV e aloca todos os extents livres do volume group ao filesystem raiz. Assim, o Raijin — instalado no boot volume — utiliza praticamente toda a capacidade disponível, sem competir com o volume dedicado de 15 TB do Fujin. A rotina é idempotente e não reduz nem altera o filesystem em execuções posteriores.
 
@@ -196,9 +351,12 @@ Para S3 Inventory grande, escolha **Usar arquivo de inventário** e informe o UR
 
 Em caso de desligamento, reinicie `s3-oci-migration.service`. PostgreSQL mantém inventário, fila, leases e evidências; tarefas com lease expirado são reassumidas pelo worker. Para uploads grandes, o `upload_id` multipart OCI e as partes já aceitas ficam no PostgreSQL: após reinício, o worker consulta essas partes e envia somente as faltantes. Discovery persiste, de forma atômica, o inventário e o checkpoint a cada até dez páginas S3; após uma interrupção, retoma sem relistar páginas confirmadas e pode repetir no máximo nove páginas ainda não confirmadas. O backup lógico diário é complementar ao backup de volume OCI; siga o [runbook de recuperação](recovery-runbook.md) para testar ou executar uma restauração controlada.
 
-## Instalação de release
+## Componentes instalados e retenção de backup
 
-O procedimento final baixa uma release versionada do GitHub e verifica o checksum antes da instalação. A release inclui imagens Docker e dependências; a VM não depende de Docker Hub, PyPI ou `apt` durante a instalação ou execução.
+O procedimento de instalação de release está na seção
+[Materializar uma release imutável](#3-materializar-uma-release-imutável).
+O bootstrap constrói a imagem com Podman no host; portanto, a primeira
+instalação exige acesso aos registries e dependências declarados acima.
 
 Na Oracle Linux, o bootstrap utiliza Podman nativo e registra `s3-oci-migration.service` no systemd. Os containers `s3-oci-postgres` e `s3-oci-app` usam volumes persistentes no boot volume. A API é publicada apenas em `127.0.0.1:8080`.
 

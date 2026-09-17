@@ -54,6 +54,8 @@ if [[ -f "$cpu_state_file" ]]; then
   fi
 fi
 printf '%s %s\n' "$cpu_total" "$cpu_idle" >"$cpu_state_file"
+cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 0)
+[[ "$cpu_count" =~ ^[1-9][0-9]*$ ]] || cpu_count=0
 
 memory_total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
 memory_available_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
@@ -61,9 +63,10 @@ memory_used_kb=$((memory_total_kb - memory_available_kb))
 memory_percent=$(awk -v total="$memory_total_kb" -v used="$memory_used_kb" 'BEGIN { printf "%.2f", used*100/total }')
 
 temporary_file=$(mktemp "$runtime_root/status.XXXXXX")
-printf '{"available":true,"generated_at":"%s","resources":{"cpu_percent":%s,"memory_total_bytes":%s,"memory_used_bytes":%s,"memory_percent":%s},"services":{"migration_systemd":"%s","postgres_container":"%s","app_container":"%s","governance_worker":"%s","transfer_worker":"%s","simulator_container":"%s","postgres_backup_timer":"%s","platform_status_timer":"%s"},"last_postgres_backups":{"REAL":%s,"SIMULATION":%s}}\n' \
+printf '{"available":true,"generated_at":"%s","resources":{"cpu_percent":%s,"cpu_count":%s,"memory_total_bytes":%s,"memory_used_bytes":%s,"memory_percent":%s},"services":{"migration_systemd":"%s","postgres_container":"%s","app_container":"%s","governance_worker":"%s","transfer_worker":"%s","simulator_container":"%s","postgres_backup_timer":"%s","platform_status_timer":"%s"},"last_postgres_backups":{"REAL":%s,"SIMULATION":%s}}\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   "$cpu_percent" \
+  "$cpu_count" \
   "$((memory_total_kb * 1024))" \
   "$((memory_used_kb * 1024))" \
   "$memory_percent" \

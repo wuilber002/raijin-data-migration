@@ -72,6 +72,9 @@ services:
     build: *raijin-build
     profiles: ["local"]
     restart: unless-stopped
+    # A release must let an in-flight control call settle its durable task
+    # state instead of converting a normal SIGTERM into a SIGKILL incident.
+    stop_grace_period: 2m
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,6 +101,10 @@ services:
     build: *raijin-build
     profiles: ["local"]
     restart: unless-stopped
+    # Raiju observes SIGTERM at each committed object/multipart-part boundary.
+    # Two minutes leave room for the active SDK call and the PostgreSQL
+    # checkpoint to settle before Podman considers forceful termination.
+    stop_grace_period: 2m
     depends_on:
       postgres:
         condition: service_healthy
@@ -124,6 +131,9 @@ services:
     build: *raijin-build
     profiles: ["local"]
     restart: unless-stopped
+    # Keep the provider available long enough for a Raiju to finish or safely
+    # checkpoint its current request during a coordinated rollout.
+    stop_grace_period: 2m
     environment:
       FUJIN_LOCAL_DATABASE_URL: sqlite+pysqlite:////var/lib/fujin-local/catalog.db
       FUJIN_LOCAL_PAYLOAD_ROOT: /var/lib/fujin-local/payloads

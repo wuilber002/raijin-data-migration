@@ -14,8 +14,10 @@ import uuid
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, create_engine, inspect
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
+from app.aws_restore_semantics import s3_restore_expiry, utc_datetime
 
-LOCAL_SCHEMA_VERSION = 17
+
+LOCAL_SCHEMA_VERSION = 19
 
 
 def utcnow() -> datetime:
@@ -154,7 +156,11 @@ class LocalRestore(LocalBase):
     state: Mapped[str] = mapped_column(String(24), default="IN_PROGRESS", index=True)
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    expiry_basis_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    retention_days: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    restore_tier: Mapped[str] = mapped_column(String(16), default="BULK", nullable=False)
     request_attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
@@ -197,6 +203,10 @@ class LocalMultipartUpload(LocalBase):
     source_dataset_id: Mapped[str | None] = mapped_column(ForeignKey("local_datasets.id"), nullable=True, index=True)
     source_relative_path: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Expiry is an idle timeout, not a fixed lifetime.  Large transfers may
+    # legitimately span more than one day and must retain their OCI upload id
+    # and accepted-part evidence while they keep making progress.
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
@@ -266,6 +276,7 @@ def migrate(database_url: str) -> None:
         "local_multipart_uploads": {
             "source_dataset_id": "VARCHAR(36)",
             "source_relative_path": "VARCHAR(2048)",
+            "last_activity_at": "TIMESTAMP",
         },
         "local_multipart_parts": {
             "source_verified": "BOOLEAN NOT NULL DEFAULT 0",
@@ -277,12 +288,45 @@ def migrate(database_url: str) -> None:
             for name, definition in columns.items():
                 if name not in existing:
                     connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
-    expected_restore_columns = {"request_attempts": "INTEGER NOT NULL DEFAULT 0", "last_error": "VARCHAR(512)"}
+        # Legacy uploads used a fixed one-day expiry.  Seed the new idle
+        # marker from creation time; successful part/list operations will
+        # advance it once the new Fujin release is running.
+        connection.exec_driver_sql(
+            "UPDATE local_multipart_uploads "
+            "SET last_activity_at = created_at "
+            "WHERE last_activity_at IS NULL"
+        )
+    expected_restore_columns = {
+        "request_attempts": "INTEGER NOT NULL DEFAULT 0",
+        "last_error": "VARCHAR(512)",
+        "completed_at": "TIMESTAMP",
+        "expiry_basis_at": "TIMESTAMP",
+        "retention_days": "INTEGER NOT NULL DEFAULT 1",
+        "restore_tier": "VARCHAR(16) NOT NULL DEFAULT 'BULK'",
+    }
     existing_restore_columns = {column["name"] for column in inspect(engine).get_columns("local_restores")}
+    retention_was_missing = "retention_days" not in existing_restore_columns
+    expiry_basis_was_missing = "expiry_basis_at" not in existing_restore_columns
+    completed_was_missing = "completed_at" not in existing_restore_columns
+    tier_was_missing = "restore_tier" not in existing_restore_columns
     with engine.begin() as connection:
         for name, definition in expected_restore_columns.items():
             if name not in existing_restore_columns:
                 connection.exec_driver_sql(f"ALTER TABLE local_restores ADD COLUMN {name} {definition}")
+    if any((retention_was_missing, expiry_basis_was_missing, completed_was_missing, tier_was_missing)):
+        # Legacy Fujin stored an exact ``available_at + N days`` duration.
+        # Recover N before the explicit repair rounds expiry to UTC midnight.
+        with Session(engine) as session:
+            for restore in session.query(LocalRestore):
+                if retention_was_missing or not restore.retention_days:
+                    delta = utc_datetime(restore.expires_at) - utc_datetime(restore.available_at)
+                    restore.retention_days = max(1, int(round(delta.total_seconds() / 86400)))
+                restore.restore_tier = restore.restore_tier or "BULK"
+                if expiry_basis_was_missing or restore.expiry_basis_at is None:
+                    restore.expiry_basis_at = restore.available_at
+                if restore.state != "IN_PROGRESS" and (completed_was_missing or restore.completed_at is None):
+                    restore.completed_at = restore.completed_at or restore.available_at
+            session.commit()
     expected_dataset_columns = {
         "last_validated_at": "TIMESTAMP", "last_validation_error": "TEXT",
         "validated_objects": "INTEGER NOT NULL DEFAULT 0", "validated_bytes": "BIGINT NOT NULL DEFAULT 0",
@@ -310,3 +354,62 @@ def migrate(database_url: str) -> None:
         if session.get(LocalSchemaRevision, LOCAL_SCHEMA_VERSION) is None:
             session.add(LocalSchemaRevision(version=LOCAL_SCHEMA_VERSION))
             session.commit()
+
+
+def repair_restore_expiries(database_url: str, *, dry_run: bool = True,
+                            now: datetime | None = None) -> dict:
+    """Recalculate legacy/current LOCAL restores using documented S3 semantics."""
+    migrate(database_url)
+    repair_now = utc_datetime(now or utcnow())
+    repair_engine = create_engine(database_url)
+    changed = reopened = expired = 0
+    earliest_before = earliest_after = latest_before = latest_after = None
+    with Session(repair_engine) as session:
+        rows = list(session.query(LocalRestore).order_by(LocalRestore.id))
+        for restore in rows:
+            before = utc_datetime(restore.expires_at)
+            basis = restore.expiry_basis_at or restore.available_at
+            after = s3_restore_expiry(basis, restore.retention_days)
+            earliest_before = min(filter(None, [earliest_before, before]), default=before)
+            latest_before = max(filter(None, [latest_before, before]), default=before)
+            earliest_after = min(filter(None, [earliest_after, after]), default=after)
+            latest_after = max(filter(None, [latest_after, after]), default=after)
+            if before != after:
+                changed += 1
+            if repair_now < utc_datetime(restore.available_at):
+                corrected_state = "IN_PROGRESS"
+                corrected_completed_at = None
+            elif repair_now < after:
+                corrected_state = "AVAILABLE"
+                corrected_completed_at = restore.completed_at or restore.available_at
+                if restore.state == "EXPIRED":
+                    reopened += 1
+            else:
+                corrected_state = "EXPIRED"
+                corrected_completed_at = restore.completed_at or restore.available_at
+                expired += 1
+            restore.expires_at = after
+            restore.state = corrected_state
+            restore.completed_at = corrected_completed_at
+        report = {
+            "dry_run": dry_run,
+            "restores": len(rows),
+            "changed_expiries": changed,
+            "reopened": reopened,
+            "expired": expired,
+            "earliest_before": earliest_before.isoformat() if earliest_before else None,
+            "latest_before": latest_before.isoformat() if latest_before else None,
+            "earliest_after": earliest_after.isoformat() if earliest_after else None,
+            "latest_after": latest_after.isoformat() if latest_after else None,
+        }
+        if dry_run:
+            session.rollback()
+        else:
+            session.add(LocalAuditEvent(
+                request_id=f"fujin-repair-{uuid.uuid4().hex}",
+                operation="LOCAL_RESTORE_EXPIRY_REPAIRED",
+                status_code=200,
+                detail=str(report),
+            ))
+            session.commit()
+    return report

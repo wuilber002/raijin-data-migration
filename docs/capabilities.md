@@ -4,6 +4,13 @@ Este é o inventário vivo dos dois programas que compõem a plataforma. Toda
 entrega que acrescente, remova ou altere um fluxo operacional deve atualizar
 este documento no mesmo commit.
 
+O inventário descreve somente comportamento implementado e validado. Planos
+futuros permanecem em `operacional/` e não devem ser promovidos a capacidade
+até terem código, testes e evidência operacional. A revisão de uma mudança de
+produto deve atualizar esta página, o guia de deploy quando houver impacto no
+host/runtime e o runbook de recuperação quando houver impacto em dados ou
+retomada.
+
 ## [RAIJIN](https://en.wikipedia.org/wiki/Raijin) — plano de controle de migração
 
 <img src="../images/raijin-oracle-about.png" alt="Logo do RAIJIN" width="280">
@@ -47,6 +54,13 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   de conclusão persistidos no bucket de controle.
 - Registra tentativa, aceite AWS, Batch job, polling, disponibilidade parcial e
   disponibilidade completa do restore.
+- Depois da evidência Batch, consulta individualmente com `HeadObject` somente
+  os objetos arquivados ainda pendentes. O cabeçalho `x-amz-restore` é a fonte
+  de verdade para `ongoing-request` e para a expiração individual da cópia
+  temporária; não usa SQS, EventBridge nem polling por listagem ampla.
+- Persiste `restore_expires_at` por objeto. A expiração nunca é inferida pela
+  hora estimada de restore: ela vem da resposta observada do S3 e alimenta a
+  priorização, o risco de expiração e o relatório da wave.
 - Importa a evidência individual do completion report e apresenta no relatório
   da wave o código HTTP/AWS, a quantidade afetada, chaves de exemplo, causa e
   ação recomendada. `RestoreAlreadyInProgress` é reconhecido como aceite
@@ -86,9 +100,13 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   memória. Somente waves sem submissão AWS podem ser
   reempacotadas ou ter horários alterados; Batch Jobs aceitos permanecem como
   evidência e não são recriados automaticamente.
-- A transferência interna inicia com cinco **Raijus**, aumenta ou reduz a
-  concorrência de cópia conforme a banda medida
-  e nunca fica abaixo desse piso quando houver objetos suficientes.
+- A transferência inicia no piso de cinco **Raijus** e, após restart ou nova
+  lane, limita o bootstrap ao menor coorte produtivo conhecido (oito por
+  padrão). O autoscaler usa taxa **agregada** em janelas de 20 s: só testa mais
+  um Raiju depois de três amostras abaixo de 95% do limite, espera a acomodação
+  e aprova o crescimento apenas se houver ganho marginal robusto. Entre 95% e
+  97% a lane está no alvo; em 97% ou mais mantém os streams produtivos. Tetos
+  de host, memória e pool PostgreSQL são limites de admissão, não metas.
 - O **Raikou** é o worker de governança: executa discovery, planejamento, S3
   Batch Operations, polling de restore, reconciliação e auditorias. O **Raiju**
   é o worker operacional de transferência e retomada multipart.
@@ -193,8 +211,13 @@ as medições mais recentes. O agendamento de restore é obrigatório nesse modo
 O **inventário de bordo**, acessível em **Queue**, apresenta:
 
 - linha do tempo colorida com períodos planejados e observados de fila, restore,
-  margem operacional e transferência; o hover de cada bloco mostra tipo,
-  data/hora prevista ou iniciada e tempo decorrido/esperado;
+  margem operacional e transferência. O rótulo laranja mostra o avanço global
+  do trabalho da wave (restore + transferência), mas usa toda a janela visual
+  contígua para não ser truncado por uma fase curta;
+- o hover do restore laranja e do tempo economizado verde é unificado por wave:
+  mostra estado, contagens de disponibilidade e transferência, tier e janela
+  operacional, duração observada ou prevista, economia confirmada e expiração
+  pendente. Marcos cronológicos permanecem na tabela abaixo da timeline;
 - legenda dos estados;
 - lista de waves com estado e datas de início e término;
 - histórico persistente, consultável depois da conclusão da source.
@@ -303,6 +326,10 @@ com 100 TB lógicos e 640 mil objetos sem persistir payload.
   fora do prazo ou nunca acontecer.
 - Cada objeto manterá os horários simulados de solicitação, primeiro momento
   observado como disponível e expiração da cópia restaurada.
+- A configuração de disponibilização do bucket Fujin define tempo mínimo até o
+  primeiro arquivo, variação inicial e faixa de liberação gradual. A alteração
+  vale somente para solicitações novas; restores já solicitados preservam os
+  horários sorteados no momento da submissão.
 - O *governance worker* real executará o polling adaptativo. O FUJIN apenas
   responderá ao `Describe`, `List` ou `Head`; não alterará diretamente a wave,
   o objeto ou a task no banco do RAIJIN.
@@ -464,6 +491,6 @@ com testes de escala e operação real:
 - [Arquitetura](architecture.md)
 - [Conexões AWS](aws-connections.md)
 - [Estimativas de custo](cost-estimates.md)
-- [Deployment e operação](deployment.md)
+- [Deploy e instalação](deployment.md)
 - [Recuperação](recovery-runbook.md)
 - [Plano de validação](validation-test-plan.md)

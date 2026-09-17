@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -54,6 +55,77 @@ def test_s3control_rest_xml_manifest_contract():
         b'</Location></Manifest></CreateJobRequest>'
     ))
     assert asyncio.run(module.s3control_manifest_location(request)) == "arn:aws:s3:::control/manifest.csv"
+
+
+def test_sqlite_catalogue_uses_wal_and_bounded_busy_wait(tmp_path, monkeypatch):
+    monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'wal.db'}")
+    monkeypatch.setenv("FUJIN_LOCAL_SQLITE_BUSY_TIMEOUT_SECONDS", "30")
+    import app.fujin_local as module
+    module = importlib.reload(module)
+    try:
+        with module.engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA journal_mode").scalar().lower() == "wal"
+            assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar() == 30000
+            assert connection.exec_driver_sql("PRAGMA synchronous").scalar() == 1
+        assert module.SQLITE_LOCK_RETRY_ATTEMPTS == 3
+        assert module.sqlite_locked(sqlite3.OperationalError("database is locked"))
+    finally:
+        module.engine.dispose()
+
+
+def test_data_plane_provider_state_is_short_cached_and_admin_invalidation_is_immediate(tmp_path, monkeypatch):
+    monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'provider-cache.db'}")
+    monkeypatch.setenv("FUJIN_LOCAL_PROVIDER_STATE_CACHE_SECONDS", "30")
+    import app.fujin_local as module
+    module = importlib.reload(module); module.startup()
+    try:
+        with module.SessionLocal() as session:
+            module.cloud_provider_state(session, "AWS").enabled = True
+            session.commit()
+        assert module.data_plane_provider_enabled("AWS") is True
+        assert module.data_plane_provider_enabled("AWS") is True
+        assert module.data_plane_metrics_snapshot()["provider_state_cache_hits"] == 1
+        with module.SessionLocal() as session:
+            module.cloud_provider_state(session, "AWS").enabled = False
+            session.commit()
+        module.invalidate_data_plane_provider_cache("AWS")
+        assert module.data_plane_provider_enabled("AWS") is False
+        assert module.operational_metrics(_request("GET", "/api/local/operational-metrics"))["data_plane"]["provider_state_cache_entries"] == 1
+    finally:
+        module.engine.dispose()
+
+
+def test_data_plane_guard_returns_retryable_503_when_catalogue_checkout_is_unavailable(monkeypatch):
+    import app.fujin_local as module
+
+    monkeypatch.setattr(module, "data_plane_provider_enabled", lambda _provider: (_ for _ in ()).throw(
+        module.SQLAlchemyTimeoutError("pool", None, None)
+    ))
+
+    async def next_handler(_request):
+        raise AssertionError("provider handler must not run while the catalogue is unavailable")
+
+    response = asyncio.run(module.local_data_plane_guard(_request("HEAD", "/bucket/key"), next_handler))
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"
+
+
+def test_hot_multipart_cleanup_does_not_delete_audit_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'retention.db'}")
+    import app.fujin_local as module
+    module = importlib.reload(module); module.startup()
+    try:
+        with module.SessionLocal() as session:
+            old = module.utcnow() - module.timedelta(hours=module.FUJIN_LOCAL_AUDIT_SUCCESS_RETENTION_HOURS + 1)
+            session.add(module.LocalAuditEvent(request_id="retention-old", operation="OCI_UPLOAD_PART", status_code=200, created_at=old))
+            session.commit()
+            assert module.cleanup_expired_multipart_uploads(session, now=module.utcnow()) == 0
+            assert session.get(module.LocalAuditEvent, 1) is not None
+            module.cleanup_expired_multipart_uploads(session, now=module.utcnow(), include_audit_retention=True)
+            session.commit()
+            assert session.get(module.LocalAuditEvent, 1) is None
+    finally:
+        module.engine.dispose()
 
 
 def test_aws_chunked_object_body_removes_framing_and_validates_crc32():
@@ -415,13 +487,73 @@ def test_s3_bucket_logical_multiplier_projects_independent_keys_without_copying_
         ))
         assert restore.status_code == 202
         row = session.scalar(module.select(module.LocalRestore).where(module.LocalRestore.object_key == logical))
-        assert row is not None and row.expires_at - row.available_at == timedelta(days=2)
+        assert row is not None and module.utc_datetime(row.expires_at) == module.s3_restore_expiry(row.available_at, 2)
         assert module.bucket_dataset_object(bucket, session.get(module.LocalDataset, dataset["id"]), logical)["relative_path"] == "snapshot/a.bin"
 
         overview = module.list_s3_buckets(admin, session=session)[0]
         assert overview["logical_multiplier"] == 3
         assert overview["physical_objects"] == 2 and overview["logical_objects"] == 6
         assert overview["physical_bytes"] == 7 and overview["logical_bytes"] == 21
+    finally:
+        session.close()
+
+
+def test_s3_restore_policy_update_only_affects_future_requests(tmp_path, monkeypatch):
+    root = Path(tmp_path) / "payloads"
+    package = root / "snapshot"
+    package.mkdir(parents=True)
+    payload = b"restore-policy"
+    (package / "object.bin").write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'policy.db'}")
+    monkeypatch.setenv("FUJIN_LOCAL_PAYLOAD_ROOT", str(root))
+
+    import app.fujin_local as module
+    module = importlib.reload(module); module.startup(); session = module.SessionLocal()
+    try:
+        admin = _request("POST", "/api/local")
+        dataset = _create_ready_dataset(module, admin, module.DatasetCreate(
+            name="policy-dataset", snapshot_id="policy-snapshot", repository_relative_path="snapshot",
+            quota_bytes=len(payload), manifest={"objects": [{
+                "key": "object.bin", "relative_path": "snapshot/object.bin", "size_bytes": len(payload),
+                "sha256": digest, "etag": digest,
+            }]},
+        ), session)
+        created = module.create_s3_bucket(admin, module.S3BucketCreate(
+            name="policy-source", dataset_id=dataset["id"], restore_policy={
+                "minimum_delay_hours": 2, "random_variation_hours": 0,
+                "gradual_window_min_hours": 0, "gradual_window_max_hours": 0,
+            },
+        ), session)
+        bucket = session.get(module.LocalS3Bucket, created["id"])
+        original = module.request_restore(
+            session, bucket, "already-requested.bin", json.loads(bucket.restore_policy_json), module.utcnow(),
+        )
+        original_available_at, original_expires_at = original.available_at, original.expires_at
+        session.commit()
+
+        changed = module.update_s3_restore_policy(
+            bucket.id,
+            module.S3RestorePolicyUpdate(restore_policy={
+                "minimum_delay_hours": 12, "random_variation_hours": 1,
+                "gradual_window_min_hours": 1, "gradual_window_max_hours": 2,
+            }),
+            _request("PUT", f"/api/local/s3-buckets/{bucket.id}/restore-policy"), session,
+        )
+        assert changed["changed"] is True
+        assert changed["effective_for"] == "future_restore_requests_only"
+        preserved = session.get(module.LocalRestore, original.id)
+        assert (module.as_utc(preserved.available_at), module.as_utc(preserved.expires_at)) == (
+            module.as_utc(original_available_at), module.as_utc(original_expires_at),
+        )
+        future = module.request_restore(
+            session, bucket, "future-request.bin", json.loads(bucket.restore_policy_json), module.utcnow(),
+        )
+        assert 12 * 3600 <= (module.as_utc(future.available_at) - module.as_utc(future.requested_at)).total_seconds() <= 13 * 3600
+        evidence = session.scalar(module.select(module.LocalAuditEvent).where(
+            module.LocalAuditEvent.operation == "LOCAL_S3_RESTORE_POLICY_UPDATED"
+        ))
+        assert evidence and "existing restores retain" in evidence.detail
     finally:
         session.close()
 
@@ -458,7 +590,7 @@ def test_local_s3_restore_batch_and_oci_reference(tmp_path, monkeypatch):
         restore = asyncio.run(module.s3_data_plane(_request("PUT", "/object.bin", headers, b"restore=", restore_body), "object.bin", session))
         assert restore.status_code == 202
         restore_row = session.scalar(module.select(module.LocalRestore).where(module.LocalRestore.object_key == "object.bin"))
-        assert (restore_row.expires_at - restore_row.available_at).days == 3
+        assert module.utc_datetime(restore_row.expires_at) == module.s3_restore_expiry(restore_row.available_at, 3)
         head = asyncio.run(module.s3_data_plane(_request("HEAD", "/object.bin", headers), "object.bin", session))
         assert head.status_code == 200 and "x-amz-restore" in head.headers
         tags = asyncio.run(module.s3_data_plane(_request("GET", "/object.bin", headers, b"tagging="), "object.bin", session))
@@ -477,6 +609,93 @@ def test_local_s3_restore_batch_and_oci_reference(tmp_path, monkeypatch):
         assert put.status_code == 200
         object_head = module.oci_get_object("local", "destination", "object.bin", _request("HEAD", "/n/local/b/destination/o/object.bin"), session)
         assert object_head.status_code == 200
+    finally:
+        session.close()
+
+
+def test_fujin_restore_head_e2e_keeps_per_object_utc_midnight_boundaries(tmp_path, monkeypatch):
+    """Exercise restore -> HEAD -> expiry through the Fujin S3 data-plane contract."""
+    root = Path(tmp_path) / "payloads"
+    (root / "snap").mkdir(parents=True)
+    objects = []
+    for name in ("before.bin", "after.bin"):
+        payload = name.encode("utf-8")
+        relative = f"snap/{name}"
+        (root / relative).write_bytes(payload)
+        objects.append({
+            "key": name,
+            "relative_path": relative,
+            "size_bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "storage_class": "DEEP_ARCHIVE",
+        })
+    monkeypatch.setenv(
+        "FUJIN_LOCAL_DATABASE_URL",
+        f"sqlite+pysqlite:///{Path(tmp_path) / 'utc-midnight-e2e.db'}",
+    )
+    monkeypatch.setenv("FUJIN_LOCAL_PAYLOAD_ROOT", str(root))
+
+    import app.fujin_local as module
+    module = importlib.reload(module)
+    module.startup()
+    session = module.SessionLocal()
+    try:
+        admin = _request("POST", "/api/local/datasets")
+        dataset = _create_ready_dataset(module, admin, module.DatasetCreate(
+            name="utc-boundary", snapshot_id="utc-boundary",
+            repository_relative_path="snap", quota_bytes=sum(item["size_bytes"] for item in objects),
+            manifest={"objects": objects},
+        ), session)
+        created = module.create_s3_bucket(admin, module.S3BucketCreate(
+            name="utc-boundary-source", dataset_id=dataset["id"],
+            restore_policy={"delay_seconds": 0},
+        ), session)
+        bucket = session.get(module.LocalS3Bucket, created["id"])
+        headers = [
+            (b"host", b"utc-boundary-source.vpce-fujin.s3.us-east-1.fujin.internal"),
+            (b"authorization", f"AWS4-HMAC-SHA256 Credential={bucket.access_key_id}/test".encode()),
+        ]
+        body = b"<RestoreRequest><Days>1</Days><GlacierJobParameters><Tier>Bulk</Tier></GlacierJobParameters></RestoreRequest>"
+        instants = {
+            "before.bin": datetime(2026, 9, 12, 23, 59, tzinfo=timezone.utc),
+            "after.bin": datetime(2026, 9, 13, 0, 1, tzinfo=timezone.utc),
+        }
+        expected_expiries = {
+            "before.bin": datetime(2026, 9, 14, 0, 0, tzinfo=timezone.utc),
+            "after.bin": datetime(2026, 9, 15, 0, 0, tzinfo=timezone.utc),
+        }
+        for name, completed_at in instants.items():
+            monkeypatch.setattr(module, "utcnow", lambda value=completed_at: value)
+            response = asyncio.run(module.s3_data_plane(
+                _request("PUT", f"/{name}", headers, b"restore=", body), name, session,
+            ))
+            assert response.status_code == 202
+            head = asyncio.run(module.s3_data_plane(
+                _request("HEAD", f"/{name}", headers), name, session,
+            ))
+            assert head.status_code == 200
+            assert 'ongoing-request="false"' in head.headers["x-amz-restore"]
+            row = session.scalar(module.select(module.LocalRestore).where(
+                module.LocalRestore.object_key == name
+            ))
+            assert module.utc_datetime(row.expires_at) == expected_expiries[name]
+
+        monkeypatch.setattr(
+            module, "utcnow", lambda: datetime(2026, 9, 14, 0, 0, tzinfo=timezone.utc)
+        )
+        expired_head = asyncio.run(module.s3_data_plane(
+            _request("HEAD", "/before.bin", headers), "before.bin", session,
+        ))
+        assert "x-amz-restore" not in expired_head.headers
+        with pytest.raises(HTTPException, match="InvalidObjectState") as raised:
+            asyncio.run(module.s3_data_plane(
+                _request("GET", "/before.bin", headers), "before.bin", session,
+            ))
+        assert raised.value.status_code == 403
+        still_available = asyncio.run(module.s3_data_plane(
+            _request("HEAD", "/after.bin", headers), "after.bin", session,
+        ))
+        assert 'ongoing-request="false"' in still_available.headers["x-amz-restore"]
     finally:
         session.close()
 
@@ -815,6 +1034,29 @@ def test_aborted_multipart_leaves_no_oci_reference_or_cache(tmp_path, monkeypatc
         session.close()
 
 
+def test_active_multipart_upload_renews_its_idle_expiry(tmp_path, monkeypatch):
+    monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'multipart-idle.db'}")
+    import app.fujin_local as module
+    module = importlib.reload(module); module.startup(); session = module.SessionLocal()
+    try:
+        bucket = module.LocalOciBucket(namespace="local", name="multipart-idle-target")
+        session.add(bucket); session.flush()
+        reference = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)
+        upload = module.LocalMultipartUpload(
+            id="active-upload", bucket_id=bucket.id, object_key="large.bin",
+            staging_relative_path="multipart/active-upload", created_at=reference - timedelta(hours=23),
+            last_activity_at=reference - timedelta(hours=23),
+            expires_at=reference + timedelta(hours=1),
+        )
+        session.add(upload); session.flush()
+        module.touch_multipart_upload(upload, reference)
+        assert module.as_utc(upload.last_activity_at) == reference
+        assert module.as_utc(upload.expires_at) == reference + timedelta(hours=module.FUJIN_LOCAL_MULTIPART_IDLE_TTL_HOURS)
+        assert module.cleanup_expired_multipart_uploads(session, reference + timedelta(hours=1)) == 0
+    finally:
+        session.close()
+
+
 def test_oci_uploads_keep_only_evidence_and_reference_original_payload(tmp_path, monkeypatch):
     root = Path(tmp_path) / "payloads"; staging = Path(tmp_path) / "staging"
     payload = b"reference-only-multipart-payload"
@@ -967,12 +1209,35 @@ def test_restore_policy_randomizes_batch_start_then_distributes_availability(tmp
         )
         assert first.state == "IN_PROGRESS" and first.available_at == now + timedelta(hours=37)
         assert last.available_at == now + timedelta(hours=39, minutes=32)
-        assert first.expires_at - first.available_at == timedelta(days=5)
-        assert last.expires_at - last.available_at == timedelta(days=2)
+        assert module.utc_datetime(first.expires_at) == module.s3_restore_expiry(first.available_at, 5)
+        assert module.utc_datetime(last.expires_at) == module.s3_restore_expiry(last.available_at, 2)
+        with pytest.raises(HTTPException, match="RestoreAlreadyInProgress"):
+            module.request_restore(
+                session, bucket, "a.bin", policy, now, retention_days=5,
+                availability_delay_seconds=operation_start, restore_tier="BULK",
+            )
+        with pytest.raises(HTTPException, match="retention cannot change"):
+            module.request_restore(
+                session, bucket, "a.bin", policy, now, retention_days=6,
+                availability_delay_seconds=operation_start, restore_tier="STANDARD",
+            )
+        upgraded = module.request_restore(
+            session, bucket, "a.bin", policy, now, retention_days=5,
+            availability_delay_seconds=operation_start, restore_tier="STANDARD",
+        )
+        assert upgraded.id == first.id and upgraded.restore_tier == "STANDARD"
         third = module.request_restore(
             session, bucket, "third.bin", {"max_concurrent_restores": 1}, now
         )
         assert third.state == "AVAILABLE"
+        extended_at = now + timedelta(hours=1)
+        extended = module.request_restore(
+            session, bucket, "third.bin", {}, extended_at, retention_days=3,
+            restore_tier="BULK",
+        )
+        assert extended.id == third.id
+        assert module.utc_datetime(extended.expiry_basis_at) == extended_at
+        assert module.utc_datetime(extended.expires_at) == module.s3_restore_expiry(extended_at, 3)
     finally:
         session.close()
 

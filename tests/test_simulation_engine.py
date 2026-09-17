@@ -85,6 +85,25 @@ def test_bulk_restore_availability_matches_per_object_readiness(virtual_cloud):
     assert all(item.restore_expires_at for item in observed.ready)
 
 
+def test_overlapping_simulated_restore_rejects_incompatible_request_and_extends_available_copy(virtual_cloud):
+    engine, execution, _materialized = virtual_cloud
+    item = engine.list_objects(execution.id, "source", "", None, 1).objects[0]
+    assert engine.restore_object(execution.id, "source", item.key, "BULK", 1, "first").accepted
+    incompatible = engine.restore_object(execution.id, "source", item.key, "BULK", 2, "different-days")
+    assert not incompatible.accepted
+    assert incompatible.error_code == "RestoreAlreadyInProgress"
+    engine.restore_availability(
+        execution.id, "source", [ObjectIdentity(bucket="source", key=item.key)]
+    )
+    extended = engine.restore_object(execution.id, "source", item.key, "BULK", 3, "extension")
+    assert extended.accepted
+    with engine.store.sessions() as session:
+        row = session.scalar(select(VirtualObject).where(VirtualObject.object_key == item.key))
+        assert row.restore_state == "AVAILABLE"
+        assert row.restore_retention_days == 3
+        assert row.restore_expiry_basis_at is not None
+
+
 def test_phase_hold_freezes_virtual_time_without_pausing_real_task_time(virtual_cloud):
     _engine, execution, _materialized = virtual_cloud
     store = _engine.store

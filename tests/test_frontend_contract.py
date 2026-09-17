@@ -156,6 +156,11 @@ def test_observability_cards_use_compact_values_and_fill_the_desktop_row():
     assert "free=splitPlatformMeasure(bytes(freeBytes))" in page
     assert "`${fmt(usedPercent)}% ${en?'used':'utilizado'}`" in page
     assert "freeBytes<10*1024**3?'error':usedPercent>=85?'warning':'success'" in page
+    assert "renderObservabilityWithClickableHints" in page
+    assert "Clique para ver os detalhes deste indicador." in page
+    assert "renderActivityWithCapacity" in page
+    assert "Limite configurado: ${fmt(limit)} Mbps" in page
+    assert "${fmt(cpu*cpuCount/100)} de ${fmt(cpuCount)} vCPU" in page
 
 
 def test_connection_api_limits_are_configurable_in_the_interface():
@@ -532,6 +537,14 @@ def test_raiju_lane_cards_and_tables_expose_contextual_help():
     assert page.rfind('.lane-flow-step.waiting,.lane-flow-step.copying') > page.find('.lane-flow-step.waiting{border-color:#64748b}')
     assert '.lane-flow-step.leased strong{display:grid;grid-template-columns:minmax(0,1fr) 17px' in page
     assert "<strong>Taxa de referência ${laneHelp(" not in page
+    assert "Estimativa para drenar a fila atual ${laneHelp('Estimativa pela taxa operacional atual; novas waves podem alterar o total.')}" in page
+    assert '<output class="lane-live-rate">${fmt(rate)} Mbps</output>' in page
+    assert '<p class="hint"><span>${bytes(lane.bytes||0)} de volume nominal na fila' in page
+    assert '<span>${rateBasisLabel}: <output class="lane-live-rate">' in page
+    assert '${readyBytes>0?`<span class="lane-backlog-ready"' in page
+    assert '${leasedBytes>0?`<span class="lane-backlog-copying"' in page
+    assert '${retryBytes>0?`<span class="lane-backlog-retry"' in page
+    assert '.lane-backlog-rail span{min-width:2px}' not in page
     for label in (
         "Momento",
         "Lote despachado",
@@ -906,8 +919,18 @@ def test_flight_board_supports_manual_refresh_and_bounded_loading():
     assert "phase.planned&&!observedSaving?' planned':''" in page
     assert "continues-to-saving" in page
     assert "continues-from-restore" in page
-    assert ".flight-board-restore-row .flight-board-phase.restore-saving{top:10px}" in page
-    assert ".flight-board-restore-row .flight-board-phase{top:10px;height:8px}" in page
+    assert ".flight-board-restore-row .flight-board-phase.restore-saving{top:5px;height:18px}" in page
+    assert ".flight-board-restore-row .flight-board-phase{top:5px;height:18px}" in page
+    assert "flight-board-progress-label" in page
+    assert ".flight-board-wave-progress-label{position:absolute" in page
+    assert "phase.kind==='RESTORE'&&!phase.planned&&phase.wave_progress?.label" in page
+    assert "function flightBoardWaveProgressLabel(phases,start,end)" in page
+    assert "['RESTORE','RESTORE_SAVING'].includes(next.kind)" in page
+    assert "const wave=phase.wave_tooltip;" in page
+    assert "Tier de restore:" in page
+    assert "Tempo economizado confirmado:" in page
+    assert "Faixa destacada:" in page
+    assert "Aguardando despacho para um Raiju." in page
     assert "function flightBoardBars(" in page
     assert "joins-previous" in page and "joins-next" in page
     assert "function flightBoardRestoreSchedule(w)" in page
@@ -938,6 +961,8 @@ def test_refresh_restores_the_current_view_and_selected_source_without_duplicate
 def test_reprocess_requires_a_second_explicit_confirmation_when_restore_cost_may_recur():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
 
-    assert "Aprovar novo restore" in page
+    assert "Aprovar restore seletivo" in page
+    assert "Somente esse subconjunto" in page
+    assert "checkpoints multipart serão preservados" in page
     assert "approve_new_restore:true" in page
     assert "pode gerar cobrança AWS" in page

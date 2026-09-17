@@ -166,7 +166,18 @@ def test_real_workers_complete_simulated_discovery_restore_and_transfer(tmp_path
 
     real_worker.run_once("governance")
     real_worker.run_once("governance")
-    real_worker.run_once("transfer")
+    # The continuous lane deliberately yields after a bounded simulated
+    # dispatch cycle.  Drive the durable follow-up tasks until every object
+    # has settled instead of assuming that one Raiju cycle owns a full wave.
+    for _ in range(8):
+        real_worker.run_once("transfer")
+        with sessions() as session:
+            if session.get(main.Wave, wave_id).status == "COMPLETED":
+                break
+        # ``available_at`` is deliberately a wall-clock durability boundary;
+        # give a freshly committed successor task a scheduling tick before the
+        # next deterministic Raiju cycle.
+        time.sleep(0.01)
 
     with sessions() as session:
         wave = session.get(main.Wave, wave_id)
@@ -174,7 +185,7 @@ def test_real_workers_complete_simulated_discovery_restore_and_transfer(tmp_path
             session.scalars(select(main.ObjectRecord).where(main.ObjectRecord.wave_id == wave_id))
         )
         assert wave.status == "COMPLETED", [
-            (task.kind, task.state, task.error)
+                (task.kind, task.state, task.available_at, task.lease_expires_at, task.error)
             for task in session.scalars(select(main.Task).where(main.Task.wave_id == wave_id))
         ]
         assert {item.state for item in objects} == {main.ObjectState.TRANSFERRED}

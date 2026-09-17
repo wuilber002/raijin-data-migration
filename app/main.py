@@ -63,6 +63,9 @@ DYNAMIC_REPACK_MIN_INTERVAL_SECONDS = 3600
 DYNAMIC_FORECAST_MIN_ABSOLUTE_SHIFT_SECONDS = 900
 DYNAMIC_FORECAST_MIN_RELATIVE_SHIFT = 0.05
 DYNAMIC_SCHEDULE_MIN_SHIFT_SECONDS = 300
+# Keep durable forecast placement responsive, while preventing the activity
+# feed from repeating the same rolling estimate every governance cycle.
+DYNAMIC_REFORECAST_EVENT_MIN_INTERVAL_SECONDS = 15 * 60
 
 
 def utcnow() -> datetime:
@@ -147,7 +150,18 @@ platform_status_file = os.environ.get("PLATFORM_STATUS_FILE", "/run/platform-sta
 oci_runtime_config_file = os.environ.get("OCI_RUNTIME_CONFIG_FILE", "/run/oci-runtime/oci-runtime.json")
 DYNAMIC_PLATFORM_MAX_BYTES = 10 * 1024**4
 DYNAMIC_PLATFORM_MAX_OBJECTS = 500_000
-engine = create_engine(database_url, pool_pre_ping=True)
+# Raijus checkpoint independently.  Keep a bounded pool sized for the safe
+# lane ceiling rather than relying on SQLAlchemy's small default (5 + 10
+# overflow), which can turn an autoscaling mistake into QueuePool timeouts.
+# SQLite does not accept the QueuePool arguments used by PostgreSQL.
+_engine_options = {"pool_pre_ping": True}
+if parsed_database_url.drivername.startswith("postgres"):
+    _engine_options.update(
+        pool_size=max(5, int(os.getenv("RAIJU_DB_POOL_SIZE", "20"))),
+        max_overflow=max(0, int(os.getenv("RAIJU_DB_POOL_MAX_OVERFLOW", "4"))),
+        pool_timeout=max(1, int(os.getenv("RAIJU_DB_POOL_TIMEOUT_SECONDS", "30"))),
+    )
+engine = create_engine(database_url, **_engine_options)
 SessionLocal = sessionmaker(bind=engine)
 
 
@@ -748,6 +762,8 @@ class TransferDispatchBatch(Base):
     object_count: Mapped[int] = mapped_column(Integer, default=0)
     bytes_planned: Mapped[int] = mapped_column(BigInteger, default=0)
     worker_target: Mapped[int] = mapped_column(Integer, default=0)
+    active_workers: Mapped[int] = mapped_column(Integer, default=0)
+    effective_worker_cap: Mapped[int] = mapped_column(Integer, default=0)
     # One compact sample per Raikou dispatch makes the autoscaling curve and
     # its guardrails auditable without emitting an event per object.
     observed_lane_mbps: Mapped[float] = mapped_column(Float, default=0)
@@ -761,6 +777,41 @@ class TransferDispatchBatch(Base):
     preempted_batch_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class TransferAutoscaleState(Base):
+    """Durable feedback state for one source's Raiju lane.
+
+    Transfer batches are immutable dispatch evidence.  This row is the
+    controller memory: it survives a Raiju process recycle so a restart never
+    forgets a rejected experiment and grows blindly again.
+    """
+    __tablename__ = "transfer_autoscale_states"
+    __table_args__ = (UniqueConstraint("source_id", name="uq_transfer_autoscale_source"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), index=True)
+    approved_workers: Mapped[int] = mapped_column(Integer, default=0)
+    target_workers: Mapped[int] = mapped_column(Integer, default=0)
+    active_workers: Mapped[int] = mapped_column(Integer, default=0)
+    effective_worker_cap: Mapped[int] = mapped_column(Integer, default=0)
+    observed_lane_mbps: Mapped[float] = mapped_column(Float, default=0)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # JSON is deliberately compact and bounded by the controller. It stores
+    # only measurement state, never object payload or credentials.
+    sample_history_json: Mapped[str] = mapped_column(Text, default="[]")
+    sample_progress_json: Mapped[str] = mapped_column(Text, default="{}")
+    sample_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    baseline_mbps: Mapped[float] = mapped_column(Float, default=0)
+    experiment_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    experiment_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    experiment_samples_json: Mapped[str] = mapped_column(Text, default="[]")
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    growth_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    marginal_gain_mbps: Mapped[float] = mapped_column(Float, default=0)
+    capacity_reason: Mapped[str] = mapped_column(Text, default="")
+    decision_reason: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class TransferLaneSegment(Base):
@@ -1472,6 +1523,8 @@ def create_schema() -> None:
         for column, sql_type in {
             "observed_lane_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 0",
             "observed_per_raiju_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "active_workers": "INTEGER NOT NULL DEFAULT 0",
+            "effective_worker_cap": "INTEGER NOT NULL DEFAULT 0",
             "host_capacity_factor": "DOUBLE PRECISION NOT NULL DEFAULT 1",
             "host_capacity_reason": "TEXT",
             "marginal_gain_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 0",
@@ -1766,6 +1819,22 @@ def record_event(session: Session, kind: str, message: str, source_id: int | Non
     session.add(Event(kind=kind, message=message, source_id=source_id, wave_id=wave_id))
 
 
+def dynamic_reforecast_event_due(session: Session, wave_id: int, reference: datetime,
+                                 kind: str = "DYNAMIC_WAVE_REPLANNED") -> bool:
+    """Rate-limit repeated narration of one forecast event kind, never the forecast."""
+    prior = session.scalar(select(Event.created_at).where(
+        Event.wave_id == wave_id,
+        Event.kind == kind,
+    ).order_by(Event.created_at.desc()).limit(1))
+    if prior is None:
+        return True
+    if prior.tzinfo is None and reference.tzinfo is not None:
+        prior = prior.replace(tzinfo=timezone.utc)
+    if reference.tzinfo is None and prior.tzinfo is not None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    return (reference - prior).total_seconds() >= DYNAMIC_REFORECAST_EVENT_MIN_INTERVAL_SECONDS
+
+
 def runtime_settings(session: Session) -> RuntimeSettings:
     settings = session.get(RuntimeSettings, 1)
     if not settings:
@@ -1872,6 +1941,15 @@ def enqueue_available_transfer_objects(session: Session, wave: Wave,
             wave_available_ratio=restored_ratio, source_business_priority=wave.source.business_priority,
             size_bytes=int(obj.size_bytes or 0),
         )
+        has_multipart_checkpoint = bool(
+            obj.multipart_upload_id
+            and (
+                int(obj.transfer_progress_bytes or 0) > 0
+                or session.scalar(select(MultipartCheckpointPart.part_number).where(
+                    MultipartCheckpointPart.object_id == obj.id
+                ).limit(1)) is not None
+            )
+        )
         values = {
             "size_bytes": obj.size_bytes,
             "available_at": obj.restored_at or observed_at,
@@ -1880,12 +1958,18 @@ def enqueue_available_transfer_objects(session: Session, wave: Wave,
             "predicted_transfer_seconds": float(obj.planned_transfer_seconds or 0),
             "priority_score": score,
             "priority_band": band,
-            "state": TransferQueueState.READY,
+            "state": (
+                TransferQueueState.MULTIPART_RESUME
+                if has_multipart_checkpoint else TransferQueueState.READY
+            ),
             "lease_token": None, "lease_owner": None, "lease_expires_at": None,
             "retry_at": None, "dispatch_batch_id": None,
             "preemption_cooldown_until": None, "preemption_successor_item_id": None,
             "preemption_requested_at": None, "transferred_at": None,
-            "decision_reason": reason,
+            "decision_reason": (
+                "Durable OCI multipart checkpoint ready to resume"
+                if has_multipart_checkpoint else reason
+            ),
             "priority_details_json": json.dumps(details, sort_keys=True),
         }
         if prior_item is not None:
@@ -1907,6 +1991,58 @@ def enqueue_available_transfer_objects(session: Session, wave: Wave,
             source_id=wave.source_id, wave_id=wave.id,
         )
     return created
+
+
+def mark_restore_reapproval_required(
+    session: Session,
+    item: TransferQueueItem,
+    reason: str,
+    *,
+    detected_at: datetime | None = None,
+) -> bool:
+    """Atomically gate one unavailable object and its wave for approval.
+
+    The per-object HEAD evidence and multipart checkpoint remain immutable.
+    Only unfinished objects may cross this boundary.  Keeping this transition
+    in the shared control-plane module prevents Raikou's priority refresh and
+    Raiju's transfer-error path from producing contradictory durable states.
+    """
+    obj = session.get(ObjectRecord, item.object_id)
+    wave = session.get(Wave, item.wave_id)
+    if not obj or not wave:
+        return False
+    if item.state == TransferQueueState.TRANSFERRED or obj.state in {
+        ObjectState.TRANSFERRED,
+        ObjectState.VERIFIED,
+    }:
+        return False
+
+    detected_at = detected_at or utcnow()
+    reason = reason[:8000]
+    was_required = (
+        item.state == TransferQueueState.REAPPROVAL_REQUIRED
+        and wave.restore_reapproval_required
+        and wave.status == "RESTORE_REAPPROVAL_REQUIRED"
+    )
+    item.state = TransferQueueState.REAPPROVAL_REQUIRED
+    item.decision_reason = reason
+    item.lease_token = item.lease_owner = None
+    item.lease_expires_at = item.retry_at = None
+    item.dispatch_batch_id = None
+    obj.state = ObjectState.RESTORE_REQUESTED
+    wave.status = "RESTORE_REAPPROVAL_REQUIRED"
+    wave.restore_reapproval_required = True
+    wave.restore_reapproval_reason = reason
+    wave.restore_reapproval_detected_at = wave.restore_reapproval_detected_at or detected_at
+    if not was_required:
+        record_event(
+            session,
+            "RESTORE_REAPPROVAL_REQUIRED",
+            f"Object {obj.id} is no longer available for transfer; explicit approval is required before another restore: {reason}",
+            source_id=wave.source_id,
+            wave_id=wave.id,
+        )
+    return not was_required
 
 
 def refresh_transfer_queue_priorities(session: Session, source_id: int | None = None,
@@ -1989,8 +2125,13 @@ def refresh_transfer_queue_priorities(session: Session, source_id: int | None = 
         if expiry_at is not None and expiry_at.tzinfo is None:
             expiry_at = expiry_at.replace(tzinfo=timezone.utc)
         if expiry_at and expiry_at <= reference_now and item.state != TransferQueueState.TRANSFERRED:
-            item.state, item.decision_reason = TransferQueueState.REAPPROVAL_REQUIRED, "Temporary restored copy expired before transfer"
-            changed += 1
+            if mark_restore_reapproval_required(
+                session,
+                item,
+                "Temporary restored copy expired before transfer",
+                detected_at=reference_now,
+            ):
+                changed += 1
     return changed
 
 
@@ -3385,6 +3526,7 @@ def observability(session: Session = Depends(get_session)) -> dict:
     failed_tasks = session.scalar(active_task.where(
         Task.state == TaskState.FAILED,
         Task.id == latest_task_id,
+        Wave.status != "COMPLETED",
     )) or 0
     # POLL_RESTORE deliberately reuses one durable task for every availability
     # check. Its attempt counter is a polling-cycle counter, not a retry caused
@@ -3397,7 +3539,17 @@ def observability(session: Session = Depends(get_session)) -> dict:
         Task.error != "",
     )) or 0
     stale_leases = session.scalar(active_task.where(Task.state == TaskState.RUNNING, Task.lease_expires_at < now)) or 0
-    recent_failures = session.scalar(select(func.count(Event.id)).where(Event.kind.like("%FAILED%"), Event.created_at >= now - timedelta(hours=24))) or 0
+    recent_failure_events = list(session.scalars(select(Event).where(
+        Event.kind.like("%FAILED%"), Event.created_at >= now - timedelta(hours=24)
+    )))
+    # Historical failures remain evidence, but the indicator represents work
+    # that needs action now. A later non-failed task for the same wave is a
+    # durable recovery signal.
+    recent_failures = 0
+    for failure in recent_failure_events:
+        latest = session.scalar(select(Task).where(Task.wave_id == failure.wave_id).order_by(Task.id.desc()).limit(1)) if failure.wave_id else None
+        recovered = bool(latest and latest.state != TaskState.FAILED and latest.created_at > failure.created_at)
+        recent_failures += 0 if recovered else 1
     active_object = select(func.count(ObjectRecord.id)).join(Source, ObjectRecord.source_id == Source.id).where(Source.archived_at.is_(None))
     active_multipart = session.scalar(active_object.where(ObjectRecord.multipart_upload_id.is_not(None))) or 0
     stalled_transfers = session.scalar(active_object.where(
@@ -3480,11 +3632,15 @@ def observability_details(indicator: str, limit: int = 100,
         latest_task_id = select(func.max(latest_task.id)).where(
             latest_task.wave_id == Wave.id
         ).correlate(Wave).scalar_subquery()
-        statement = select(Task, Wave.name, Source.name).join(Wave).join(Source).where(
+        statement = select(Task, Wave.name, Source.name).select_from(Task).join(
+            Wave, Task.wave_id == Wave.id
+        ).join(
+            Source, Wave.source_id == Source.id
+        ).where(
             Source.archived_at.is_(None), Task.id == latest_task_id,
         )
         if indicator == "failed_tasks":
-            statement = statement.where(Task.state == TaskState.FAILED)
+            statement = statement.where(Task.state == TaskState.FAILED, Wave.status != "COMPLETED")
         else:
             statement = statement.where(
                 Task.state == TaskState.READY, Task.attempts > 1,
@@ -3507,6 +3663,8 @@ def observability_details(indicator: str, limit: int = 100,
                 Task.wave_id == event.wave_id
             ).order_by(Task.id.desc()).limit(1)) if event.wave_id else None
             recovered = bool(
+                wave_name and session.scalar(select(Wave.status).where(Wave.id == event.wave_id)) == "COMPLETED"
+            ) or bool(
                 latest and latest.created_at and latest.created_at > event.created_at
                 and latest.state != TaskState.FAILED
             )
@@ -3516,7 +3674,11 @@ def observability_details(indicator: str, limit: int = 100,
                          "status": "RECOVERED" if recovered else "ACTION_REQUIRED",
                          "recovered_at": latest.created_at if recovered else None})
     elif indicator in {"multipart_checkpoints", "stalled_transfers"}:
-        statement = select(ObjectRecord, Source.name, Wave.name).join(Source).outerjoin(Wave).where(
+        statement = select(ObjectRecord, Source.name, Wave.name).select_from(ObjectRecord).join(
+            Source, ObjectRecord.source_id == Source.id
+        ).outerjoin(
+            Wave, ObjectRecord.wave_id == Wave.id
+        ).where(
             Source.archived_at.is_(None)
         )
         if indicator == "multipart_checkpoints":
@@ -3730,6 +3892,7 @@ def operations_overview(session: Session = Depends(get_session)) -> dict:
             Task.state == TaskState.FAILED,
             Task.id == latest_task_id,
             Source.archived_at.is_(None),
+            Wave.status != "COMPLETED",
         )
     ) or 0
     task_counts["ACTIONABLE_FAILED"] = int(actionable_failed_tasks)
@@ -3859,6 +4022,7 @@ def operations_overview(session: Session = Depends(get_session)) -> dict:
             "transferred_per_hour": round(transferred_files / (transfer_seconds / 3600), 2),
             "transfer_mbps": round(transfer_mbps, 2),
             "transfer_live_mbps": round(live_transfer_mbps, 2),
+            "transfer_limit_mbps": int(settings.max_throughput_mbps),
             "simulation_logical_metrics": bool(control_logical_recent or control_logical_active),
             "transfer_live_window_seconds": live_window_seconds,
             "restored_files": restored_files,
@@ -3878,12 +4042,18 @@ def operations_overview(session: Session = Depends(get_session)) -> dict:
 
 def restore_timing(session: Session, wave_id: int) -> dict:
     """Summarize durable per-object S3 restore timestamps and availability."""
-    requested_at, first_available_at, last_available_at, earliest_expiry_at, requested_objects, available_objects = session.execute(
+    (requested_at, first_available_at, last_available_at, earliest_expiry_at,
+     latest_expiry_at, expired_objects, requested_objects, available_objects) = session.execute(
         select(
             func.min(ObjectRecord.restore_requested_at),
             func.min(ObjectRecord.restored_at),
             func.max(ObjectRecord.restored_at),
             func.min(ObjectRecord.restore_expires_at),
+            func.max(ObjectRecord.restore_expires_at),
+            func.count(ObjectRecord.id).filter(
+                ObjectRecord.restore_expires_at <= utcnow(),
+                ObjectRecord.state.notin_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]),
+            ),
             func.count(ObjectRecord.id),
             func.count(ObjectRecord.id).filter(ObjectRecord.restored_at.is_not(None)),
         ).where(ObjectRecord.wave_id == wave_id, ObjectRecord.restore_requested_at.is_not(None))
@@ -3895,6 +4065,8 @@ def restore_timing(session: Session, wave_id: int) -> dict:
         "first_available_at": first_available_at,
         "last_available_at": last_available_at,
         "earliest_expiry_at": earliest_expiry_at,
+        "latest_expiry_at": latest_expiry_at,
+        "expired_objects": int(expired_objects or 0),
         "requested_objects": requested_objects,
         "available_objects": available_objects,
         "pending_objects": max(0, requested_objects - available_objects),
@@ -3920,7 +4092,8 @@ def restore_queue_details(wave: Wave, task: Task, now: datetime, session: Sessio
     ).order_by(RestoreAttempt.id.desc()).limit(1)) if session is not None else None
     timing = restore_timing(session, wave.id) if session is not None else {
         "requested_at": None, "first_available_at": None, "last_available_at": None,
-        "earliest_expiry_at": None, "requested_objects": 0, "available_objects": 0,
+        "earliest_expiry_at": None, "latest_expiry_at": None, "expired_objects": 0,
+        "requested_objects": 0, "available_objects": 0,
         "pending_objects": 0, "restore_elapsed_seconds": None,
     }
     return {
@@ -4451,6 +4624,23 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
         "worker_target": int(batch.worker_target or 0), "state": batch.state,
         "reason": batch.reason,
     } for batch in recent_batches]
+    autoscale_states = list(session.scalars(select(TransferAutoscaleState)
+        .join(Source, Source.id == TransferAutoscaleState.source_id)
+        .where(Source.archived_at.is_(None))
+        .order_by(TransferAutoscaleState.updated_at.desc())))
+    lane_totals["autoscale"] = [{
+        "source_id": state.source_id,
+        "approved_workers": int(state.approved_workers or 0),
+        "target_workers": int(state.target_workers or 0),
+        "active_workers": int(state.active_workers or 0),
+        "effective_worker_cap": int(state.effective_worker_cap or 0),
+        "observed_lane_mbps": round(float(state.observed_lane_mbps or 0), 2),
+        "marginal_gain_mbps": round(float(state.marginal_gain_mbps or 0), 2),
+        "growth_blocked": bool(state.growth_blocked),
+        "capacity_reason": state.capacity_reason,
+        "decision_reason": state.decision_reason,
+        "updated_at": state.updated_at,
+    } for state in autoscale_states]
     observed_rates = [float(batch.observed_lane_mbps or 0) for batch in recent_batches
                       if float(batch.observed_lane_mbps or 0) > 0]
     configured_mbps = float(runtime_settings(session).max_throughput_mbps or 0)
@@ -4519,6 +4709,9 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     # snapshot for this request.
     object_times = {
         wave_id: {"restore_requested_at": requested, "first_available_at": first_available,
+                  "total_objects": int(total_objects or 0),
+                  "restored_objects": int(restored_objects or 0),
+                  "transferred_objects": int(transferred_objects or 0),
                   # max(restored_at) is only the latest object observed so far.
                   # It becomes the wave's completion milestone exclusively
                   # when every object has restore evidence.
@@ -4534,15 +4727,22 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                       transfer_completed
                       if int(transferred_objects or 0) == int(total_objects or 0) and int(total_objects or 0) > 0
                       else None
-                  )}
+                  ),
+                  # Only a temporary copy that still needs a transfer belongs
+                  # in the wave-level expiry warning.
+                  "nearest_pending_expiry_at": nearest_pending_expiry}
         for (wave_id, requested, first_available, last_observed_available,
              restored_objects, total_objects, transfer_started, transfer_completed,
-             transferred_objects) in session.execute(
+             transferred_objects, nearest_pending_expiry) in session.execute(
             select(ObjectRecord.wave_id, func.min(ObjectRecord.restore_requested_at),
                    func.min(ObjectRecord.restored_at), func.max(ObjectRecord.restored_at),
                    func.count(ObjectRecord.restored_at), func.count(ObjectRecord.id),
                    func.min(ObjectRecord.transfer_started_at), func.max(ObjectRecord.transferred_at),
-                   func.count(ObjectRecord.transferred_at))
+                   func.count(ObjectRecord.transferred_at),
+                   func.min(case(
+                       (ObjectRecord.transferred_at.is_(None), ObjectRecord.restore_expires_at),
+                       else_=None,
+                   )))
             .where(ObjectRecord.wave_id.in_(wave_ids)).group_by(ObjectRecord.wave_id)
         )
     }
@@ -4731,6 +4931,31 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     for wave, row_source in rows:
         row_source_name = row_source.name
         times = object_times.get(wave.id, {})
+        total_objects = max(0, int(times.get("total_objects") or 0))
+        restored_objects = min(total_objects, max(0, int(times.get("restored_objects") or 0)))
+        transferred_objects = min(total_objects, max(0, int(times.get("transferred_objects") or 0)))
+        # Each object has two durable units of work: availability after restore
+        # and transfer completion. The board keeps their combined progress on
+        # the observed orange restore bar as a compact, wave-level label.
+        wave_progress = None
+        if total_objects:
+            percent = min(100, max(0, int(round(
+                100 * (restored_objects + transferred_objects) / (2 * total_objects)
+            ))))
+            if transferred_objects >= total_objects:
+                progress_phase = "Concluído"
+            elif transferred_objects > 0 or restored_objects >= total_objects:
+                progress_phase = "Transferindo"
+            else:
+                progress_phase = "Restaurando"
+            wave_progress = {
+                "percent": percent,
+                "phase": progress_phase,
+                "label": f"{percent}% {progress_phase}",
+                "restored_objects": restored_objects,
+                "transferred_objects": transferred_objects,
+                "total_objects": total_objects,
+            }
         simulated = runtime_context.is_simulation and bool(row_source.simulation_execution_id)
         request_at = board_timestamp(wave.restore_requested_virtual_at if simulated else times.get("restore_requested_at"))
         first_available_at = board_timestamp(wave.first_restore_available_virtual_at if simulated else times.get("first_available_at"))
@@ -4820,7 +5045,10 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             if restore_start else None
         )
         if request_at:
-            restore_end = available_at or transfer_started_at or effective_now
+            # Transfers may start as soon as the first object becomes ready.
+            # That must not freeze the observed restore duration while other
+            # objects are still restoring.
+            restore_end = available_at or effective_now
         else:
             restore_end = expected_available_at
         restore_progress_seconds = max(0, int((restore_end - restore_start).total_seconds())) if restore_start and restore_end else 0
@@ -4838,6 +5066,10 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             restore["reference_seconds"] = restore_complete_forecast_seconds
             restore["restore_window_started"] = bool(request_at)
             restore["restore_window_started_at"] = restore_start
+            # A striped restore is a scheduling forecast, not completed work.
+            # The label is therefore available only on the observed orange bar.
+            if request_at and wave_progress:
+                restore["wave_progress"] = wave_progress
             phases.append(restore)
         # Once the documented reference has elapsed, render the known excess
         # in purple.  It is an extended forecast/observation, not an error.
@@ -4897,6 +5129,66 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             status = "RESTORING"
         elif available_at and not transfer_started_at:
             status = "RESTORED"
+        restore_percent = int(round(100 * restored_objects / total_objects)) if total_objects else 0
+        transfer_percent = int(round(100 * transferred_objects / total_objects)) if total_objects else 0
+        restore_completed = bool(total_objects and restored_objects >= total_objects and available_at)
+        restore_reference_exceeded = bool(
+            request_at and not restore_completed and baseline_end and effective_now > baseline_end
+        )
+        time_saved_seconds = max(0, int((baseline_end - available_at).total_seconds())) if (
+            restore_completed and baseline_end and available_at and available_at < baseline_end
+        ) else 0
+        wave_tooltip = {
+            "wave_id": wave.id,
+            "wave_name": wave.name,
+            "status": status,
+            "restore": {
+                "planned": not bool(request_at),
+                "started": bool(request_at),
+                "percent": restore_percent,
+                "tier": wave.restore_tier,
+                "reference_seconds": restore_complete_forecast_seconds,
+                "elapsed_seconds": restore_progress_seconds if request_at else None,
+                "available_objects": restored_objects,
+                "total_objects": total_objects,
+                "completed": restore_completed,
+                "reference_exceeded": restore_reference_exceeded,
+                "time_saved_seconds": time_saved_seconds,
+            },
+            "transfer": {
+                "percent": transfer_percent,
+                "transferred_objects": transferred_objects,
+                "total_objects": total_objects,
+                "started": bool(transfer_started_at),
+                "completed": bool(total_objects and transferred_objects >= total_objects),
+                "nearest_pending_expiry_at": board_timestamp(times.get("nearest_pending_expiry_at")),
+            },
+        }
+        # Orange restore and green confirmed saving are visual portions of the
+        # same wave window.  Both deliberately receive the same operational
+        # context; only the final line identifies the hovered portion.
+        for timeline_phase in phases:
+            if timeline_phase["kind"] in {"RESTORE", "RESTORE_SAVING"}:
+                timeline_phase["wave_tooltip"] = {
+                    **wave_tooltip,
+                    "highlight": (
+                        "tempo economizado confirmado após o restore."
+                        if timeline_phase.get("time_saved")
+                        else (
+                            "previsão estendida após a janela de referência."
+                            if timeline_phase.get("forecast_extension")
+                            else (
+                                "previsão de conclusão do restore em andamento."
+                                if timeline_phase.get("planned") and request_at
+                                else (
+                                    "previsão de restore; ainda não submetida à AWS."
+                                    if timeline_phase.get("planned")
+                                    else "período observado de restore."
+                                )
+                            )
+                        )
+                    ),
+                }
         board_waves.append({
             "wave_id": wave.id, "wave_name": wave.name, "source_name": row_source_name,
             "pipeline_run_id": wave.pipeline_run_id,
@@ -4920,6 +5212,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             "restore_available_at": available_at,
             "restore_elapsed_seconds": restore_progress_seconds if request_at else None,
             "expected_restore_available_at": expected_available_at,
+            "work_progress": wave_progress,
             # Retained only as a durable scheduler datum for APIs and reports;
             # it is deliberately not rendered as transfer work on this board.
             "planned_transfer_start_at": planned_transfer_at,
@@ -6967,6 +7260,47 @@ def continuous_lane_capacity_profile(session: Session, source_id: int,
     }
 
 
+def continuous_lane_forecast_profile(session: Session, source_id: int,
+                                     configured_mbps: int,
+                                     *, now: datetime | None = None) -> dict:
+    """Return a conservative planning rate without changing autoscaling evidence.
+
+    Completed lane segments remain the durable source of truth for the normal
+    capacity model.  A sustained recent slowdown, however, must be reflected
+    in *future-wave forecasts* before enough objects finish to enter that
+    history.  This helper intentionally reads the durable Raikou decision
+    samples and is used only by the reforecast path: it never influences the
+    Raiju autoscaler or restore-slot admission.
+    """
+    profile = dict(continuous_lane_capacity_profile(session, source_id, configured_mbps))
+    reference = now or utcnow()
+    cutoff = reference - timedelta(minutes=10)
+    recent_rates = [float(rate) for rate in session.scalars(select(
+        TransferDispatchBatch.observed_lane_mbps
+    ).where(
+        TransferDispatchBatch.source_id == source_id,
+        TransferDispatchBatch.started_at >= cutoff,
+        TransferDispatchBatch.observed_lane_mbps > 0,
+    ).order_by(TransferDispatchBatch.started_at.desc()).limit(24))]
+    # A few decision samples prevent a single object boundary or heartbeat
+    # from moving several future restore windows. P25 deliberately plans for
+    # the lower sustained portion of the currently observed lane.
+    if len(recent_rates) < 3:
+        return profile
+    recent_p25 = percentile_25(recent_rates)
+    durable_rate = max(1.0, float(profile.get("effective_mbps") or configured_mbps))
+    if recent_p25 >= durable_rate * 0.80:
+        return profile
+    profile.update({
+        "effective_mbps": max(1.0, min(float(configured_mbps), recent_p25)),
+        "basis": "RECENT_DEGRADED_LANE",
+        "recent_samples": len(recent_rates),
+        "recent_p25_mbps": recent_p25,
+        "durable_effective_mbps": durable_rate,
+    })
+    return profile
+
+
 def predicted_continuous_lane_seconds(bytes_total: int, predicted_worker_seconds: float,
                                       settings: "RuntimeSettings", lane_profile: dict) -> float:
     """Estimate elapsed lane time without multiplying parallel Raiju work."""
@@ -8179,7 +8513,10 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
         scheduler_now = now or source_scheduler_clock(run.source).effective_now
         run_changed = False
         latest_profiles = transfer_history_profiles(session, run.source_id, settings.multipart_part_size_mib)
-        lane_profile = continuous_lane_capacity_profile(session, run.source_id, settings.max_throughput_mbps)
+        # Forecasts must react to a sustained operational slowdown even while
+        # the older completed segments still describe a faster historical
+        # lane. The autoscaler retains its separate capacity model.
+        lane_profile = continuous_lane_forecast_profile(session, run.source_id, settings.max_throughput_mbps)
         # The cursor belongs to the source-wide lane.  Individual waves may
         # overlap on that lane, so their own min/max segment windows must not
         # be appended serially when forecasting the next restore slice.
@@ -8301,31 +8638,11 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                         source_id=wave.source_id,
                         wave_id=wave.id,
                     )
-                # The former per-wave window could be many times longer than
-                # an object's real lane share when waves overlap.  Retain the
-                # original start evidence above, but replace that stale
-                # duration with the source-wide lane model so it cannot push
-                # a later materialized wave days into the future.
-                wave_bytes = int(session.scalar(select(func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(
-                    ObjectRecord.wave_id == wave.id
-                )) or 0)
-                source_lane_duration = max(1, math.ceil(predicted_continuous_lane_seconds(
-                    wave_bytes, 0, settings, lane_profile,
-                )))
-                if (simulated or materially_changed_duration(
-                        wave.predicted_transfer_seconds, source_lane_duration)):
-                    prior_duration = int(wave.predicted_transfer_seconds or 0)
-                    wave.predicted_transfer_seconds = source_lane_duration
-                    wave.prediction_samples = max(int(wave.prediction_samples or 0), int(lane_profile["samples"] or 0))
-                    run_changed = True
-                    record_event(
-                        session,
-                        "DYNAMIC_WAVE_REFORECAST",
-                        f"Wave '{wave.name}' transfer forecast {prior_duration}s -> {source_lane_duration}s "
-                        "from the source-wide continuous-lane evidence",
-                        source_id=wave.source_id,
-                        wave_id=wave.id,
-                    )
+                # Once a wave has entered the lane, its persisted forecast is
+                # historical planning evidence.  Its observed window advances
+                # the shared cursor below, but a current slowdown must never
+                # rewrite that wave's former plan. Only waves that have not
+                # entered the lane are mutable reforecast candidates.
                 cursor = max(cursor or lane_observed_end, source_lane_observed_end or lane_observed_end)
                 cursor_basis = "observed source-wide continuous lane"
                 continue
@@ -8368,12 +8685,15 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                     wave.predicted_transfer_seconds = duration_seconds
                     wave.prediction_samples = max(int(wave.prediction_samples or 0), int(lane_profile["samples"] or 0))
                     run_changed = True
-                    record_event(
-                        session, "DYNAMIC_WAVE_REFORECAST",
-                        f"Wave '{wave.name}' transfer forecast {prior_duration}s -> {duration_seconds}s "
-                        f"from the {int(lane_profile['effective_mbps'])} Mbps continuous-lane contract",
-                        source_id=wave.source_id, wave_id=wave.id,
-                    )
+                    if dynamic_reforecast_event_due(
+                            session, wave.id, scheduler_now, "DYNAMIC_WAVE_REFORECAST"):
+                        record_event(
+                            session, "DYNAMIC_WAVE_REFORECAST",
+                            f"Wave '{wave.name}' transfer forecast {prior_duration}s -> {duration_seconds}s "
+                            f"from the {int(lane_profile['effective_mbps'])} Mbps "
+                            f"continuous-lane forecast ({lane_profile['basis']})",
+                            source_id=wave.source_id, wave_id=wave.id,
+                        )
                 else:
                     # Hysteresis must govern both persistence and placement.
                     # Using a rejected transient estimate here would still
@@ -8486,13 +8806,19 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                     wave.planned_restore_at = new_restore_at
                 changed += 1
                 run_changed = True
-                record_event(
-                    session,
-                    "DYNAMIC_WAVE_REPLANNED",
-                    f"Wave '{wave.name}' moved from transfer {prior_transfer_at.isoformat() if prior_transfer_at else 'unset'} / restore {prior_restore_at.isoformat() if prior_restore_at else 'unset'} to transfer {start.isoformat()} / restore {new_restore_at.isoformat()}; basis: {decision_basis}, current duration {duration_seconds}s",
-                    source_id=wave.source_id,
-                    wave_id=wave.id,
-                )
+                if dynamic_reforecast_event_due(session, wave.id, scheduler_now):
+                    restore_description = (
+                        new_restore_at.isoformat()
+                        if not has_batch_task and wave.status == "RESTORE_SCHEDULED"
+                        else f"unchanged (submitted: {prior_restore_at.isoformat() if prior_restore_at else 'not recorded'})"
+                    )
+                    record_event(
+                        session,
+                        "DYNAMIC_WAVE_REPLANNED",
+                        f"Wave '{wave.name}' moved from transfer {prior_transfer_at.isoformat() if prior_transfer_at else 'unset'} / restore {prior_restore_at.isoformat() if prior_restore_at else 'unset'} to transfer {start.isoformat()} / restore {restore_description}; basis: {decision_basis}, current duration {duration_seconds}s",
+                        source_id=wave.source_id,
+                        wave_id=wave.id,
+                    )
         if run_changed:
             # Keep the semantic version that drives the repackage guard.
             # Reverting it to v2 made every governance cycle treat the model
@@ -8500,7 +8826,7 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             run.planner_version = CONTINUOUS_LANE_FORECAST_VERSION
     if changed:
         record_event(session, "DYNAMIC_PIPELINE_REPLANNED",
-                     f"Adapted {changed} unsubmitted dynamic wave schedule(s) from observed transfer timings")
+                     f"Adapted {changed} dynamic wave forecast(s) from observed transfer timings")
     return changed
 
 
@@ -8824,6 +9150,13 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
     # operator needs an unambiguous reason for the required, potentially
     # billable, new restore approval.
     if wave.restore_reapproval_required:
+        reapproval_count, reapproval_bytes = session.execute(select(
+            func.count(TransferQueueItem.id),
+            func.coalesce(func.sum(TransferQueueItem.size_bytes), 0),
+        ).where(
+            TransferQueueItem.wave_id == wave.id,
+            TransferQueueItem.state == TransferQueueState.REAPPROVAL_REQUIRED,
+        )).one()
         restore_diagnosis = {
             "action_required": True,
             "summary": "The previously restored copy is no longer available for transfer",
@@ -8832,7 +9165,7 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
                 "code": "RESTORE_REAPPROVAL_REQUIRED",
                 "http_status": None,
                 "message": wave.restore_reapproval_reason or "A restored object is no longer available.",
-                "count": int(total_objects or 0),
+                "count": int(reapproval_count or 0),
                 "sample_keys": [],
             }],
             "raw_succeeded": int(latest_attempt.succeeded_objects or 0) if latest_attempt else 0,
@@ -8840,7 +9173,15 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
             "effective_accepted": 0,
             "unexpected_failed": 0,
             "pending_evidence": 0,
-            "can_retry_evidence": False,
+            "can_retry_evidence": bool(
+                wave.batch_job_id
+                and reapproval_count
+                and not session.scalar(select(Task.id).where(
+                    Task.wave_id == wave.id,
+                    Task.kind.in_(["SUBMIT_BATCH_RESTORE", "POLL_RESTORE"]),
+                    Task.state.in_([TaskState.READY, TaskState.RUNNING]),
+                ))
+            ),
         }
     return {"wave_id": wave_id, "status": wave.status, "objects": total_objects, "bytes": total_bytes, "object_states": by_state,
             "summary": {"transfer_elapsed_seconds": transfer_elapsed_seconds,
@@ -8857,6 +9198,8 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
                 "required": bool(wave.restore_reapproval_required),
                 "reason": wave.restore_reapproval_reason,
                 "detected_at": wave.restore_reapproval_detected_at,
+                "affected_objects": int(reapproval_count or 0) if wave.restore_reapproval_required else 0,
+                "affected_bytes": int(reapproval_bytes or 0) if wave.restore_reapproval_required else 0,
             },
             "restore_diagnosis": restore_diagnosis,
             "restore_attempts": [{"id": attempt.id, "job_id": attempt.job_id, "region": attempt.aws_region, "status": attempt.job_status,
@@ -9135,7 +9478,16 @@ def queue_all_planned_waves(source_id: int, session: Session = Depends(get_sessi
 def reprocess_wave(wave_id: int, payload: WaveReprocessRequest | None = None, session: Session = Depends(get_session)) -> dict:
     """Queue a new controlled restore submission; no external call is made here."""
     wave = wave_or_404(session, wave_id)
-    if wave.restore_reapproval_required and not (payload and payload.approve_new_restore):
+    reapproval_items = list(session.scalars(select(TransferQueueItem).where(
+        TransferQueueItem.wave_id == wave.id,
+        TransferQueueItem.state == TransferQueueState.REAPPROVAL_REQUIRED,
+    )))
+    selective_reapproval = bool(
+        reapproval_items
+        or wave.restore_reapproval_required
+        or wave.status == "RESTORE_REAPPROVAL_REQUIRED"
+    )
+    if selective_reapproval and not (payload and payload.approve_new_restore):
         raise HTTPException(
             status_code=409,
             detail=("A temporary restored copy is no longer available. A new restore may incur AWS charges; "
@@ -9151,24 +9503,34 @@ def reprocess_wave(wave_id: int, payload: WaveReprocessRequest | None = None, se
                                    job_status=wave.batch_job_status, manifest_key=wave.manifest_key,
                                    manifest_etag=wave.manifest_etag, expected_objects=session.scalar(select(func.count(ObjectRecord.id)).where(ObjectRecord.wave_id == wave.id)) or 0,
                                    failure_summary="Historic Batch job retained while starting a new restore attempt"))
-    # Reprocess is an explicit operator request for a complete new restore
-    # attempt.  A previously completed or audited object must therefore be
-    # made eligible again as well; leaving it TRANSFERRED/VERIFIED makes
-    # submit_restore see an empty archive list and strands the wave at
-    # RESTORED without any pending transfer task.
-    reset_states = [
-        ObjectState.RESTORE_REQUESTED,
-        ObjectState.RESTORE_REQUEST_ACCEPTED,
-        ObjectState.RESTORING,
-        ObjectState.RESTORED,
-        ObjectState.TRANSFERRING,
-        ObjectState.TRANSFERRED,
-        ObjectState.VERIFIED,
-    ]
+    # A paid reapproval is strictly object-scoped.  Its new manifest contains
+    # only entries whose durable queue evidence says the temporary copy is no
+    # longer available.  Generic manual recovery remains limited to unfinished
+    # objects and can never roll back completed or verified delivery evidence.
+    reapproval_object_ids = {item.object_id for item in reapproval_items}
+    reset_states = {
+        ObjectState.RESTORE_REQUESTED, ObjectState.RESTORE_REQUEST_ACCEPTED,
+        ObjectState.RESTORING, ObjectState.RESTORED, ObjectState.TRANSFERRING,
+        ObjectState.FAILED,
+    }
     reset_object_ids = []
-    for obj in session.scalars(select(ObjectRecord).where(ObjectRecord.wave_id == wave.id, ObjectRecord.state.in_(reset_states))):
-        obj.state, obj.restored_at = ObjectState.WAVE_ASSIGNED, None
+    object_query = select(ObjectRecord).where(
+        ObjectRecord.wave_id == wave.id,
+        ObjectRecord.state.in_(reset_states),
+    )
+    if selective_reapproval:
+        if not reapproval_object_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="The wave requests restore reapproval but no affected object evidence is available; refresh restore evidence before approving a paid restore.",
+            )
+        object_query = object_query.where(ObjectRecord.id.in_(reapproval_object_ids))
+    for obj in session.scalars(object_query):
+        obj.state = ObjectState.WAVE_ASSIGNED
+        obj.restored_at = obj.restore_expires_at = None
         reset_object_ids.append(obj.id)
+    if not reset_object_ids:
+        raise HTTPException(status_code=409, detail="No unfinished object requires restore reprocessing")
     if reset_object_ids:
         # TransferLaneSegment is immutable audit evidence and references the
         # original queue row.  Cancel the reusable lane entries instead of
@@ -9185,7 +9547,7 @@ def reprocess_wave(wave_id: int, payload: WaveReprocessRequest | None = None, se
             item.preemption_successor_item_id = None
             item.preemption_requested_at = None
             item.dispatch_batch_id = None
-            item.decision_reason = "Cancelled for approved restore reprocessing"
+            item.decision_reason = "Awaiting availability after approved selective restore reprocessing"
     wave.status, wave.batch_job_id, wave.batch_job_status = "READY_FOR_RESTORE", None, None
     wave.manifest_key, wave.manifest_etag, wave.last_poll_at, wave.poll_count = None, None, None, 0
     wave.availability_head_requests, wave.availability_poll_elapsed_seconds = 0, 0
@@ -9194,9 +9556,24 @@ def reprocess_wave(wave_id: int, payload: WaveReprocessRequest | None = None, se
     wave.restore_reapproval_required, wave.restore_reapproval_reason = False, None
     wave.restore_reapproval_detected_at = None
     session.add(Task(wave_id=wave.id, kind="SUBMIT_BATCH_RESTORE"))
-    record_event(session, "WAVE_REPROCESS_QUEUED", f"New restore submission queued for wave '{wave.name}' by operator", source_id=wave.source_id, wave_id=wave.id)
+    affected_bytes = session.scalar(select(func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(
+        ObjectRecord.id.in_(reset_object_ids)
+    )) or 0
+    record_event(
+        session,
+        "WAVE_REPROCESS_QUEUED",
+        f"Selective restore submission queued for {len(reset_object_ids)} unfinished object(s) / {int(affected_bytes)} byte(s) in wave '{wave.name}' by explicit operator approval",
+        source_id=wave.source_id,
+        wave_id=wave.id,
+    )
     session.commit()
-    return {"wave_id": wave.id, "status": wave.status, "message": "Restore task queued"}
+    return {
+        "wave_id": wave.id,
+        "status": wave.status,
+        "affected_objects": len(reset_object_ids),
+        "affected_bytes": int(affected_bytes),
+        "message": "Selective restore task queued",
+    }
 
 
 @app.post("/api/waves/{wave_id}/retry-restore-evidence")
@@ -9209,7 +9586,9 @@ def retry_restore_evidence(wave_id: int, session: Session = Depends(get_session)
     if not wave.batch_job_id or not attempt or attempt.job_id != wave.batch_job_id:
         raise HTTPException(status_code=409, detail="No current AWS Batch restore job is available for evidence recovery")
     queued = session.scalar(select(Task.id).where(
-        Task.wave_id == wave.id, Task.state.in_([TaskState.READY, TaskState.RUNNING])
+        Task.wave_id == wave.id,
+        Task.kind.in_(["SUBMIT_BATCH_RESTORE", "POLL_RESTORE"]),
+        Task.state.in_([TaskState.READY, TaskState.RUNNING]),
     ))
     if queued:
         raise HTTPException(status_code=409, detail="This wave already has a queued or running task")
@@ -9217,15 +9596,40 @@ def retry_restore_evidence(wave_id: int, session: Session = Depends(get_session)
         diagnosis = restore_result_diagnostics(session, attempt.id)
         if diagnosis["action_required"]:
             raise HTTPException(status_code=409, detail=diagnosis["recommended_action"])
+    affected = list(session.scalars(select(TransferQueueItem).where(
+        TransferQueueItem.wave_id == wave.id,
+        TransferQueueItem.state == TransferQueueState.REAPPROVAL_REQUIRED,
+    )))
+    if not affected:
+        raise HTTPException(
+            status_code=409,
+            detail="No object is waiting for restore-expiry evidence recovery",
+        )
+    # Evidence recovery is deliberately free of a new Batch submission.  It
+    # re-HEADs only affected objects through the existing POLL_RESTORE path;
+    # the durable queue identity and multipart checkpoint are retained.
+    for item in affected:
+        obj = session.get(ObjectRecord, item.object_id)
+        if not obj or obj.state in {ObjectState.TRANSFERRED, ObjectState.VERIFIED}:
+            continue
+        obj.state = ObjectState.RESTORE_REQUESTED
+        item.state = TransferQueueState.CANCELLED
+        item.lease_token = item.lease_owner = None
+        item.lease_expires_at = item.retry_at = None
+        item.dispatch_batch_id = None
+        item.decision_reason = "Awaiting authoritative HeadObject evidence refresh"
     wave.status = "RESTORE_REQUESTED"
+    wave.restore_reapproval_required = False
+    wave.restore_reapproval_reason = None
+    wave.restore_reapproval_detected_at = None
     session.add(Task(wave_id=wave.id, kind="POLL_RESTORE"))
     record_event(
         session, "RESTORE_EVIDENCE_RECOVERY_QUEUED",
-        f"AWS completion evidence recovery queued for existing Batch job {wave.batch_job_id}; no new restore was submitted",
+        f"AWS completion evidence recovery queued for {len(affected)} affected object(s) from existing Batch job {wave.batch_job_id}; no new restore was submitted",
         source_id=wave.source_id, wave_id=wave.id,
     )
     session.commit()
-    return {"wave_id": wave.id, "status": wave.status,
+    return {"wave_id": wave.id, "status": wave.status, "affected_objects": len(affected),
             "message": "Completion evidence recovery queued; no new restore job was submitted"}
 
 
