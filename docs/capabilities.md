@@ -107,6 +107,15 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   e aprova o crescimento apenas se houver ganho marginal robusto. Entre 95% e
   97% a lane está no alvo; em 97% ou mais mantém os streams produtivos. Tetos
   de host, memória e pool PostgreSQL são limites de admissão, não metas.
+- O reforecast das waves futuras usa a capacidade histórica da lane. Uma taxa
+  degradada recente só substitui essa referência após confirmação em duas
+  janelas independentes; uma oscilação curta de host não desloca o calendário.
+  Essa contenção não atrasa prioridades e retries por expiração, que continuam
+  decididos diretamente pela fila viva.
+- A tarefa durável da lane contínua pode manter uma wave como âncora histórica,
+  mas é reancorada automaticamente para a próxima wave com backlog quando a
+  anterior conclui. Assim a console não mostra trabalho vivo em uma wave
+  concluída e a cópia de outra wave da mesma source nunca é interrompida.
 - O **Raikou** é o worker de governança: executa discovery, planejamento, S3
   Batch Operations, polling de restore, reconciliação e auditorias. O **Raiju**
   é o worker operacional de transferência e retomada multipart.
@@ -278,6 +287,11 @@ e seed sem aceitar caminho do navegador ou do Raijin. Um worker próprio grava
 cada arquivo com publicação atômica, persiste manifesto e SHA-256 e só marca o
 dataset como `READY` quando ele está íntegro. O provedor S3 LOCAL monta esse
 volume em somente leitura; o Raijin continua em `REAL` e não monta o volume.
+
+O plano de dados do Fujin LOCAL converte exceções inesperadas em resposta 500
+genérica e em evidência pesquisável na auditoria. A evidência inclui request
+ID, operação, recurso, latência e tipo da exceção; identificadores multipart
+são pseudonimizados, para permitir correlação sem registrar o handle bruto.
 
 ### Modos e isolamento
 

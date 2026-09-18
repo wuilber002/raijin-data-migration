@@ -205,6 +205,42 @@ def test_data_plane_guard_returns_retryable_503_when_catalogue_checkout_is_unava
     assert response.headers["retry-after"] == "1"
 
 
+def test_unhandled_oci_provider_error_is_searchable_without_exposing_multipart_handle(tmp_path, monkeypatch):
+    """Unexpected data-plane failures must be diagnosable outside container logs."""
+    monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'provider-500.db'}")
+    import app.fujin_local as module
+    module = importlib.reload(module); module.startup()
+    try:
+        with module.SessionLocal() as session:
+            module.cloud_provider_state(session, "OCI").enabled = True
+            session.commit()
+        module.invalidate_data_plane_provider_cache("OCI")
+
+        async def next_handler(_request):
+            raise NameError("simulated provider regression")
+
+        upload_id = "opaque-multipart-handle"
+        response = asyncio.run(module.local_data_plane_guard(
+            _request("POST", "/n/local/b/destination/u/object.bin", query=f"uploadId={upload_id}".encode()),
+            next_handler,
+        ))
+        identifier = response.headers["x-fujin-request-id"]
+        assert response.status_code == 500 and identifier.startswith("fujin-")
+        with module.SessionLocal() as session:
+            event = session.scalar(select(module.LocalAuditEvent).where(
+                module.LocalAuditEvent.request_id == identifier
+            ))
+            assert event is not None
+            assert event.operation == "OCI_UNHANDLED_PROVIDER_ERROR"
+            assert event.status_code == 500 and event.bucket == "destination"
+            assert event.object_key == "object.bin"
+            assert event.error_code == "NameError"
+            assert "multipart_upload=sha256:" in event.detail
+            assert upload_id not in event.detail and upload_id not in (event.endpoint or "")
+    finally:
+        module.engine.dispose()
+
+
 def test_hot_multipart_cleanup_does_not_delete_audit_evidence(tmp_path, monkeypatch):
     monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'retention.db'}")
     import app.fujin_local as module

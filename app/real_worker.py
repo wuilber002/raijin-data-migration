@@ -3754,6 +3754,73 @@ def choose_cooperative_preemption_target(session, source_id: int,
     return target
 
 
+def reconcile_completed_continuous_task_anchors(session, source: Source) -> int:
+    """Keep the source-wide Raiju dispatcher attached to pending lane work.
+
+    ``TRANSFER_CONTINUOUS`` is intentionally source-scoped, although its
+    durable task keeps a wave ID for operator history.  When that historical
+    anchor completes while another wave still has ready/leased/retry work, the
+    task must move to the pending wave.  Cancelling it would stop unrelated
+    copies on the same source and is therefore unsafe.
+    """
+    pending_states = (
+        TransferQueueState.READY, TransferQueueState.LEASED,
+        TransferQueueState.RETRY_WAIT, TransferQueueState.MULTIPART_RESUME,
+    )
+    destination = session.scalar(
+        select(Wave)
+        .join(TransferQueueItem, TransferQueueItem.wave_id == Wave.id)
+        .where(
+            Wave.source_id == source.id,
+            Wave.status != "PAUSED",
+            TransferQueueItem.state.in_(pending_states),
+        )
+        .order_by(Wave.planned_transfer_start_at, Wave.id)
+        .limit(1)
+    )
+    completed_tasks = list(session.scalars(
+        select(Task)
+        .join(Wave)
+        .where(
+            Wave.source_id == source.id,
+            Wave.status == "COMPLETED",
+            Task.kind == "TRANSFER_CONTINUOUS",
+            Task.state.in_([TaskState.READY, TaskState.RUNNING]),
+        )
+        .with_for_update(skip_locked=True)
+    ))
+    reconciled = 0
+    for task in completed_tasks:
+        old_wave_id = task.wave_id
+        if destination is not None:
+            task.wave_id = destination.id
+            task.error = None
+            event(
+                session,
+                "CONTINUOUS_TRANSFER_DISPATCHER_REANCHORED",
+                f"Raiju dispatcher task {task.id} reanchored from completed wave "
+                f"{old_wave_id} to pending wave '{destination.name}' without interrupting the source lane.",
+                source_id=source.id,
+                wave_id=destination.id,
+            )
+            reconciled += 1
+        elif task.state == TaskState.READY:
+            # A READY task has no active I/O. A RUNNING task is left for its
+            # owner to settle at a durable boundary, avoiding a false success
+            # while it is still committing its final object.
+            task.state, task.lease_expires_at, task.worker_id = TaskState.SUCCEEDED, None, None
+            task.error = "Reconciled: source continuous lane already drained"
+            event(
+                session,
+                "CONTINUOUS_TRANSFER_DISPATCHER_RETIRED",
+                f"Idle Raiju dispatcher task {task.id} retired after completed wave {old_wave_id}; source lane is empty.",
+                source_id=source.id,
+                wave_id=old_wave_id,
+            )
+            reconciled += 1
+    return reconciled
+
+
 def reconcile_continuous_source_waves(session, source: Source) -> None:
     """Derive wave status from object truth and durable lane entries."""
     for wave in session.scalars(select(Wave).where(Wave.source_id == source.id)):
@@ -3809,6 +3876,8 @@ def reconcile_continuous_source_waves(session, source: Source) -> None:
             wave.status = "RESTORE_DRAINING" if outstanding else "RESTORING"
         elif outstanding:
             wave.status = "TRANSFER_DRAINING"
+
+    reconcile_completed_continuous_task_anchors(session, source)
 
     # Fujin executions are source-scoped.  The previous wave-exclusive
     # executor closed the execution itself; preserve that lifecycle contract

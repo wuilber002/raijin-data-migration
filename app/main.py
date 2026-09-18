@@ -63,6 +63,11 @@ DYNAMIC_REPACK_MIN_INTERVAL_SECONDS = 3600
 DYNAMIC_FORECAST_MIN_ABSOLUTE_SHIFT_SECONDS = 900
 DYNAMIC_FORECAST_MIN_RELATIVE_SHIFT = 0.05
 DYNAMIC_SCHEDULE_MIN_SHIFT_SECONDS = 300
+# A short host-pressure interval can lower active lane samples without being
+# a new capacity contract. Forecasts therefore need two independent ten-minute
+# observations before a degraded rate can move mutable future waves.
+DYNAMIC_FORECAST_DEGRADED_WINDOW_SECONDS = 10 * 60
+DYNAMIC_FORECAST_DEGRADED_MIN_SAMPLES_PER_WINDOW = 3
 # Keep durable forecast placement responsive, while preventing the activity
 # feed from repeating the same rolling estimate every governance cycle.
 DYNAMIC_REFORECAST_EVENT_MIN_INTERVAL_SECONDS = 15 * 60
@@ -1814,6 +1819,22 @@ def dynamic_reforecast_event_due(session: Session, wave_id: int, reference: date
     prior = session.scalar(select(Event.created_at).where(
         Event.wave_id == wave_id,
         Event.kind == kind,
+    ).order_by(Event.created_at.desc()).limit(1))
+    if prior is None:
+        return True
+    if prior.tzinfo is None and reference.tzinfo is not None:
+        prior = prior.replace(tzinfo=timezone.utc)
+    if reference.tzinfo is None and prior.tzinfo is not None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    return (reference - prior).total_seconds() >= DYNAMIC_REFORECAST_EVENT_MIN_INTERVAL_SECONDS
+
+
+def dynamic_pipeline_replan_event_due(session: Session, source_id: int,
+                                      reference: datetime) -> bool:
+    """Coalesce the source-level replan summary without suppressing wave evidence."""
+    prior = session.scalar(select(Event.created_at).where(
+        Event.source_id == source_id,
+        Event.kind == "DYNAMIC_PIPELINE_REPLANNED",
     ).order_by(Event.created_at.desc()).limit(1))
     if prior is None:
         return True
@@ -7229,28 +7250,42 @@ def continuous_lane_forecast_profile(session: Session, source_id: int,
     """
     profile = dict(continuous_lane_capacity_profile(session, source_id, configured_mbps))
     reference = now or utcnow()
-    cutoff = reference - timedelta(minutes=10)
-    recent_rates = [float(rate) for rate in session.scalars(select(
+    window = timedelta(seconds=DYNAMIC_FORECAST_DEGRADED_WINDOW_SECONDS)
+    cutoff = reference - window
+    prior_cutoff = cutoff - window
+    samples = list(session.execute(select(
+        TransferDispatchBatch.started_at,
         TransferDispatchBatch.observed_lane_mbps
     ).where(
         TransferDispatchBatch.source_id == source_id,
-        TransferDispatchBatch.started_at >= cutoff,
+        TransferDispatchBatch.started_at >= prior_cutoff,
         TransferDispatchBatch.observed_lane_mbps > 0,
-    ).order_by(TransferDispatchBatch.started_at.desc()).limit(24))]
-    # A few decision samples prevent a single object boundary or heartbeat
-    # from moving several future restore windows. P25 deliberately plans for
-    # the lower sustained portion of the currently observed lane.
-    if len(recent_rates) < 3:
+    ).order_by(TransferDispatchBatch.started_at.desc()).limit(96)))
+    def as_utc_timestamp(value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    recent_rates = [float(rate) for started_at, rate in samples if as_utc_timestamp(started_at) >= cutoff]
+    prior_rates = [float(rate) for started_at, rate in samples
+                   if prior_cutoff <= as_utc_timestamp(started_at) < cutoff]
+    # A current dip must be corroborated by a distinct earlier window before
+    # it changes a calendar. This keeps a brief host guard, rollout or object
+    # boundary from moving several mutable waves by days. Dispatch and expiry
+    # priority remain live and do not depend on this forecast gate.
+    if (len(recent_rates) < DYNAMIC_FORECAST_DEGRADED_MIN_SAMPLES_PER_WINDOW
+            or len(prior_rates) < DYNAMIC_FORECAST_DEGRADED_MIN_SAMPLES_PER_WINDOW):
         return profile
     recent_p25 = percentile_25(recent_rates)
+    prior_p25 = percentile_25(prior_rates)
     durable_rate = max(1.0, float(profile.get("effective_mbps") or configured_mbps))
-    if recent_p25 >= durable_rate * 0.80:
+    if (recent_p25 >= durable_rate * 0.80
+            or prior_p25 >= durable_rate * 0.80):
         return profile
     profile.update({
-        "effective_mbps": max(1.0, min(float(configured_mbps), recent_p25)),
-        "basis": "RECENT_DEGRADED_LANE",
+        "effective_mbps": max(1.0, min(float(configured_mbps), recent_p25, prior_p25)),
+        "basis": "SUSTAINED_DEGRADED_LANE",
         "recent_samples": len(recent_rates),
         "recent_p25_mbps": recent_p25,
+        "prior_samples": len(prior_rates),
+        "prior_p25_mbps": prior_p25,
         "durable_effective_mbps": durable_rate,
     })
     return profile
@@ -8457,11 +8492,13 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
     never wall-clock timestamps produced by a fast CONTROL transfer.
     """
     changed = 0
+    changed_by_source: dict[int, int] = {}
     runs = list(session.scalars(select(DynamicPipelineRun).where(
         DynamicPipelineRun.scheduled_restores.is_(True),
         DynamicPipelineRun.status.not_in(["COMPLETED", "HISTORICAL"]),
     )))
     for run in runs:
+        changes_before_run = changed
         refresh_dynamic_pipeline_run(session, run)
         if run.status == "NEEDS_ATTENTION":
             continue
@@ -8779,9 +8816,19 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             # Reverting it to v2 made every governance cycle treat the model
             # as stale and repeatedly repack/reforecast an unchanged wave.
             run.planner_version = CONTINUOUS_LANE_FORECAST_VERSION
-    if changed:
-        record_event(session, "DYNAMIC_PIPELINE_REPLANNED",
-                     f"Adapted {changed} dynamic wave forecast(s) from observed transfer timings")
+            # Source summaries are intentionally coalesced. The detailed
+            # wave evidence above remains available whenever it is material.
+            changed_by_source[run.source_id] = (
+                changed_by_source.get(run.source_id, 0) + (changed - changes_before_run)
+            )
+    for source_id, source_changes in changed_by_source.items():
+        if dynamic_pipeline_replan_event_due(session, source_id, now or utcnow()):
+            record_event(
+                session,
+                "DYNAMIC_PIPELINE_REPLANNED",
+                f"Adapted {source_changes} dynamic wave forecast(s) from observed transfer timings",
+                source_id=source_id,
+            )
     return changed
 
 

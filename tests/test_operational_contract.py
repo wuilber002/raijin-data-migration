@@ -236,6 +236,39 @@ def test_completed_wave_records_recovered_task_evidence_without_erasing_the_fail
                                                       Event.kind == "TASK_FAILURE_RECOVERED")) is not None
 
 
+def test_completed_wave_reanchors_live_continuous_dispatcher_to_pending_source_work():
+    """A completed historical anchor must not make Raiju look stuck or stop the lane."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="reanchor-source", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        completed = Wave(source=source, name="finished", max_bytes=1, restore_days=1,
+                         restore_tier="BULK", status="COMPLETED")
+        pending = Wave(source=source, name="pending", max_bytes=1, restore_days=1,
+                       restore_tier="BULK", status="TRANSFER_DRAINING")
+        session.add_all([source, completed, pending]); session.flush()
+        obj = ObjectRecord(source_id=source.id, wave_id=pending.id, object_key="pending.bin",
+                           size_bytes=1, state=ObjectState.RESTORED)
+        session.add(obj); session.flush()
+        session.add(TransferQueueItem(source_id=source.id, wave_id=pending.id, object_id=obj.id,
+                                      size_bytes=1, state=TransferQueueState.READY))
+        task = Task(wave_id=completed.id, kind="TRANSFER_CONTINUOUS", state=TaskState.RUNNING,
+                    worker_id="raiju-test")
+        session.add(task); session.commit()
+
+        reconciled = real_worker.reconcile_completed_continuous_task_anchors(session, source)
+
+        assert reconciled == 1
+        assert task.state == TaskState.RUNNING and task.wave_id == pending.id
+        assert task.error is None
+        assert session.scalar(select(Event.id).where(
+            Event.kind == "CONTINUOUS_TRANSFER_DISPATCHER_REANCHORED",
+            Event.wave_id == pending.id,
+        )) is not None
+
+
 def test_observability_details_exposes_failure_evidence_on_demand():
     import app.main as main
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -284,6 +317,24 @@ def test_dynamic_reforecast_event_rate_limit_preserves_first_and_periodic_eviden
         session.commit()
         assert not main.dynamic_reforecast_event_due(session, wave.id, reference + timedelta(minutes=14))
         assert main.dynamic_reforecast_event_due(session, wave.id, reference + timedelta(minutes=15))
+
+
+def test_dynamic_pipeline_replan_summary_is_rate_limited_per_source():
+    import app.main as main
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    reference = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+    with Session() as session:
+        source = Source(name="pipeline-events", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        assert main.dynamic_pipeline_replan_event_due(session, source.id, reference)
+        session.add(Event(source_id=source.id, kind="DYNAMIC_PIPELINE_REPLANNED",
+                          message="first", created_at=reference))
+        session.commit()
+        assert not main.dynamic_pipeline_replan_event_due(session, source.id, reference + timedelta(minutes=14))
+        assert main.dynamic_pipeline_replan_event_due(session, source.id, reference + timedelta(minutes=15))
 
 
 def test_observability_details_uses_unambiguous_joins_for_task_and_object_evidence():
@@ -1514,8 +1565,11 @@ def test_reforecast_uses_sustained_degraded_lane_without_changing_capacity_model
         session.add(source); session.flush()
         session.add_all([
             TransferDispatchBatch(source_id=source.id, observed_lane_mbps=rate,
-                                  started_at=reference - timedelta(minutes=index))
-            for index, rate in enumerate((420, 400, 390, 410), start=1)
+                                  started_at=reference - timedelta(minutes=offset))
+            for offset, rate in (
+                (1, 420), (2, 400), (3, 390),       # current 10-minute window
+                (11, 410), (12, 405), (13, 395),    # independent prior window
+            )
         ])
         session.flush()
         monkeypatch.setattr("app.main.continuous_lane_capacity_profile", lambda *_args: {
@@ -1524,12 +1578,37 @@ def test_reforecast_uses_sustained_degraded_lane_without_changing_capacity_model
         })
         profile = continuous_lane_forecast_profile(session, source.id, 1100, now=reference)
 
-    assert profile["basis"] == "RECENT_DEGRADED_LANE"
+    assert profile["basis"] == "SUSTAINED_DEGRADED_LANE"
     assert profile["durable_effective_mbps"] == 950
     assert profile["effective_mbps"] == 390
     # The change is contained to the forecast helper; the autoscaler keeps
     # using continuous_lane_capacity_profile in this release.
     assert continuous_lane_capacity_profile is not continuous_lane_forecast_profile
+
+
+def test_reforecast_ignores_one_short_degraded_lane_window(monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    reference = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+    with Session() as session:
+        source = Source(name="forecast-short-dip", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        session.add_all([
+            TransferDispatchBatch(source_id=source.id, observed_lane_mbps=rate,
+                                  started_at=reference - timedelta(minutes=offset))
+            for offset, rate in ((1, 260), (2, 255), (3, 250))
+        ])
+        session.flush()
+        monkeypatch.setattr("app.main.continuous_lane_capacity_profile", lambda *_args: {
+            "samples": 1, "p25_mbps": 970, "effective_mbps": 970,
+            "basis": "DURABLE_LANE_HISTORY",
+        })
+        profile = continuous_lane_forecast_profile(session, source.id, 1100, now=reference)
+
+    assert profile["basis"] == "DURABLE_LANE_HISTORY"
+    assert profile["effective_mbps"] == 970
 
 
 def test_permanent_task_failure_incident_aggregates_identical_burst():

@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sqlite3
 from time import perf_counter, sleep
 import threading
@@ -201,11 +202,81 @@ def audit(session: Session, operation: str, status: int, bucket: str | None = No
           *, endpoint: str | None = None, latency_ms: int | None = None,
           bytes_transferred: int | None = None, retry_count: int | None = None,
           caller_identity: str | None = None, error_code: str | None = None,
-          object_key: str | None = None) -> str:
-    identifier = request_id()
+          object_key: str | None = None, request_identifier: str | None = None) -> str:
+    identifier = request_identifier or request_id()
     session.add(LocalAuditEvent(request_id=identifier, operation=operation, bucket=bucket, object_key=object_key, status_code=status, detail=detail,
                                 endpoint=endpoint, latency_ms=latency_ms, bytes_transferred=bytes_transferred,
                                 retry_count=retry_count, caller_identity=caller_identity, error_code=error_code))
+    return identifier
+
+
+def provider_error_audit_context(request: Request, provider: str) -> tuple[str | None, str | None, str, str]:
+    """Return safe audit fields for an unexpected private-provider failure.
+
+    Multipart upload IDs are bearer-like operational handles.  They are useful
+    to correlate retries, but must not be copied verbatim into the audit log or
+    response body.  Bucket and object names remain normal operational evidence.
+    """
+    path = unquote(request.url.path)
+    parts = [part for part in path.split("/") if part]
+    bucket = object_key = None
+    upload_id = request.query_params.get("uploadId") or request.query_params.get("upload_id")
+    safe_parts = list(parts)
+    if provider == "OCI":
+        try:
+            bucket_index = parts.index("b")
+            bucket = parts[bucket_index + 1]
+        except (ValueError, IndexError):
+            pass
+        try:
+            upload_index = parts.index("u")
+            object_parts = parts[upload_index + 1:]
+            if "id" in object_parts:
+                identifier_index = object_parts.index("id")
+                object_key = "/".join(object_parts[:identifier_index]) or None
+                if identifier_index + 1 < len(object_parts):
+                    upload_id = upload_id or object_parts[identifier_index + 1]
+                    safe_parts = parts[:upload_index + 1] + object_parts[:identifier_index] + ["id", "<redacted>"]
+            else:
+                object_key = "/".join(object_parts) or None
+        except (ValueError, IndexError):
+            pass
+    else:
+        object_key = path.lstrip("/") or None
+        if parts:
+            bucket, object_key = parts[0], "/".join(parts[1:]) or None
+    upload_fingerprint = (
+        "sha256:" + hashlib.sha256(upload_id.encode("utf-8")).hexdigest()[:16]
+        if upload_id else "none"
+    )
+    endpoint = f"{request.headers.get('host', '')}/{'/'.join(safe_parts)}"
+    return bucket, object_key, endpoint, upload_fingerprint
+
+
+def audit_unhandled_provider_error(request: Request, provider: str, error: Exception,
+                                   started: float) -> str:
+    """Persist a bounded 500 evidence without allowing diagnostics to fail I/O."""
+    identifier = request_id()
+    try:
+        bucket, object_key, endpoint, upload_fingerprint = provider_error_audit_context(request, provider)
+        with SessionLocal() as session:
+            audit(
+                session,
+                f"{provider}_UNHANDLED_PROVIDER_ERROR",
+                500,
+                bucket,
+                detail=(f"{request.method} {provider} data-plane request; "
+                        f"exception={type(error).__name__}; multipart_upload={upload_fingerprint}"),
+                endpoint=endpoint,
+                latency_ms=round((perf_counter() - started) * 1000),
+                error_code=type(error).__name__,
+                object_key=object_key,
+                request_identifier=identifier,
+            )
+            session.commit()
+    except Exception:
+        # A damaged audit store must not conceal the original, retryable 500.
+        pass
     return identifier
 
 
@@ -1109,6 +1180,17 @@ async def local_data_plane_guard(request: Request, call_next):
             status_code=503,
             content={"detail": "Fujin LOCAL catalogue is briefly busy; retry the request", "request_id": identifier},
             headers={"Retry-After": "1", "x-fujin-request-id": identifier},
+        )
+    except Exception as error:
+        # This is deliberately after the known transient catalogue paths:
+        # programming/provider regressions need a durable, searchable
+        # incident rather than an opaque ASGI traceback in a container log.
+        identifier = audit_unhandled_provider_error(request, provider, error, started)
+        header_name = "opc-request-id" if provider == "OCI" else "x-amz-request-id"
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Fujin LOCAL provider request failed unexpectedly; retry or inspect the request ID", "request_id": identifier},
+            headers={header_name: identifier, "x-fujin-request-id": identifier},
         )
     identifier = response.headers.get("x-amz-request-id") or response.headers.get("opc-request-id") or response.headers.get("x-fujin-request-id")
     if identifier:
