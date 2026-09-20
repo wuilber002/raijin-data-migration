@@ -4227,6 +4227,17 @@ def test_multi_source_project_reuses_connection_across_regions_and_isolates_same
             )
 
 
+def test_schema_upgrade_adds_source_project_column_before_lane_backfill():
+    """A legacy PostgreSQL table must be altered before its column is read."""
+    import inspect as python_inspect
+    import app.main as main
+
+    migration = python_inspect.getsource(main.create_schema)
+    add_source_columns = migration.index("for column, sql_type in source_columns.items()")
+    lane_backfill = migration.index("UPDATE transfer_queue_items")
+    assert add_source_columns < lane_backfill
+
+
 def test_restore_slot_budget_is_global_across_projects_and_sources():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

@@ -1791,6 +1791,13 @@ def create_schema() -> None:
         for column, sql_type in runtime_columns.items():
             if column not in existing_runtime_columns:
                 connection.execute(text(f"ALTER TABLE runtime_settings ADD COLUMN {column} {sql_type}"))
+        # A legacy ``sources`` table exists before Base.metadata.create_all()
+        # learns about project ownership. Add its new columns before any lane
+        # backfill reads them. PostgreSQL validates column names when the
+        # UPDATE is planned, even when no historical row belongs to a project.
+        for column, sql_type in source_columns.items():
+            if column not in existing_source_columns:
+                connection.execute(text(f"ALTER TABLE sources ADD COLUMN {column} {sql_type}"))
         lane_columns = {
             "project_id": "BIGINT",
             "dispatch_batch_id": "BIGINT",
@@ -1831,9 +1838,6 @@ def create_schema() -> None:
         }.items():
             if column not in existing_dispatch_columns:
                 connection.execute(text(f"ALTER TABLE transfer_dispatch_batches ADD COLUMN {column} {sql_type}"))
-        for column, sql_type in source_columns.items():
-            if column not in existing_source_columns:
-                connection.execute(text(f"ALTER TABLE sources ADD COLUMN {column} {sql_type}"))
         for column, sql_type in {"migration_project_id": "BIGINT"}.items():
             if column not in existing_event_columns:
                 connection.execute(text(f"ALTER TABLE events ADD COLUMN {column} {sql_type}"))
