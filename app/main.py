@@ -525,6 +525,11 @@ class Wave(Base):
     # instead of presenting a fixed, misleading worker count.
     active_transfer_workers: Mapped[int] = mapped_column(Integer, default=0)
     planned_restore_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    # The latest instant at which an unsubmitted restore must be handed to
+    # AWS to protect the forecasted continuous lane.  Unlike the mutable
+    # visual calendar, this deadline may only move earlier as new evidence
+    # shows the lane will drain sooner.
+    restore_submission_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     planned_transfer_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     # Observed milestones use the simulator virtual clock only for simulated
     # sources.  Real sources retain their existing object-level wall-clock
@@ -1507,7 +1512,7 @@ def create_schema() -> None:
     source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_objects_inserted": "BIGINT NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "backend_kind": "VARCHAR(16) NOT NULL DEFAULT 'REAL'", "simulation_scenario_id": "VARCHAR(36)", "simulation_execution_id": "VARCHAR(36)", "simulation_correlation_id": "VARCHAR(36)", "simulation_tenant_id": "VARCHAR(36)", "simulation_project_id": "VARCHAR(36)", "simulation_fidelity": "VARCHAR(16)", "business_priority": "INTEGER NOT NULL DEFAULT 999"}
     source_columns["archived_at"] = "TIMESTAMP WITH TIME ZONE"
     source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION", "completion_estimate_json": "TEXT NOT NULL DEFAULT '{}'"})
-    wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_requested_virtual_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_started_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_completed_virtual_at": "TIMESTAMP WITH TIME ZONE", "simulation_transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
+    wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "restore_submission_deadline_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_requested_virtual_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_started_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_completed_virtual_at": "TIMESTAMP WITH TIME ZONE", "simulation_transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
     existing_runtime_columns = {column["name"] for column in inspect(engine).get_columns("runtime_settings")}
     existing_source_columns = {column["name"] for column in inspect(engine).get_columns("sources")}
     existing_wave_columns = {column["name"] for column in inspect(engine).get_columns("waves")}
@@ -5199,6 +5204,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             "completed_at": transfer_completed_at if status in {"COMPLETED", "VERIFIED", "TRANSFERRED"} else None,
             "planned_restore_at": wave.planned_restore_at,
             "restore_eligible_at": wave.planned_restore_at,
+            "restore_submission_deadline_at": wave.restore_submission_deadline_at,
             "restore_materialized_at": restore_projection.get("materialized_at"),
             "projected_restore_submission_at": projected_restore_at,
             "restore_projection_basis": restore_projection.get("basis"),
@@ -7631,6 +7637,10 @@ def materialize_dynamic_pipeline_horizon(session: Session, settings: RuntimeSett
             predicted_restore_complete_seconds=restore_complete,
             predicted_restore_confidence_seconds=max(0, (restore_complete - restore_first) // 4),
             planned_restore_at=restore_at,
+            # This is a deadline, not merely a decorative planned date.  It
+            # is persisted independently so a later noisy reforecast cannot
+            # make an already-safe submission window disappear.
+            restore_submission_deadline_at=restore_at,
             planned_transfer_start_at=transfer_at, pipeline_run_id=run.id,
         )
         session.add(wave)
@@ -7834,6 +7844,30 @@ def restore_forecast_seconds(tier: str | None, settings: RuntimeSettings | None 
 def restore_service_window_seconds(tier: str | None) -> int:
     """Compatibility helper: conservative planning always uses full availability."""
     return restore_forecast_seconds(tier)[1]
+
+
+def restore_submission_lead_seconds(wave: Wave, run: DynamicPipelineRun,
+                                    settings: RuntimeSettings) -> int:
+    """Return the conservative public-S3 lead required before lane handoff.
+
+    This deliberately uses the documented tier ceiling, not Fujin timing nor
+    an optimistic per-object observation.  The safety reserve is operational
+    slack after the public service window and therefore also belongs in the
+    latest-safe submission calculation.
+    """
+    return int(restore_service_window_seconds(wave.restore_tier)) + int(
+        run.restore_safety_seconds or settings.dynamic_restore_safety_seconds or 0
+    )
+
+
+def restore_submission_deadline(wave: Wave, run: DynamicPipelineRun,
+                                settings: RuntimeSettings) -> datetime | None:
+    """Derive the latest safe AWS submission from the lane handoff forecast."""
+    if wave.planned_transfer_start_at is None:
+        return None
+    return wave.planned_transfer_start_at - timedelta(
+        seconds=restore_submission_lead_seconds(wave, run, settings)
+    )
 
 
 def observed_restore_forecast_seconds(session: Session, source_id: int,
@@ -8302,8 +8336,17 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
         for wave in waves:
             if occupied >= release_capacity:
                 if wave.status == "RESTORE_SCHEDULED":
+                    deadline = wave.restore_submission_deadline_at or restore_submission_deadline(
+                        wave, run, settings
+                    ) or wave.planned_restore_at
+                    deadline_passed = bool(deadline and deadline <= scheduler_now)
                     record_restore_deferral(
-                        wave, f"all {release_capacity} restore slot(s) are occupied"
+                        wave,
+                        (
+                            f"latest safe submission deadline {deadline.isoformat()} has passed, but all "
+                            f"{release_capacity} restore slot(s) are occupied"
+                            if deadline_passed else f"all {release_capacity} restore slot(s) are occupied"
+                        ),
                     )
                 break
             if wave.status != "RESTORE_SCHEDULED":
@@ -8313,6 +8356,21 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
                 wave.predicted_restore_first_seconds
                 or restore_forecast_seconds(wave.restore_tier)[0]
             ))
+            # ``planned_restore_at`` is a mutable board projection.  The
+            # deadline is a separate durable promise to the transfer lane:
+            # submit by this instant or record why a physical restore slot
+            # made continuity impossible.  A legacy wave gets the same rule
+            # from its existing transfer forecast on the first scheduler pass.
+            calculated_deadline = restore_submission_deadline(wave, run, settings)
+            continuity_deadline = wave.restore_submission_deadline_at or calculated_deadline or wave.planned_restore_at
+            if wave.restore_submission_deadline_at is None and continuity_deadline is not None:
+                # Upgrade active pre-deadline rows lazily and safely.  The
+                # value is derived solely from the Raijin/AWS calendar and
+                # does not require an external call or Fujin knowledge.
+                wave.restore_submission_deadline_at = continuity_deadline
+            continuity_deadline_due = bool(
+                continuity_deadline and continuity_deadline <= scheduler_now
+            )
             # A restore submitted now does not add transfer stock now. Model
             # how much of the current lane Raiju will drain before the first
             # file can arrive. Blocking on today's backlog stranded free AWS
@@ -8323,7 +8381,7 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
             backlog_at_first_file = max(0.0, projected_backlog_seconds - max(
                 0.0, restore_lead_seconds - projected_at_seconds
             ))
-            if backlog_at_first_file >= maximum_buffer:
+            if backlog_at_first_file >= maximum_buffer and not continuity_deadline_due:
                 if not (wave.planned_restore_at and wave.planned_restore_at > scheduler_now):
                     record_restore_deferral(
                         wave,
@@ -8339,7 +8397,17 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
             # still allowed when the lane is empty, otherwise an oversized
             # first slice could deadlock the pipeline forever.
             oversized_seed = occupied == 0 and backlog_at_first_file < minimum_buffer
-            if post_release_backlog_seconds > maximum_buffer and not oversized_seed:
+            # The maximum is a retention-protection heuristic. It cannot
+            # veto the first due restore that would otherwise leave less than
+            # the minimum healthy lane stock.  Once that seed is admitted,
+            # later same-pass waves still obey the cap; this avoids turning a
+            # cluster of overdue calendar entries into an unnecessary burst
+            # of temporary copies.
+            continuity_override = (
+                continuity_deadline_due and backlog_at_first_file < minimum_buffer
+            )
+            if (post_release_backlog_seconds > maximum_buffer
+                    and not oversized_seed and not continuity_override):
                 if not (wave.planned_restore_at and wave.planned_restore_at > scheduler_now):
                     record_restore_deferral(
                         wave,
@@ -8351,7 +8419,8 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
             # A future restore may be pulled forward only while the projected
             # post-release lane remains below its target.  Already-due work
             # is still released, unless the safety ceiling is occupied.
-            if is_future_restore and backlog_at_first_file >= target_buffer:
+            if (is_future_restore and backlog_at_first_file >= target_buffer
+                    and not continuity_deadline_due):
                 continue
             exists = session.scalar(select(Task.id).where(
                 Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE"
@@ -8372,10 +8441,14 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
                     wave_id=wave.id,
                 )
             release_reason = (
+                f"latest safe submission deadline reached ({continuity_deadline.isoformat()}); "
+                "released to protect future continuous-lane availability"
+                if continuity_deadline_due else (
                 f"projected lane at first availability below minimum buffer ({backlog_at_first_file:.0f}s < {int(minimum_buffer)}s)"
                 if backlog_at_first_file < minimum_buffer else (
                     f"projected lane at first availability below target buffer ({backlog_at_first_file:.0f}s < {int(target_buffer)}s)"
                     if backlog_at_first_file < target_buffer else "planned restore time reached"
+                )
                 )
             )
             record_event(session, "DYNAMIC_RESTORE_RELEASED",
@@ -8755,10 +8828,7 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             # the public tier window and the configured safety reserve.  This
             # is deliberately independent of Fujin: the scheduler must be
             # correct against real S3 even when local acceptance is faster.
-            restore_lead = int(
-                wave.predicted_restore_complete_seconds
-                or restore_forecast_seconds(wave.restore_tier, settings, source=run.source)[1]
-            ) + int(run.restore_safety_seconds or settings.dynamic_restore_safety_seconds)
+            restore_lead = restore_submission_lead_seconds(wave, run, settings)
             is_unsubmitted_restore = not has_batch_task and wave.status == "RESTORE_SCHEDULED"
             restore_requested_at = (
                 wave.restore_requested_virtual_at
@@ -8840,6 +8910,25 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                 new_restore_at = restore_target
             else:
                 new_restore_at = max(scheduler_now, start - timedelta(seconds=restore_lead))
+            # The eligibility shown on the board may be refreshed, but the
+            # lane-protection deadline is monotonic: fresh evidence can pull
+            # it forward when the lane will drain sooner, never postpone an
+            # already-safe AWS submission because of a transient slowdown.
+            calculated_deadline = start - timedelta(seconds=restore_lead)
+            prior_deadline = wave.restore_submission_deadline_at
+            if (prior_deadline is not None and prior_deadline.tzinfo is None
+                    and calculated_deadline.tzinfo is not None):
+                prior_deadline = prior_deadline.replace(tzinfo=timezone.utc)
+            earliest_deadline = (
+                calculated_deadline if prior_deadline is None
+                else min(prior_deadline, calculated_deadline)
+            )
+            deadline_advanced = (
+                is_unsubmitted_restore and (
+                    wave.restore_submission_deadline_at is None
+                    or earliest_deadline < prior_deadline
+                )
+            )
             transfer_shifted = abs((wave.planned_transfer_start_at - start).total_seconds()) if wave.planned_transfer_start_at else float("inf")
             restore_shifted = (
                 abs((wave.planned_restore_at - new_restore_at).total_seconds())
@@ -8874,6 +8963,20 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                         f"Wave '{wave.name}' moved from transfer {prior_transfer_at.isoformat() if prior_transfer_at else 'unset'} / restore {prior_restore_at.isoformat() if prior_restore_at else 'unset'} to transfer {start.isoformat()} / restore {restore_description}; basis: {decision_basis}, current duration {duration_seconds}s",
                         source_id=wave.source_id,
                         wave_id=wave.id,
+                    )
+            if deadline_advanced:
+                wave.restore_submission_deadline_at = earliest_deadline
+                changed += 1
+                run_changed = True
+                if dynamic_reforecast_event_due(
+                        session, wave.id, scheduler_now,
+                        "DYNAMIC_RESTORE_DEADLINE_ADVANCED"):
+                    record_event(
+                        session, "DYNAMIC_RESTORE_DEADLINE_ADVANCED",
+                        f"Wave '{wave.name}' latest safe AWS restore submission is "
+                        f"{earliest_deadline.isoformat()}; the deadline can only move earlier "
+                        "when the continuous-lane forecast contracts.",
+                        source_id=wave.source_id, wave_id=wave.id,
                     )
         if run_changed:
             # Keep the semantic version that drives the repackage guard.
@@ -9056,6 +9159,7 @@ def list_waves(source_id: int, session: Session = Depends(get_session)) -> list[
              "restore_days": wave.restore_days, "objects": count, "bytes": size, "batch_job_id": wave.batch_job_id,
              "planner_mode": wave.planner_mode, "predicted_transfer_seconds": wave.predicted_transfer_seconds,
              "prediction_samples": wave.prediction_samples, "planned_restore_at": wave.planned_restore_at,
+             "restore_submission_deadline_at": wave.restore_submission_deadline_at,
              "planned_transfer_start_at": wave.planned_transfer_start_at,
              "restore_timing": timing_by_wave.get(wave.id, {}),
              "transfer_duration_seconds": int((finished - started).total_seconds()) if started and finished and displayed_status(wave) in {"COMPLETED", "TRANSFERRED", "VERIFIED"} else None,

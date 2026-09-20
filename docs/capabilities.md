@@ -117,6 +117,15 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   para, no mínimo, a janela pública do tier somada à margem de segurança a
   partir da nova decisão; a submissão AWS continua sendo uma tarefa durável e
   separada, governada por slots e pelo estoque da lane.
+- Cada wave dinâmica também persiste o seu **último prazo seguro de submissão
+  AWS**, calculado pela janela pública completa do tier mais a margem
+  operacional. Esse prazo só pode avançar (nunca ser postergado por um
+  reforecast). Quando vence e a primeira disponibilidade projetada deixaria a
+  lane abaixo do mínimo saudável, a liberação da wave prevalece sobre o teto
+  heurístico de estoque; se todos os slots físicos estiverem ocupados, o
+  Raikou registra explicitamente o risco de continuidade em vez de ocultar o
+  atraso. Essa regra usa somente o contrato AWS conhecido pelo Raijin, nunca
+  tempos internos do Fujin.
 - A tarefa durável da lane contínua pode manter uma wave como âncora histórica,
   mas é reancorada automaticamente para a próxima wave com backlog quando a
   anterior conclui. Assim a console não mostra trabalho vivo em uma wave
