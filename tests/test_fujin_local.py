@@ -532,6 +532,8 @@ def test_oracle_linux_podman_launcher_keeps_raijin_real_and_the_data_plane_priva
     assert '/usr/local/sbin/s3-oci-start-fujin-local-runtime' in bootstrap
     assert '/usr/local/sbin/s3-oci-start-runtime "$operation_mode"' in bootstrap
     assert 'printf \'STANDARD\\n\'' in bootstrap
+    assert '"$install_root/VERSION"' in bootstrap
+    assert 'basename "$(readlink -f "$install_root")"' in bootstrap
     coredns = Path("docker/fujin-local.Corefile").read_text(encoding="utf-8")
     assert "forward . /etc/resolv.conf" in coredns
     assert "forward . 127.0.0.11" not in coredns

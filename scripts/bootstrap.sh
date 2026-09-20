@@ -150,9 +150,18 @@ if ! podman exec s3-oci-postgres psql -U migration -d migration -tAc \
   podman exec s3-oci-postgres createdb -U migration -O migration_simulation migration_simulation
 fi
 
+service_version="${RAIJIN_SERVICE_VERSION:-$(tr -d '[:space:]' <"$install_root/VERSION")}"
+build_revision="${RAIJIN_BUILD_REVISION:-}"
+if [[ -z "$build_revision" ]]; then
+  build_revision="$(git -C "$install_root" rev-parse --short HEAD 2>/dev/null || basename "$(readlink -f "$install_root")")"
+fi
+[[ -n "$service_version" && -n "$build_revision" ]] || {
+  echo "Release version and revision must not be empty" >&2
+  exit 1
+}
 podman build \
-  --build-arg "RAIJIN_SERVICE_VERSION=${RAIJIN_SERVICE_VERSION:-0.5.0}" \
-  --build-arg "RAIJIN_BUILD_REVISION=${RAIJIN_BUILD_REVISION:-development}" \
+  --build-arg "RAIJIN_SERVICE_VERSION=$service_version" \
+  --build-arg "RAIJIN_BUILD_REVISION=$build_revision" \
   -t localhost/s3-oci-migration:latest "$install_root"
 mode_file=/etc/s3-oci-migration/operation-mode
 if [[ ! -s "$mode_file" ]]; then

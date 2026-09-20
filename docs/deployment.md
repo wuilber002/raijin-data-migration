@@ -259,11 +259,16 @@ The About page reports the semantic release and the exact build revision. CI
 or a manual release should inject the Git commit while building, for example:
 
 ```bash
-RAIJIN_SERVICE_VERSION=0.5.0 RAIJIN_BUILD_REVISION="$(git rev-parse --short HEAD)" docker compose build
+RAIJIN_SERVICE_VERSION=0.6.0 RAIJIN_BUILD_REVISION="$(git rev-parse --short HEAD)" docker compose build
 ```
 
 Without build metadata the revision is shown as `development`, so an operator
 can distinguish an unversioned local image from a traceable release.
+
+Na VM, o bootstrap lê a versão semântica do arquivo `VERSION` da release e
+deriva a revisão do commit Git ou do nome do diretório imutável. Assim, a
+identidade exibida no About é preservada mesmo quando a imagem precisa ser
+reconstruída automaticamente depois de um reboot.
 
 Não ative os dois perfis juntos. Em um diretório PostgreSQL novo, o init cria
 `migration_simulation` e o usuário dedicado usando o Secret

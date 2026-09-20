@@ -1,7 +1,7 @@
 x-raijin-build: &raijin-build
   context: .
   args:
-    RAIJIN_SERVICE_VERSION: ${RAIJIN_SERVICE_VERSION:-0.5.0}
+    RAIJIN_SERVICE_VERSION: ${RAIJIN_SERVICE_VERSION:-0.6.0}
     RAIJIN_BUILD_REVISION: ${RAIJIN_BUILD_REVISION:-development}
 
 services:
