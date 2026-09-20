@@ -449,6 +449,18 @@ def test_source_form_opens_in_a_modal_with_a_fixed_prefix_workspace():
     assert "closeSourceModal();await loadSources()" in page
 
 
+def test_project_is_required_before_the_ui_can_create_a_source():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'id="migration-project-create"' in page
+    assert 'id="migration-project-create-modal" class="modal hidden"' in page
+    assert 'id="migration-project-create-form"' in page
+    assert "function syncSourceCreationProjectState()" in page
+    assert "action.disabled=!projectId" in page
+    assert "payload.migration_project_id=projectId" in page
+    assert "payload.destination_prefix=b('#source-destination-prefix')" in page
+    assert 'id="source-destination-prefix"' in page
+
+
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="source-context-tags"' in page

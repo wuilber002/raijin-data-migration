@@ -37,9 +37,14 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   discovery. A rota padrão permanece compatível (`chave OCI = chave S3`), mas
   a transferência, multipart, validação e auditoria usam a chave persistida,
   não uma configuração de source recalculada durante retry. A API permite
-  cadastrar um projeto de migração e associar uma source ainda sem inventário
-  ou wave, com prefixo OCI não vazio e sem colisão de rota no mesmo bucket,
-  inclusive com fontes de outro projeto ou fontes legadas ativas.
+  cadastrar explicitamente um projeto de migração e associar uma source ainda
+  sem inventário ou wave, com prefixo OCI não vazio e sem colisão de rota no
+  mesmo bucket, inclusive com fontes de outro projeto ou fontes legadas
+  ativas. A criação de source exige um projeto ativo tanto na API quanto na
+  interface; sem essa seleção o controle permanece desativado. Sources
+  históricas também podem ser vinculadas administrativamente a um projeto sem
+  reescrever bucket, prefixo, `destination_object_key`, waves ou evidências; o
+  vínculo apenas completa o contexto de projeto da source e da fila durável.
   A associação pode ser desfeita apenas antes dessa fronteira operacional; a
   rota histórica permanece imutável. O namespace OCI continua pertencendo ao
   runtime/tenancy, não ao projeto. Cada projeto possui resumo consolidado,
@@ -239,17 +244,19 @@ recuperação de leases, Secrets, pré-check e tarifas públicas.
 ### Fluxo padrão por source
 
 1. Cadastre uma conexão AWS baseada em um Secret OCI compatível.
-2. Cadastre a source, selecionando a conexão e o bucket OCI de destino.
+2. Crie ou selecione o projeto de migração ativo em **Migrations**.
+3. Cadastre a source dentro desse projeto, selecionando a conexão, o bucket OCI
+   de destino e um diretório OCI exclusivo e não vazio.
    Prefixes pertencentes à mesma source podem ser informados em conjunto; não
    crie sources ativas que se cruzem no mesmo bucket.
-3. Execute discovery por API ou importe o S3 Inventory.
-4. Revise inventário, estimativas e crie waves manualmente ou pelo pipeline
+4. Execute discovery por API ou importe o S3 Inventory.
+5. Revise inventário, estimativas e crie waves manualmente ou pelo pipeline
    dinâmico.
-5. Coloque as waves na fila. O Raikou submete e acompanha restores; os Raijus
+6. Coloque as waves na fila. O Raikou submete e acompanha restores; os Raijus
    copiam os objetos liberados.
-6. Acompanhe a execução em **Queue** e consulte relatórios, manifestos e eventos
+7. Acompanhe a execução em **Queue** e consulte relatórios, manifestos e eventos
    por wave.
-7. Execute **Validate OCI destination** ao finalizar ou quando houver suspeita de
+8. Execute **Validate OCI destination** ao finalizar ou quando houver suspeita de
    divergência. Use auditoria profunda somente quando a evidência normal não for
    suficiente.
 

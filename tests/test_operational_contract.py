@@ -3903,6 +3903,65 @@ def test_project_adoption_is_reversible_only_before_inventory_or_waves():
             )
 
 
+def test_historical_project_association_preserves_route_and_backfills_queue_context():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="historico")
+        source = Source(
+            name="source-historica", s3_bucket="source", aws_region="us-east-1",
+            destination_bucket="destination", destination_prefix="legacy/frozen",
+        )
+        session.add_all([project, source]); session.flush()
+        wave = Wave(source_id=source.id, name="wave-001", max_bytes=1,
+                    restore_days=3, restore_tier="BULK", status="TRANSFERRING")
+        session.add(wave); session.flush()
+        obj = ObjectRecord(source_id=source.id, wave_id=wave.id,
+                           object_key="payload.bin", size_bytes=1,
+                           destination_object_key="legacy/frozen/payload.bin")
+        session.add(obj); session.flush()
+        queue = TransferQueueItem(source_id=source.id, wave_id=wave.id,
+                                  object_id=obj.id, size_bytes=1,
+                                  state=main.TransferQueueState.READY)
+        session.add(queue); session.flush()
+
+        result = main.associate_historical_source_with_migration_project(
+            project.id, source.id,
+            main.HistoricalSourceProjectAssociation(migration_project_id=project.id),
+            session,
+        )
+
+        assert result["route_preserved"] is True
+        assert result["queue_items_backfilled"] == 1
+        assert source.migration_project_id == project.id
+        assert source.destination_prefix == "legacy/frozen"
+        assert obj.destination_object_key == "legacy/frozen/payload.bin"
+        assert queue.project_id == project.id
+        event = session.scalar(select(Event).where(
+            Event.kind == "SOURCE_HISTORY_ASSOCIATED_WITH_MIGRATION_PROJECT"
+        ))
+        assert event is not None and event.migration_project_id == project.id
+
+
+def test_new_source_requires_an_existing_active_project():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    payload = main.SourceCreate(
+        name="source-sem-projeto", s3_bucket="source", aws_region="us-east-1",
+        aws_connection_id=1, destination_bucket="destination",
+    )
+    with Session() as session, pytest.raises(
+        HTTPException, match="Select an active migration project"
+    ):
+        main.create_source(payload, session)
+
+
 def test_migration_project_api_persists_project_context_in_events():
     import app.main as main
 

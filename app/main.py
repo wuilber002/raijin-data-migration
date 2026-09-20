@@ -1415,6 +1415,11 @@ class SourceProjectAdoption(BaseModel):
     destination_prefix: str = Field(min_length=1, max_length=1024)
 
 
+class HistoricalSourceProjectAssociation(BaseModel):
+    """Attach existing evidence to a project without changing its OCI route."""
+    migration_project_id: int = Field(ge=1)
+
+
 class SimulationScenarioBootstrap(BaseModel):
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{1,127}$")
     fidelity: str = Field(pattern="^(CONTROL|DATA)$")
@@ -6826,6 +6831,51 @@ def adopt_source_into_migration_project(project_id: int, source_id: int,
             "destination_prefix": destination_prefix}
 
 
+@app.post("/api/migration-projects/{project_id}/sources/{source_id}/associate-history")
+def associate_historical_source_with_migration_project(
+        project_id: int, source_id: int, payload: HistoricalSourceProjectAssociation,
+        session: Session = Depends(get_session)) -> dict:
+    """Associate a legacy source while preserving every established route.
+
+    This is deliberately different from adoption before discovery: historical
+    sources may already have inventory, waves, destination keys and active
+    transfer rows.  Rewriting their destination prefix would invalidate that
+    evidence, so only the aggregate ownership foreign keys are backfilled.
+    """
+    if payload.migration_project_id != project_id:
+        raise HTTPException(status_code=422, detail="Project id must match the request path")
+    project = active_migration_project_or_409(session, project_id)
+    source = source_or_404(session, source_id)
+    if source.migration_project_id not in (None, project.id):
+        raise HTTPException(
+            status_code=409,
+            detail="Source already belongs to another migration project",
+        )
+    previous_prefix = source.destination_prefix
+    source.migration_project_id = project.id
+    queue_rows = session.execute(
+        update(TransferQueueItem)
+        .where(TransferQueueItem.source_id == source.id)
+        .values(project_id=project.id)
+    ).rowcount or 0
+    record_event(
+        session,
+        "SOURCE_HISTORY_ASSOCIATED_WITH_MIGRATION_PROJECT",
+        (f"Source '{source.name}' associated with migration project '{project.name}'; "
+         f"OCI route preserved and {queue_rows} transfer queue item(s) backfilled"),
+        source_id=source.id,
+        migration_project_id=project.id,
+    )
+    session.commit()
+    return {
+        "source_id": source.id,
+        "migration_project_id": project.id,
+        "destination_prefix": previous_prefix,
+        "route_preserved": source.destination_prefix == previous_prefix,
+        "queue_items_backfilled": int(queue_rows),
+    }
+
+
 @app.delete("/api/migration-projects/{project_id}/sources/{source_id}")
 def remove_source_from_migration_project(project_id: int, source_id: int,
                                          session: Session = Depends(get_session)) -> dict:
@@ -6958,6 +7008,16 @@ def create_source(payload: SourceCreate, session: Session = Depends(get_session)
         raise HTTPException(status_code=409, detail="Source name already exists")
     if payload.aws_connection_id is None:
         raise HTTPException(status_code=422, detail="Select an AWS connection before creating a source")
+    if payload.migration_project_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Select an active migration project before creating a source",
+        )
+    if payload.migration_project_name is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="Create and select the migration project before creating its source",
+        )
     if not session.scalar(select(OciBucketCache.id).where(OciBucketCache.name == payload.destination_bucket)):
         raise HTTPException(status_code=422, detail="Choose a destination bucket from the OCI cache; refresh it in Settings first")
     if payload.aws_connection_id is not None:
@@ -6973,23 +7033,8 @@ def create_source(payload: SourceCreate, session: Session = Depends(get_session)
         raise HTTPException(status_code=409, detail=(
             f"S3 prefix scope overlaps active source(s): {names}. Archive the conflicting source or remove the overlapping prefix."
         ))
-    if payload.migration_project_id is not None and payload.migration_project_name is not None:
-        raise HTTPException(status_code=422, detail="Choose an existing migration project or provide a new project name, not both")
-    project: MigrationProject | None = None
-    project_created = False
-    if payload.migration_project_name is not None:
-        if session.scalar(select(MigrationProject.id).where(MigrationProject.name == payload.migration_project_name)):
-            raise HTTPException(status_code=409, detail="Migration project name already exists")
-        project = MigrationProject(name=payload.migration_project_name)
-        session.add(project)
-        session.flush()
-        project_created = True
-    if project is not None:
-        migration_project_id = project.id
-    else:
-        migration_project_id = payload.migration_project_id
     project, destination_prefix = normalized_project_destination_route(
-        session, migration_project_id, payload.destination_bucket, payload.destination_prefix
+        session, payload.migration_project_id, payload.destination_bucket, payload.destination_prefix
     )
     source_data = payload.model_dump(exclude={"s3_prefixes", "migration_project_name"})
     source_data["migration_project_id"] = project.id if project else None
@@ -7000,12 +7045,6 @@ def create_source(payload: SourceCreate, session: Session = Depends(get_session)
     session.add(source)
     session.flush()
     session.add_all(SourcePrefix(source_id=source.id, prefix=prefix) for prefix in prefixes)
-    if project_created:
-        record_event(
-            session, "MIGRATION_PROJECT_CREATED",
-            f"Migration project '{project.name}' configured with its first source",
-            migration_project_id=project.id,
-        )
     record_event(
         session, "SOURCE_CREATED", f"Source '{source.name}' configured",
         source_id=source.id, migration_project_id=(project.id if project else None),
