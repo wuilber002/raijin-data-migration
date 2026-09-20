@@ -562,9 +562,10 @@ com testes de escala e operação real:
   reutilização de conexão entre regiões, teto global de restores, vencedor
   único da lane, fairness durável e recuperação do lifecycle após reabertura
   do banco. Os validadores exercitam ainda os 11 templates Simulation e
-  catálogos lógicos de 640.000 objetos / 100 TB. O ensaio integrado publicado
-  contra Fujin LOCAL e o reinício real da VM continuam critérios operacionais
-  separados antes da promoção.
+  catálogos lógicos de 640.000 objetos / 100 TB. A recuperação da topologia
+  LOCAL após reboot real foi comprovada na release `d32c3a1`; resta o ensaio
+  integrado publicado com duas sources concorrendo pela lane antes da
+  promoção.
 - A topologia Fujin LOCAL pode atualizar apenas o plano de controle Raijin. O
   procedimento protegido mantém banco e serviços Fujin online, recusa rollout
   com transferência/lease ativo, valida o novo schema antes dos workers e
