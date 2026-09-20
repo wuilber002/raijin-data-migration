@@ -7,6 +7,7 @@ secret_root=/etc/s3-oci-migration/secrets
 runtime_root=/run/s3-oci-migration
 mode_control_root=/var/lib/s3-oci-migration/mode-control
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
+deployment_profile_file=/etc/s3-oci-migration/deployment-profile
 bootstrap_complete=false
 
 cleanup_failed_bootstrap() {
@@ -23,6 +24,10 @@ cleanup_failed_bootstrap() {
       s3-oci-transfer-worker
       s3-oci-app
       s3-oci-simulator
+      s3-oci-local-ui-gateway
+      s3-oci-fujin-local-materializer
+      s3-oci-fujin-local-dns
+      s3-oci-fujin-local
       s3-oci-postgres
     )
     # Explicit stop overrides each container's restart policy and releases the
@@ -158,6 +163,14 @@ operation_mode="$(tr '[:lower:]' '[:upper:]' <"$mode_file")"
   echo "Invalid operation mode in $mode_file" >&2
   exit 1
 }
+if [[ ! -s "$deployment_profile_file" ]]; then
+  printf 'STANDARD\n' >"$deployment_profile_file"
+fi
+deployment_profile="$(tr '[:lower:]' '[:upper:]' <"$deployment_profile_file")"
+[[ "$deployment_profile" == STANDARD || "$deployment_profile" == LOCAL ]] || {
+  echo "Invalid deployment profile in $deployment_profile_file" >&2
+  exit 1
+}
 install -m 0750 "$install_root/scripts/start-runtime.sh" /usr/local/sbin/s3-oci-start-runtime
 install -m 0750 "$install_root/scripts/start-fujin-local-runtime.sh" /usr/local/sbin/s3-oci-start-fujin-local-runtime
 install -m 0750 "$install_root/scripts/configure-fujin-local-oci-runtime.py" /usr/local/sbin/configure-fujin-local-oci-runtime
@@ -166,7 +179,15 @@ install -m 0750 "$install_root/scripts/mount-fujin-payload-volume.sh" /usr/local
 install -m 0750 "$install_root/scripts/stop-runtime.sh" /usr/local/sbin/s3-oci-stop-runtime
 install -m 0750 "$install_root/scripts/raijin-mode.sh" /usr/local/sbin/raijin-mode
 install -m 0750 "$install_root/scripts/process-mode-request.sh" /usr/local/sbin/s3-oci-process-mode-request
-/usr/local/sbin/s3-oci-start-runtime "$operation_mode"
+if [[ "$deployment_profile" == LOCAL ]]; then
+  # LOCAL is a durable deployment topology, not a Raijin operation mode.
+  # Raijin remains in REAL and sees Fujin only through ordinary private
+  # provider endpoints.  Keeping this choice separate from operation-mode
+  # makes a host reboot reconstruct the same eight-container topology.
+  /usr/local/sbin/s3-oci-start-fujin-local-runtime
+else
+  /usr/local/sbin/s3-oci-start-runtime "$operation_mode"
+fi
 
 cat >/etc/systemd/system/s3-oci-migration.service <<'EOF'
 [Unit]

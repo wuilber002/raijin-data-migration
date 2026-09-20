@@ -570,6 +570,10 @@ com testes de escala e operação real:
   com transferência/lease ativo, valida o novo schema antes dos workers e
   restaura automaticamente app, Raikou e Raiju pela imagem anterior se o
   health check falhar.
+- A escolha de implantação Fujin LOCAL é persistida separadamente do modo de
+  operação do Raijin. O bootstrap reconstrói a topologia privada completa após
+  reboot, mantendo o Raijin em `REAL`; perfis inválidos falham de forma segura
+  em vez de iniciar `STANDARD` ou `SIMULATION` por engano.
 
 ## Referências relacionadas
 

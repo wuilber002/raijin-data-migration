@@ -527,6 +527,11 @@ def test_oracle_linux_podman_launcher_keeps_raijin_real_and_the_data_plane_priva
     assert 'FUJIN_UI_RESOLVER:-' in Path("docker/run-local-ui-gateway.sh").read_text(encoding="utf-8")
     bootstrap = Path("scripts/bootstrap.sh").read_text(encoding="utf-8")
     assert "s3-oci-start-fujin-local-runtime" in bootstrap
+    assert "deployment-profile" in bootstrap
+    assert 'deployment_profile" == LOCAL' in bootstrap
+    assert '/usr/local/sbin/s3-oci-start-fujin-local-runtime' in bootstrap
+    assert '/usr/local/sbin/s3-oci-start-runtime "$operation_mode"' in bootstrap
+    assert 'printf \'STANDARD\\n\'' in bootstrap
     coredns = Path("docker/fujin-local.Corefile").read_text(encoding="utf-8")
     assert "forward . /etc/resolv.conf" in coredns
     assert "forward . 127.0.0.11" not in coredns

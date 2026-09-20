@@ -192,6 +192,19 @@ Raijin nem ao modo `SIMULATION`.
 parada controlada do runtime normal antes de executá-lo. Nunca faça essa troca
 durante transferência ativa.
 
+Registre também a topologia como decisão durável do host. O arquivo abaixo é
+independente de `operation-mode`: `LOCAL` seleciona a topologia privada e o
+Raijin continua sendo iniciado em `REAL` dentro dela.
+
+```bash
+printf 'LOCAL\n' | sudo tee /etc/s3-oci-migration/deployment-profile
+```
+
+O bootstrap usa esse perfil para reconstruir Fujin, DNS, materializador,
+Raijin, workers e gateway após um reboot. Instalações sem o arquivo preservam
+compatibilidade e assumem `STANDARD`. Valores diferentes de `STANDARD` e
+`LOCAL` interrompem o bootstrap, em vez de iniciar uma topologia inesperada.
+
 ### 7. Atualizar uma instalação existente
 
 Atualização não é instalação nova. Em janela operacional, preserve PostgreSQL
@@ -281,6 +294,9 @@ substituir containers ativos e recria o PostgreSQL durável somente quando ele
 foi removido pela parada controlada.
 Ele sobe Raijin em `REAL`, os workers, Fujin, DNS privado e o gateway em
 loopback; não existe modo LOCAL no Raijin.
+Antes do primeiro reboot, persista `LOCAL` em
+`/etc/s3-oci-migration/deployment-profile`; o arquivo
+`/etc/s3-oci-migration/operation-mode` não representa essa escolha.
 
 A console Fujin fornece o pacote de Secret sintético no formato normal de uma
 conexão AWS. Cadastre-o no Vault sem alterar o schema e crie uma conexão AWS
