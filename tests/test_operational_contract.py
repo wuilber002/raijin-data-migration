@@ -4238,6 +4238,32 @@ def test_schema_upgrade_adds_source_project_column_before_lane_backfill():
     assert add_source_columns < lane_backfill
 
 
+def test_postgres_claims_lock_only_non_nullable_task_and_discovery_tables():
+    """PostgreSQL rejects an unqualified FOR UPDATE on an OUTER JOIN."""
+    from sqlalchemy.dialects import postgresql
+
+    statements = []
+
+    class CaptureSession:
+        def scalars(self, statement):
+            statements.append(str(statement.compile(
+                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            )))
+            return []
+
+        def scalar(self, statement):
+            statements.append(str(statement.compile(
+                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            )))
+            return None
+
+    session = CaptureSession()
+    assert real_worker.claim_task(session, 120) is None
+    assert real_worker.claim_discovery_job(session, 120) is None
+    assert any("FOR UPDATE OF tasks SKIP LOCKED" in sql for sql in statements)
+    assert any("FOR UPDATE OF discovery_jobs SKIP LOCKED" in sql for sql in statements)
+
+
 def test_restore_slot_budget_is_global_across_projects_and_sources():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

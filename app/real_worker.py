@@ -796,7 +796,8 @@ def claim_task(session, lease_seconds: int, allowed_kinds: frozenset[str] | None
     if allowed_kinds is not None:
         query = query.where(Task.kind.in_(allowed_kinds))
     candidates = list(session.scalars(
-        query.order_by(Task.available_at, Task.id).with_for_update(skip_locked=True).limit(64)
+        query.order_by(Task.available_at, Task.id)
+        .with_for_update(skip_locked=True, of=Task).limit(64)
     ))
     task = None
     # An interrupted dispatcher always resumes its own durable task before a
@@ -854,7 +855,7 @@ def claim_discovery_job(session, lease_seconds: int) -> DiscoveryJob | None:
             or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"),
         )
         .order_by(DiscoveryJob.available_at, DiscoveryJob.id)
-        .with_for_update(skip_locked=True).limit(1)
+        .with_for_update(skip_locked=True, of=DiscoveryJob).limit(1)
     )
     if not job:
         return None
