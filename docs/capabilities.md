@@ -33,6 +33,12 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   usa a semântica literal do S3 (`app/` também cobre `app/images/`) e evita
   discovery, restore e transferência duplicados. Sources arquivadas não
   bloqueiam um novo cadastro.
+- Congela para cada objeto/revisão a chave de destino OCI resolvida no
+  discovery. A rota padrão permanece compatível (`chave OCI = chave S3`), mas
+  a transferência, multipart, validação e auditoria usam a chave persistida,
+  não uma configuração de source recalculada durante retry. A base interna
+  para projetos multi-source existe, mas cadastro de projetos, associação de
+  sources e scheduler compartilhado ainda não são capacidades operacionais.
 - Descobre objetos por API S3 paginada, com checkpoint, retomada, limitação de
   requisições por conexão e acompanhamento em fila durável.
 - Importa CSV/GZIP ou `manifest.json` do S3 Inventory para evitar chamadas de

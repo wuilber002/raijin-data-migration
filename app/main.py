@@ -219,6 +219,25 @@ ARCHIVE_STORAGE_CLASSES = {
 OCI_VAULT_SECRET_SEARCH_QUERY = "query vaultsecret resources"
 
 
+class MigrationProject(Base):
+    """Future operational aggregate for independent migration sources.
+
+    The foundation intentionally owns no scheduler behaviour yet.  It keeps
+    the future operational project separate from ``simulation_project_id``,
+    which is an execution-scoping identifier with different semantics.
+    """
+    __tablename__ = "migration_projects"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    status: Mapped[str] = mapped_column(String(32), default="CONFIGURED", index=True)
+    selection_policy: Mapped[str] = mapped_column(String(32), default="DEADLINE_FIRST")
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    sources: Mapped[list["Source"]] = relationship(back_populates="migration_project")
+
+
 class Source(Base):
     __tablename__ = "sources"
 
@@ -241,7 +260,15 @@ class Source(Base):
     simulation_tenant_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     simulation_project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     simulation_fidelity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Nullable until a later explicit project-adoption flow. Existing sources
+    # keep their exact independent operational behaviour.
+    migration_project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("migration_projects.id"), nullable=True, index=True
+    )
     destination_bucket: Mapped[str] = mapped_column(String(255))
+    # Normalized without leading/trailing slash. The empty default preserves
+    # legacy identity routing until a project route is explicitly configured.
+    destination_prefix: Mapped[str] = mapped_column(String(1024), default="")
     # Compatibility only.  Transfer strategy now belongs to each wave or to
     # the continuous pipeline, but older PostgreSQL deployments retain this
     # non-null source column.  Keep it populated without exposing it again in
@@ -292,6 +319,7 @@ class Source(Base):
     objects: Mapped[list[ObjectRecord]] = relationship(back_populates="source")
     waves: Mapped[list[Wave]] = relationship(back_populates="source")
     aws_connection: Mapped["AwsConnection | None"] = relationship(back_populates="sources")
+    migration_project: Mapped["MigrationProject | None"] = relationship(back_populates="sources")
     prefixes: Mapped[list["SourcePrefix"]] = relationship(back_populates="source", cascade="all, delete-orphan")
 
 
@@ -394,6 +422,7 @@ class ObjectRecord(Base):
     __table_args__ = (
         Index("ix_objects_source_key_id", "source_id", "object_key", "id"),
         Index("ix_objects_source_state_key_id", "source_id", "state", "object_key", "id"),
+        Index("ix_objects_source_destination_key_id", "source_id", "destination_object_key", "id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -405,6 +434,10 @@ class ObjectRecord(Base):
     previous_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"), nullable=True, index=True)
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     object_key: Mapped[str] = mapped_column(String(2048))
+    # Frozen at discovery. The worker must never derive a destination again
+    # from mutable source configuration, otherwise a route edit could move an
+    # already planned/retrying object to a second OCI key.
+    destination_object_key: Mapped[str] = mapped_column(String(2048), default="")
     version_id: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     etag: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -969,7 +1002,10 @@ def merge_discovery_rows(session: Session, source: Source, rows: list[dict], job
     for row in rows:
         prior = existing.get(row["object_key"])
         if prior is None:
-            fresh.append(row)
+            # Route resolution is part of the inventory evidence. It happens
+            # once for this revision and is never recomputed on rediscovery,
+            # retry, multipart resume or deep audit.
+            fresh.append({**row, "destination_object_key": resolve_destination_object_key(source, row["object_key"])})
             new += 1
             continue
         if not discovery_row_changed(prior, row):
@@ -1107,6 +1143,35 @@ def source_prefix_values(source: Source) -> list[str]:
 
 def source_key_in_scope(source: Source, object_key: str) -> bool:
     return any(not prefix or object_key.startswith(prefix) for prefix in source_prefix_values(source))
+
+
+def normalize_destination_prefix(prefix: str | None) -> str:
+    """Normalize the OCI route prefix without changing object-key semantics."""
+    normalized = str(prefix or "").strip().strip("/")
+    if "\x00" in normalized:
+        raise ValueError("Destination prefix cannot contain a NUL byte")
+    return normalized
+
+
+def resolve_destination_object_key(source: Source, object_key: str) -> str:
+    """Resolve the immutable OCI key to persist at discovery time."""
+    key = str(object_key or "").lstrip("/")
+    prefix = normalize_destination_prefix(source.destination_prefix)
+    destination = f"{prefix}/{key}" if prefix else key
+    if not destination or len(destination) > 2048:
+        raise ValueError("Destination object key must contain 1–2048 characters")
+    return destination
+
+
+def object_destination_key(obj: ObjectRecord) -> str:
+    """Read legacy records safely while online backfill is being adopted."""
+    return obj.destination_object_key or obj.object_key
+
+
+def destination_listing_prefix(source: Source) -> str:
+    """Smallest OCI prefix that contains this source's routed objects."""
+    prefix = normalize_destination_prefix(source.destination_prefix)
+    return f"{prefix}/" if prefix else ""
 
 
 def s3_prefixes_overlap(left: str, right: str) -> bool:
@@ -1446,6 +1511,7 @@ def create_schema() -> None:
         "is_current_revision": "BOOLEAN NOT NULL DEFAULT TRUE",
         "previous_object_id": "BIGINT",
         "superseded_at": "TIMESTAMP WITH TIME ZONE",
+        "destination_object_key": "VARCHAR(2048) NOT NULL DEFAULT ''",
         "source_checksum": "VARCHAR(256)",
         "destination_checksum": "VARCHAR(256)",
         "checksum_algorithm": "VARCHAR(32)",
@@ -1509,7 +1575,7 @@ def create_schema() -> None:
         "restore_forecast_standard_first_seconds": "INTEGER NOT NULL DEFAULT 14400",
         "restore_forecast_standard_complete_seconds": "INTEGER NOT NULL DEFAULT 64800",
     }
-    source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_objects_inserted": "BIGINT NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "backend_kind": "VARCHAR(16) NOT NULL DEFAULT 'REAL'", "simulation_scenario_id": "VARCHAR(36)", "simulation_execution_id": "VARCHAR(36)", "simulation_correlation_id": "VARCHAR(36)", "simulation_tenant_id": "VARCHAR(36)", "simulation_project_id": "VARCHAR(36)", "simulation_fidelity": "VARCHAR(16)", "business_priority": "INTEGER NOT NULL DEFAULT 999"}
+    source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_objects_inserted": "BIGINT NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "backend_kind": "VARCHAR(16) NOT NULL DEFAULT 'REAL'", "simulation_scenario_id": "VARCHAR(36)", "simulation_execution_id": "VARCHAR(36)", "simulation_correlation_id": "VARCHAR(36)", "simulation_tenant_id": "VARCHAR(36)", "simulation_project_id": "VARCHAR(36)", "simulation_fidelity": "VARCHAR(16)", "migration_project_id": "BIGINT", "destination_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''", "business_priority": "INTEGER NOT NULL DEFAULT 999"}
     source_columns["archived_at"] = "TIMESTAMP WITH TIME ZONE"
     source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION", "completion_estimate_json": "TEXT NOT NULL DEFAULT '{}'"})
     wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "restore_submission_deadline_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_requested_virtual_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_started_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_completed_virtual_at": "TIMESTAMP WITH TIME ZONE", "simulation_transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
@@ -1531,6 +1597,13 @@ def create_schema() -> None:
         for column, sql_type in expected_columns.items():
             if column not in existing_columns:
                 connection.execute(text(f"ALTER TABLE objects ADD COLUMN {column} {sql_type}"))
+        # Existing records were transferred under identity routing. Persist
+        # that exact historical destination before any future route exists.
+        connection.execute(text("""
+            UPDATE objects
+            SET destination_object_key = object_key
+            WHERE destination_object_key IS NULL OR destination_object_key = ''
+        """))
         for column, sql_type in runtime_columns.items():
             if column not in existing_runtime_columns:
                 connection.execute(text(f"ALTER TABLE runtime_settings ADD COLUMN {column} {sql_type}"))
@@ -1560,6 +1633,10 @@ def create_schema() -> None:
         for column, sql_type in source_columns.items():
             if column not in existing_source_columns:
                 connection.execute(text(f"ALTER TABLE sources ADD COLUMN {column} {sql_type}"))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_objects_source_destination_key_id "
+            "ON objects (source_id, destination_object_key, id)"
+        ))
         for column, sql_type in {
             "priority_details_json": "TEXT NOT NULL DEFAULT '{}'",
             "last_dispatched_at": "TIMESTAMP WITH TIME ZONE",
@@ -6392,7 +6469,11 @@ def import_inventory(source_id: int, payload: InventoryImport, session: Session 
         ))
         if duplicate:
             continue
-        session.add(ObjectRecord(source_id=source_id, **item.model_dump()))
+        session.add(ObjectRecord(
+            source_id=source_id,
+            destination_object_key=resolve_destination_object_key(source, item.object_key),
+            **item.model_dump(),
+        ))
         inserted += 1
     duplicates = len(payload.items) - inserted - skipped_out_of_scope
     record_event(session, "INVENTORY_IMPORTED", f"Imported {inserted} inventory record(s); skipped {duplicates} duplicate(s) and {skipped_out_of_scope} out-of-scope record(s)", source_id=source_id)
@@ -6805,6 +6886,7 @@ def reprocess_modified_discovery_objects(source_id: int, session: Session = Depe
         prior.is_current_revision, prior.superseded_at = False, utcnow()
         successor = ObjectRecord(
             source_id=source.id, previous_object_id=prior.id, object_key=prior.object_key,
+            destination_object_key=object_destination_key(prior),
             version_id=change.current_version_id, size_bytes=change.current_size_bytes,
             etag=change.current_etag, storage_class=prior.storage_class,
             last_modified=change.current_last_modified, metadata_json=prior.metadata_json,
@@ -6898,7 +6980,7 @@ def simulated_destination_listing(source: Source) -> dict[str, object]:
     )
     port = SimulatedSourcePort(runtime_context.simulator_base_url)
     found: dict[str, object] = {}
-    for prefix in source_prefix_values(source):
+    for prefix in [destination_listing_prefix(source)]:
         token = None
         while True:
             page = port.list_objects(ListObjectsRequest(
@@ -6917,7 +6999,7 @@ def simulated_destination_listing(source: Source) -> dict[str, object]:
 def validate_destination(source_id: int, session: Session = Depends(get_session)) -> dict:
     """Explicit OCI-only final reconciliation against the durable discovery."""
     source = active_source_or_409(session, source_id)
-    expected = {obj.object_key: obj for obj in session.scalars(
+    expected = {object_destination_key(obj): obj for obj in session.scalars(
         select(ObjectRecord).where(ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True))
     )}
     if not expected:
@@ -6935,7 +7017,7 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
                 raise RuntimeError("OCI namespace is not configured")
             client = oci_object_storage_client(oci.auth.signers.InstancePrincipalsSecurityTokenSigner())
             found: dict[str, int] = {}
-            for prefix in source_prefix_values(source):
+            for prefix in [destination_listing_prefix(source)]:
                 start = None
                 while True:
                     arguments = {"prefix": prefix, "limit": 1000, "fields": "name,size"}
@@ -6991,7 +7073,7 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
     for offset in range(0, len(divergent_keys), 1000):
         objects = list(session.scalars(select(ObjectRecord).where(
             ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True),
-            ObjectRecord.object_key.in_(divergent_keys[offset:offset + 1000])
+            ObjectRecord.destination_object_key.in_(divergent_keys[offset:offset + 1000])
         )))
         for obj in objects:
             obj.integrity_verified_at, obj.destination_checksum, obj.transferred_at = None, None, None
@@ -7051,7 +7133,8 @@ def list_inventory(source_id: int, limit: int = 10, offset: int = 0,
     # omitted for cursor calls; source summary already exposes its durable
     # inventory total.
     total = None if use_cursor else session.scalar(select(func.count(ObjectRecord.id)).where(*filters)) or 0
-    return {"items": [{"id": obj.id, "key": obj.object_key, "version_id": obj.version_id,
+    return {"items": [{"id": obj.id, "key": obj.object_key,
+                       "destination_key": object_destination_key(obj), "version_id": obj.version_id,
                        "size_bytes": obj.size_bytes, "storage_class": obj.storage_class, "state": obj.state,
                        "last_modified": obj.last_modified, "etag": obj.etag, "wave_id": obj.wave_id} for obj in rows],
             "limit": limit, "offset": offset, "total": total, "next_cursor": next_cursor,
@@ -7064,6 +7147,7 @@ def object_detail(object_id: int, session: Session = Depends(get_session)) -> di
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
     return {"id": obj.id, "source_id": obj.source_id, "wave_id": obj.wave_id, "key": obj.object_key,
+            "destination_key": object_destination_key(obj),
             "version_id": obj.version_id, "size_bytes": obj.size_bytes, "etag": obj.etag,
             "storage_class": obj.storage_class, "last_modified": obj.last_modified, "state": obj.state,
             "metadata": json.loads(obj.metadata_json), "tags": json.loads(obj.tags_json),
@@ -7104,9 +7188,9 @@ def export_inventory(source_id: int, session: Session = Depends(get_session)) ->
     source_or_404(session, source_id)
     content = io.StringIO()
     writer = csv.writer(content, lineterminator="\n")
-    writer.writerow(["object_key", "version_id", "size_bytes", "etag", "storage_class", "last_modified", "state", "wave_id", "metadata_json", "tags_json"])
+    writer.writerow(["object_key", "destination_object_key", "version_id", "size_bytes", "etag", "storage_class", "last_modified", "state", "wave_id", "metadata_json", "tags_json"])
     for obj in session.scalars(select(ObjectRecord).where(ObjectRecord.source_id == source_id, ObjectRecord.is_current_revision.is_(True)).order_by(ObjectRecord.object_key)):
-        writer.writerow([obj.object_key, obj.version_id or "", obj.size_bytes, obj.etag or "", obj.storage_class or "",
+        writer.writerow([obj.object_key, object_destination_key(obj), obj.version_id or "", obj.size_bytes, obj.etag or "", obj.storage_class or "",
                          obj.last_modified.isoformat() if obj.last_modified else "", obj.state, obj.wave_id or "", obj.metadata_json, obj.tags_json])
     return StreamingResponse(iter([content.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="source-{source_id}-inventory.csv"'})
 

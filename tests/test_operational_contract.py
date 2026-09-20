@@ -3789,3 +3789,44 @@ def test_dynamic_repack_keeps_non_nullable_object_predictions_valid():
     source = Path("app/main.py").read_text(encoding="utf-8")
     handler = source[source.index("def repackage_unsubmitted_dynamic_waves"):source.index("\n\ndef replan_dynamic_pipeline")]
     assert "planned_transfer_seconds=0" in handler
+
+
+def test_multi_source_foundation_freezes_destination_route_per_object_revision():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(id=801, name="programa-a")
+        source = Source(
+            id=802, name="source-route", s3_bucket="source", aws_region="us-east-1",
+            destination_bucket="destination", destination_prefix="programa-a/source-route/",
+            migration_project=project,
+        )
+        session.add_all([project, source]); session.flush()
+        inserted, updated, changed = main.merge_discovery_rows(session, source, [{
+            "source_id": source.id, "object_key": "reports/2026.csv", "size_bytes": 12,
+        }])
+        assert (inserted, updated, changed) == (1, 0, 0)
+        obj = session.scalar(select(ObjectRecord).where(ObjectRecord.source_id == source.id))
+        assert obj.destination_object_key == "programa-a/source-route/reports/2026.csv"
+        # A later administrative route change cannot rewrite inventory evidence.
+        source.destination_prefix = "another-route"
+        main.merge_discovery_rows(session, source, [{
+            "source_id": source.id, "object_key": "reports/2026.csv", "size_bytes": 12,
+        }])
+        assert main.object_destination_key(obj) == "programa-a/source-route/reports/2026.csv"
+        assert source.migration_project_id == project.id
+
+
+def test_multi_source_foundation_preserves_legacy_identity_destination_route():
+    import app.main as main
+
+    source = Source(name="legacy-route", s3_bucket="source", aws_region="us-east-1",
+                    destination_bucket="destination")
+    legacy = ObjectRecord(source_id=1, object_key="legacy/key", size_bytes=1)
+    assert main.resolve_destination_object_key(source, "legacy/key") == "legacy/key"
+    assert main.object_destination_key(legacy) == "legacy/key"
+    assert {"migration_project_id", "destination_prefix"} <= set(Source.__table__.columns.keys())
+    assert "destination_object_key" in ObjectRecord.__table__.columns.keys()

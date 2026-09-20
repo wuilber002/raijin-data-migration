@@ -58,7 +58,7 @@ from app.simulator_admin import SimulatorAdminClient, SimulatorAdminError
 from app.simulator_ports import SimulatedDestinationPort, SimulatedSourcePort, SimulatorTransportError
 from app.main import (
     AwsConnection, DiscoveryJob, Event, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, merge_discovery_rows, source_key_in_scope, source_prefix_values,
-    DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, transfer_priority, utcnow,
+    DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, transfer_priority, utcnow,
 )
 
 # Raiju is the operational worker identity.  Raikou is the separate governance
@@ -2508,6 +2508,7 @@ def transfer_object(s3, namespace: str, source_bucket: str, destination_bucket: 
         obj = worker_session.get(ObjectRecord, object_id)
         if not obj or obj.state not in {ObjectState.RESTORED, ObjectState.TRANSFERRING}:
             return
+        destination_key = object_destination_key(obj)
         # Keep an accumulated active-copy duration.  A stopped worker may
         # resume this object later; downtime is intentionally not counted.
         if obj.state != ObjectState.TRANSFERRING:
@@ -2603,7 +2604,7 @@ def transfer_object(s3, namespace: str, source_bucket: str, destination_bucket: 
             checksum_b64 = sha256_b64(payload)
             upload_started = time.monotonic()
             oci_client.put_object(
-                namespace, destination_bucket, obj.object_key, payload,
+                namespace, destination_bucket, destination_key, payload,
                 content_length=obj.size_bytes, content_type=response.get("ContentType"), opc_meta=metadata,
                 opc_checksum_algorithm="SHA256", opc_content_sha256=checksum_b64,
             )
@@ -2635,7 +2636,7 @@ def transfer_object(s3, namespace: str, source_bucket: str, destination_bucket: 
             remote_parts: dict[int, dict] = {}
             if upload_id:
                 reconciled_parts = reconcile_multipart_checkpoint(
-                    oci_client, namespace, destination_bucket, obj.object_key, upload_id
+                    oci_client, namespace, destination_bucket, destination_key, upload_id
                 )
                 if reconciled_parts is None:
                     # OCI explicitly reports this upload as absent. Clear only
@@ -2653,7 +2654,7 @@ def transfer_object(s3, namespace: str, source_bucket: str, destination_bucket: 
                 create = oci_client.create_multipart_upload(
                     namespace, destination_bucket,
                     oci.object_storage.models.CreateMultipartUploadDetails(
-                        object=obj.object_key, content_type=response.get("ContentType"),
+                        object=destination_key, content_type=response.get("ContentType"),
                         # PutObject receives opc_meta without the wire prefix,
                         # while CreateMultipartUploadDetails expects the exact
                         # OCI metadata header names.
@@ -2722,7 +2723,7 @@ def transfer_object(s3, namespace: str, source_bucket: str, destination_bucket: 
                 digest_b64 = sha256_b64(payload)
                 upload_started = time.monotonic()
                 uploaded = oci_client.upload_part(
-                    namespace, destination_bucket, obj.object_key, upload_id, part_number, payload,
+                    namespace, destination_bucket, destination_key, upload_id, part_number, payload,
                     content_length=len(payload), opc_checksum_algorithm="SHA256", opc_content_sha256=digest_b64,
                 )
                 completed_bytes += len(payload)
@@ -2745,7 +2746,7 @@ def transfer_object(s3, namespace: str, source_bucket: str, destination_bucket: 
             if len(parts) != total_parts:
                 raise RuntimeError("Multipart upload has incomplete part evidence")
             oci_client.commit_multipart_upload(
-                namespace, destination_bucket, obj.object_key, upload_id,
+                namespace, destination_bucket, destination_key, upload_id,
                 oci.object_storage.models.CommitMultipartUploadDetails(parts_to_commit=parts),
             )
             obj.multipart_upload_id, obj.multipart_updated_at = None, utcnow()
@@ -2836,6 +2837,11 @@ def transfer_object_simulated(
             key=obj.object_key,
             version_id=obj.version_id,
         )
+        destination_identity = ObjectIdentity(
+            bucket=source.destination_bucket,
+            key=object_destination_key(obj),
+            version_id=obj.version_id,
+        )
         if source.simulation_fidelity == "CONTROL":
             result = destination_port.transfer_logically(
                 LogicalTransferRequest(
@@ -2892,7 +2898,7 @@ def transfer_object_simulated(
 
         descriptor = ObjectDescriptor(
             bucket=source.destination_bucket,
-            key=obj.object_key,
+            key=destination_identity.key,
             version_id=obj.version_id,
             size_bytes=obj.size_bytes,
             storage_class="STANDARD",
@@ -2990,7 +2996,7 @@ def transfer_object_simulated(
                     MultipartPartRequest(
                         context=context,
                         upload_id=upload_id,
-                        object=identity,
+                        object=destination_identity,
                         part_number=part_number,
                         size_bytes=expected_size,
                         checksum_sha256=digest,
@@ -3020,7 +3026,7 @@ def transfer_object_simulated(
                 MultipartCommitRequest(
                     context=context,
                     upload_id=upload_id,
-                    object=identity,
+                    object=destination_identity,
                     parts=parts,
                     full_checksum_sha256=(
                         None
@@ -4632,7 +4638,9 @@ def verify_wave(session, task: Task) -> None:
             failed += 1
             continue
         try:
-            destination_body = oci_client.get_object(namespace, source.destination_bucket, obj.object_key).data.raw
+            destination_body = oci_client.get_object(
+                namespace, source.destination_bucket, object_destination_key(obj)
+            ).data.raw
             destination_digest = hashlib.sha256()
             obj.audit_started_at, obj.audit_progress_bytes = utcnow(), 0
             obj.audit_progress_at, obj.audit_rate_mbps = utcnow(), 0
@@ -4727,7 +4735,7 @@ def verify_wave_simulated(session, task: Task, wave: Wave, source: Source) -> No
                     context=context,
                     object=ObjectIdentity(
                         bucket=source.destination_bucket,
-                        key=obj.object_key,
+                        key=object_destination_key(obj),
                         version_id=obj.version_id,
                     ),
                     offset=offset,
