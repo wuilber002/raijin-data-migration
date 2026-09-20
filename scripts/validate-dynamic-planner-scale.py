@@ -47,6 +47,7 @@ def main() -> None:
         from app.main import (
             Base,
             DynamicWaveCreate,
+            DynamicPipelineRun,
             ObjectRecord,
             ObjectState,
             Source,
@@ -108,20 +109,33 @@ def main() -> None:
             waves = int(session.scalar(select(func.count(Wave.id)).where(
                 Wave.source_id == source.id
             )) or 0)
+            run = session.get(DynamicPipelineRun, result["pipeline_run_id"])
+            catalog_objects, catalog_bytes = session.execute(select(
+                func.count(ObjectRecord.id),
+                func.coalesce(func.sum(ObjectRecord.size_bytes), 0),
+            ).where(ObjectRecord.source_id == source.id)).one()
             if (
-                int(assigned) != args.objects
-                or int(distinct_objects) != args.objects
-                or int(assigned_bytes) != args.logical_bytes
+                int(catalog_objects) != args.objects
+                or int(catalog_bytes) != args.logical_bytes
                 or result["objects"] != args.objects
                 or result["bytes"] != args.logical_bytes
+                or int(assigned) <= 0
+                or int(distinct_objects) != int(assigned)
+                or int(assigned_bytes) <= 0
+                or int(assigned_bytes) > args.logical_bytes
+                or waves != result["waves"]
+                or run is None
+                or waves > int(run.restore_horizon_waves)
             ):
                 raise SystemExit(
-                    f"FAILED assigned={assigned}/{args.objects} distinct={distinct_objects} "
-                    f"bytes={assigned_bytes}/{args.logical_bytes}"
+                    f"FAILED catalog={catalog_objects}/{args.objects} "
+                    f"assigned={assigned} distinct={distinct_objects} "
+                    f"bytes={assigned_bytes}/{args.logical_bytes} waves={waves}"
                 )
         print(
             "PASS "
-            f"objects={args.objects} logical_bytes={args.logical_bytes} waves={waves} "
+            f"catalog_objects={args.objects} logical_bytes={args.logical_bytes} "
+            f"horizon_objects={assigned} horizon_bytes={assigned_bytes} waves={waves} "
             f"insert_seconds={inserted_seconds:.3f} planner_seconds={planned_seconds:.3f} "
             f"sqlite_bytes={database.stat().st_size}"
         )

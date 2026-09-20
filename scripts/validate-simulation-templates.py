@@ -188,6 +188,9 @@ def main() -> None:
                         destination_bucket,
                         item.key,
                         item.size_bytes,
+                        1_000.0,
+                        1,
+                        f"template-network-{item.key}",
                         f"template-transfer-{item.key}",
                     )
                 else:

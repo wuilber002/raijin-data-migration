@@ -3830,3 +3830,495 @@ def test_multi_source_foundation_preserves_legacy_identity_destination_route():
     assert main.object_destination_key(legacy) == "legacy/key"
     assert {"migration_project_id", "destination_prefix"} <= set(Source.__table__.columns.keys())
     assert "destination_object_key" in ObjectRecord.__table__.columns.keys()
+
+
+def test_project_destination_routes_require_distinct_directory_prefixes():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-rotas")
+        session.add(project); session.flush()
+        alpha = Source(name="source-alpha", s3_bucket="source-alpha", aws_region="us-east-1",
+                       destination_bucket="destination", migration_project_id=project.id,
+                       destination_prefix="finance")
+        beta = Source(name="source-beta", s3_bucket="source-beta", aws_region="us-east-1",
+                      destination_bucket="destination", migration_project_id=project.id,
+                      destination_prefix="engineering")
+        session.add_all([alpha, beta]); session.flush()
+        assert main.project_destination_route_conflicts(
+            session, project.id, "destination", "finance/reports"
+        ) == [{
+            "source_id": alpha.id, "source_name": "source-alpha",
+            "destination_bucket": "destination", "requested_prefix": "finance/reports",
+            "existing_prefix": "finance",
+        }]
+        assert not main.project_destination_route_conflicts(
+            session, project.id, "destination", "financial"
+        )
+        other_project = main.MigrationProject(name="programa-externo")
+        foreign_route = Source(
+            name="source-externa", s3_bucket="source-externa", aws_region="us-east-1",
+            destination_bucket="destination", migration_project=other_project,
+            destination_prefix="shared",
+        )
+        session.add_all([other_project, foreign_route]); session.flush()
+        assert main.project_destination_route_conflicts(
+            session, project.id, "destination", "shared/incoming"
+        )[0]["source_id"] == foreign_route.id
+        with pytest.raises(HTTPException, match="non-empty destination prefix"):
+            main.normalized_project_destination_route(session, project.id, "destination", "")
+        with pytest.raises(HTTPException, match="requires an explicit migration project"):
+            main.normalized_project_destination_route(session, None, "destination", "legacy-prefix")
+
+
+def test_project_adoption_is_reversible_only_before_inventory_or_waves():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-adocao")
+        source = Source(name="source-adotavel", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add_all([project, source]); session.flush()
+        adopted = main.adopt_source_into_migration_project(
+            project.id, source.id,
+            main.SourceProjectAdoption(migration_project_id=project.id, destination_prefix="projeto/source"),
+            session,
+        )
+        assert adopted["destination_prefix"] == "projeto/source"
+        assert source.migration_project_id == project.id
+        assert main.remove_source_from_migration_project(project.id, source.id, session)["migration_project_id"] is None
+        session.add(ObjectRecord(source_id=source.id, object_key="frozen", size_bytes=1))
+        session.flush()
+        with pytest.raises(HTTPException, match="cannot change migration project routing"):
+            main.adopt_source_into_migration_project(
+                project.id, source.id,
+                main.SourceProjectAdoption(migration_project_id=project.id, destination_prefix="another-route"),
+                session,
+            )
+
+
+def test_migration_project_api_persists_project_context_in_events():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        created = main.create_migration_project(main.MigrationProjectCreate(name="programa-api"), session)
+        assert created["name"] == "programa-api"
+        event = session.scalar(select(Event).where(Event.migration_project_id == created["id"]))
+        assert event is not None
+        assert event.kind == "MIGRATION_PROJECT_CREATED"
+        archived = main.archive_migration_project(created["id"], session)
+        assert archived["status"] == "ARCHIVED"
+
+
+def test_migration_project_summary_aggregates_without_erasing_source_evidence():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-relatorio")
+        source_a = Source(name="source-relatorio-a", s3_bucket="a", aws_region="us-east-1",
+                          destination_bucket="destination", migration_project=project,
+                          destination_prefix="programa/a", status="DISCOVERED")
+        source_b = Source(name="source-relatorio-b", s3_bucket="b", aws_region="us-west-2",
+                          destination_bucket="destination", migration_project=project,
+                          destination_prefix="programa/b", status="DISCOVERED")
+        session.add_all([project, source_a, source_b]); session.flush()
+        wave = Wave(source_id=source_a.id, name="wave-relatorio", max_bytes=30,
+                    restore_days=1, restore_tier="BULK", status="TRANSFERRING")
+        session.add(wave); session.flush()
+        session.add_all([
+            ObjectRecord(source_id=source_a.id, wave_id=wave.id, object_key="a.bin", size_bytes=10,
+                         storage_class="DEEP_ARCHIVE", state=ObjectState.TRANSFERRED),
+            ObjectRecord(source_id=source_b.id, object_key="b.bin", size_bytes=20,
+                         storage_class="STANDARD", state=ObjectState.VERIFIED),
+        ])
+        session.flush()
+        report = main.migration_project_metrics(session, project)
+        assert report["status"] == "RUNNING"
+        assert report["inventory"] == {
+            "objects": 2, "bytes": 30, "transferred_objects": 2,
+            "transferred_bytes": 30, "verified_objects": 1, "failed_objects": 0,
+        }
+        assert {item["aws_region"] for item in report["sources_detail"]} == {"us-east-1", "us-west-2"}
+
+
+def test_global_lane_selection_uses_one_priority_order_and_persists_evidence():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-lane")
+        low_source = Source(name="source-lane-low", s3_bucket="low", aws_region="us-east-1",
+                            destination_bucket="destination", migration_project=project,
+                            destination_prefix="lane/low")
+        high_source = Source(name="source-lane-high", s3_bucket="high", aws_region="us-east-1",
+                             destination_bucket="destination", migration_project=project,
+                             destination_prefix="lane/high")
+        session.add_all([project, low_source, high_source]); session.flush()
+        low_wave = Wave(source_id=low_source.id, name="wave-low", max_bytes=1,
+                        restore_days=1, restore_tier="BULK", status="RESTORED")
+        high_wave = Wave(source_id=high_source.id, name="wave-high", max_bytes=1,
+                         restore_days=1, restore_tier="BULK", status="RESTORED")
+        session.add_all([low_wave, high_wave]); session.flush()
+        low_object = ObjectRecord(source_id=low_source.id, wave_id=low_wave.id, object_key="low", size_bytes=1, state=ObjectState.RESTORED)
+        high_object = ObjectRecord(source_id=high_source.id, wave_id=high_wave.id, object_key="high", size_bytes=1, state=ObjectState.RESTORED)
+        session.add_all([low_object, high_object]); session.flush()
+        session.add_all([
+            TransferQueueItem(project_id=project.id, source_id=low_source.id, wave_id=low_wave.id,
+                              object_id=low_object.id, size_bytes=1, state=main.TransferQueueState.READY,
+                              priority_score=40, priority_band="NORMAL"),
+            TransferQueueItem(project_id=project.id, source_id=high_source.id, wave_id=high_wave.id,
+                              object_id=high_object.id, size_bytes=1, state=main.TransferQueueState.READY,
+                              priority_score=100, priority_band="CRITICAL"),
+        ])
+        session.flush()
+        selected = main.select_global_transfer_lane_candidate(session, {low_source.id, high_source.id})
+        assert selected is not None and selected.source_id == high_source.id
+        decision = session.scalar(select(main.TransferLaneDecision).where(
+            main.TransferLaneDecision.queue_item_id == selected.id
+        ))
+        assert decision is not None and decision.project_id == project.id
+
+
+def test_raiju_claims_only_the_global_lane_winner_across_sources():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        first = Source(name="source-global-first", s3_bucket="first", aws_region="us-east-1", destination_bucket="destination")
+        urgent = Source(name="source-global-urgent", s3_bucket="urgent", aws_region="us-east-1", destination_bucket="destination")
+        session.add_all([first, urgent]); session.flush()
+        first_wave = Wave(source_id=first.id, name="first-wave", max_bytes=1, restore_days=1, restore_tier="BULK", status="RESTORED")
+        urgent_wave = Wave(source_id=urgent.id, name="urgent-wave", max_bytes=1, restore_days=1, restore_tier="BULK", status="RESTORED")
+        session.add_all([first_wave, urgent_wave]); session.flush()
+        first_object = ObjectRecord(source_id=first.id, wave_id=first_wave.id, object_key="first", size_bytes=1, state=ObjectState.RESTORED)
+        urgent_object = ObjectRecord(source_id=urgent.id, wave_id=urgent_wave.id, object_key="urgent", size_bytes=1, state=ObjectState.RESTORED)
+        session.add_all([first_object, urgent_object]); session.flush()
+        session.add_all([
+            TransferQueueItem(source_id=first.id, wave_id=first_wave.id, object_id=first_object.id, size_bytes=1,
+                              state=TransferQueueState.READY, priority_score=40, priority_band="NORMAL"),
+            TransferQueueItem(source_id=urgent.id, wave_id=urgent_wave.id, object_id=urgent_object.id, size_bytes=1,
+                              state=TransferQueueState.READY, priority_score=100, priority_band="CRITICAL"),
+            Task(wave_id=first_wave.id, kind="TRANSFER_CONTINUOUS"),
+            Task(wave_id=urgent_wave.id, kind="TRANSFER_CONTINUOUS"),
+        ])
+        session.commit()
+        claimed = real_worker.claim_task(session, 120, real_worker.RAIJU_TASK_KINDS)
+        assert claimed is not None and claimed.wave_id == urgent_wave.id
+        assert session.scalar(select(main.TransferLaneDecision).where(
+            main.TransferLaneDecision.source_id == urgent.id
+        )) is not None
+
+
+def test_project_completion_requires_delivery_integrity_and_surfaces_pending_audit():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-integridade")
+        source = Source(name="source-integridade", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", migration_project=project,
+                        destination_prefix="integridade/source", status="DISCOVERED")
+        session.add_all([project, source]); session.flush()
+        wave = Wave(source_id=source.id, name="wave-integridade", max_bytes=1,
+                    restore_days=1, restore_tier="BULK", status="COMPLETED")
+        session.add(wave); session.flush()
+        obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="done.bin",
+                           size_bytes=1, state=ObjectState.TRANSFERRED)
+        session.add(obj); session.flush()
+
+        awaiting = main.migration_project_summary(session, project)
+        assert awaiting["status"] == "COMPLETED_WITH_ATTENTION"
+        assert awaiting["completion"]["sources"][0]["blockers"] == ["integridade de entrega pendente"]
+
+        obj.delivery_integrity_status = "OCI_ACCEPTED"
+        session.flush()
+        completed = main.migration_project_summary(session, project)
+        assert completed["status"] == "COMPLETED"
+
+        session.add(Task(wave_id=wave.id, kind="VERIFY_INTEGRITY", state=TaskState.READY))
+        session.flush()
+        auditing = main.migration_project_summary(session, project)
+        assert auditing["status"] == "COMPLETED_WITH_ATTENTION"
+        assert "auditoria profunda pendente" in auditing["completion"]["sources"][0]["blockers"]
+
+
+def test_deleting_pristine_project_source_preserves_project_and_other_sources():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-retencao")
+        removable = Source(name="source-removivel", s3_bucket="remove", aws_region="us-east-1",
+                           destination_bucket="destination", migration_project=project,
+                           destination_prefix="retencao/remove")
+        retained = Source(name="source-retida", s3_bucket="retain", aws_region="us-west-2",
+                          destination_bucket="destination", migration_project=project,
+                          destination_prefix="retencao/retain")
+        session.add_all([project, removable, retained]); session.commit()
+
+        removed = main.delete_source(removable.id, session)
+        assert removed["deleted"] is True
+        assert session.get(main.MigrationProject, project.id) is not None
+        summary = main.migration_project_summary(session, project)
+        assert summary["source_count"] == 1
+        assert summary["sources"][0]["id"] == retained.id
+
+
+def test_project_queue_filter_is_read_only_and_does_not_include_other_sources():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-filtro-fila")
+        owned = Source(name="source-filtro-owned", s3_bucket="owned", aws_region="us-east-1",
+                       destination_bucket="destination", migration_project=project,
+                       destination_prefix="filtro/owned")
+        external = Source(name="source-filtro-external", s3_bucket="external", aws_region="us-east-1",
+                          destination_bucket="destination")
+        session.add_all([project, owned, external]); session.flush()
+        for source, name in ((owned, "owned-wave"), (external, "external-wave")):
+            wave = Wave(source_id=source.id, name=name, max_bytes=1, restore_days=1,
+                        restore_tier="BULK", status="RESTORED")
+            session.add(wave); session.flush()
+            obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key=name,
+                               size_bytes=1, state=ObjectState.RESTORED)
+            session.add(obj); session.flush()
+            session.add(TransferQueueItem(project_id=project.id if source is owned else None,
+                                          source_id=source.id, wave_id=wave.id, object_id=obj.id,
+                                          size_bytes=1, state=TransferQueueState.READY))
+        session.commit()
+
+        filtered = main.transfer_queue(session=session, project_id=project.id)
+        assert filtered["project_id"] == project.id
+        assert {wave["source_id"] for wave in filtered["waves"]} == {owned.id}
+        assert main.transfer_queue(session=session)["project_id"] is None
+
+
+def test_global_lane_uses_durable_project_fairness_only_after_priority_and_expiry():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session() as session:
+        recent_project = main.MigrationProject(name="programa-recentes")
+        waiting_project = main.MigrationProject(name="programa-espera")
+        recent = Source(name="source-recentes", s3_bucket="recent", aws_region="us-east-1",
+                        destination_bucket="destination", migration_project=recent_project,
+                        destination_prefix="fair/recent")
+        waiting = Source(name="source-espera", s3_bucket="waiting", aws_region="us-west-2",
+                         destination_bucket="destination", migration_project=waiting_project,
+                         destination_prefix="fair/waiting")
+        session.add_all([recent_project, waiting_project, recent, waiting]); session.flush()
+        session.add(main.ProjectSchedulerState(project_id=recent_project.id, selection_count=4,
+                                               last_selected_at=now))
+        for source, project, name in ((recent, recent_project, "recent"), (waiting, waiting_project, "waiting")):
+            wave = Wave(source_id=source.id, name=f"wave-{name}", max_bytes=1, restore_days=1,
+                        restore_tier="BULK", status="RESTORED")
+            session.add(wave); session.flush()
+            obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key=name,
+                               size_bytes=1, state=ObjectState.RESTORED)
+            session.add(obj); session.flush()
+            session.add(TransferQueueItem(project_id=project.id, source_id=source.id, wave_id=wave.id,
+                                          object_id=obj.id, size_bytes=1, state=TransferQueueState.READY,
+                                          priority_score=60, restore_expires_at=now + timedelta(hours=3)))
+        session.flush()
+
+        selected = main.select_global_transfer_lane_candidate(session, {recent.id, waiting.id}, now=now)
+        assert selected is not None and selected.source_id == waiting.id
+        state = session.scalar(select(main.ProjectSchedulerState).where(
+            main.ProjectSchedulerState.project_id == waiting_project.id
+        ))
+        assert state is not None and state.selection_count == 1
+        assert state.last_selected_at.replace(tzinfo=timezone.utc) == now
+
+
+def test_project_wave_groups_remain_logical_and_link_each_real_wave():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-grupos")
+        source = Source(name="source-grupos", s3_bucket="grouped", aws_region="us-east-1",
+                        destination_bucket="destination", migration_project=project,
+                        destination_prefix="groups/source")
+        session.add_all([project, source]); session.flush()
+        wave = Wave(source_id=source.id, name="wave-small", max_bytes=10,
+                    restore_days=1, restore_tier="BULK", status="RESTORE_SCHEDULED")
+        session.add(wave); session.flush()
+        session.add(ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="small.bin",
+                                 size_bytes=10, state=ObjectState.WAVE_ASSIGNED))
+        session.flush()
+
+        groups = main.migration_project_wave_groups(project.id, max_wave_bytes=100, session=session)
+        row = groups["groups"][0]["waves"][0]
+        assert groups["groups"][0]["objects"] == 1
+        assert row["wave_id"] == wave.id
+        assert row["actions"]["report"] == f"/api/waves/{wave.id}/report"
+        assert "one_time" in row["cost"]
+
+
+def test_multi_source_project_reuses_connection_across_regions_and_isolates_same_key():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        connection = AwsConnection(
+            label="shared-account", secret_ocid="ocid1.vaultsecret.test.shared",
+            aws_account_id="123456789012", default_region="us-east-1",
+            control_bucket="control-bucket",
+        )
+        project = main.MigrationProject(name="programa-multirregiao")
+        east_a = Source(
+            name="source-east-a", s3_bucket="east-a", aws_region="us-east-1",
+            aws_connection=connection, destination_bucket="destination",
+            destination_prefix="program/east-a", migration_project=project,
+        )
+        east_b = Source(
+            name="source-east-b", s3_bucket="east-b", aws_region="us-east-1",
+            aws_connection=connection, destination_bucket="destination",
+            destination_prefix="program/east-b", migration_project=project,
+        )
+        west = Source(
+            name="source-west", s3_bucket="west", aws_region="us-west-2",
+            aws_connection=connection, destination_bucket="destination",
+            destination_prefix="program/west", migration_project=project,
+        )
+        session.add_all([connection, project, east_a, east_b, west]); session.flush()
+        for source in (east_a, east_b, west):
+            main.merge_discovery_rows(session, source, [{
+                "source_id": source.id, "object_key": "shared/report.csv", "size_bytes": 10,
+            }])
+        objects = list(session.scalars(select(ObjectRecord).order_by(ObjectRecord.source_id)))
+        assert east_a.aws_connection_id == east_b.aws_connection_id == west.aws_connection_id
+        assert {east_a.aws_region, east_b.aws_region, west.aws_region} == {"us-east-1", "us-west-2"}
+        assert len({obj.destination_object_key for obj in objects}) == 3
+        assert {obj.object_key for obj in objects} == {"shared/report.csv"}
+        with pytest.raises(HTTPException, match="overlaps"):
+            main.normalized_project_destination_route(
+                session, project.id, "destination", "program/east-a/reports"
+            )
+
+
+def test_restore_slot_budget_is_global_across_projects_and_sources():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    initial = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+    with Session() as session:
+        import app.main as main
+
+        settings = RuntimeSettings(
+            id=1, dynamic_restore_max_slots=2,
+            continuous_transfer_min_buffer_seconds=3 * 3600,
+            continuous_transfer_target_buffer_seconds=6 * 3600,
+            continuous_transfer_max_buffer_seconds=24 * 3600,
+        )
+        session.add(settings)
+        waves = []
+        for index, region in enumerate(("us-east-1", "us-west-2", "eu-west-1"), start=1):
+            project = main.MigrationProject(name=f"project-{index}")
+            source = Source(
+                name=f"source-{index}", s3_bucket=f"source-{index}", aws_region=region,
+                destination_bucket="destination", destination_prefix=f"project-{index}/source",
+                migration_project=project,
+            )
+            run = DynamicPipelineRun(
+                source=source, status="SCHEDULED", scheduled_restores=True,
+                restore_horizon_waves=3, restore_days=7, restore_tier="BULK",
+            )
+            session.add_all([project, source, run]); session.flush()
+            wave = Wave(
+                source=source, pipeline_run_id=run.id, name=f"wave-{index}", max_bytes=1,
+                restore_days=7, restore_tier="BULK", status="RESTORE_SCHEDULED",
+                planner_mode="DYNAMIC", planned_restore_at=initial,
+                planned_transfer_start_at=initial + timedelta(hours=48),
+                predicted_restore_first_seconds=48 * 3600,
+                predicted_transfer_seconds=3600,
+            )
+            session.add(wave); session.flush()
+            session.add(ObjectRecord(
+                source_id=source.id, wave_id=wave.id, object_key=f"archive-{index}.bin",
+                size_bytes=1, state=ObjectState.WAVE_ASSIGNED,
+            ))
+            waves.append(wave)
+        session.flush()
+
+        assert release_dynamic_restore_horizon(session, settings, now=initial) == 2
+        released = set(session.scalars(select(Task.wave_id).where(
+            Task.kind == "SUBMIT_BATCH_RESTORE"
+        )))
+        assert len(released) == settings.dynamic_restore_max_slots
+        assert len(released.intersection({wave.id for wave in waves})) == 2
+        assert session.scalar(select(Event.id).where(
+            Event.kind == "DYNAMIC_RESTORE_DEFERRED"
+        )) is not None
+
+
+def test_project_pause_resume_survives_control_database_reopen(tmp_path):
+    import app.main as main
+
+    database = tmp_path / "multi-source-restart.db"
+    engine = create_engine(f"sqlite+pysqlite:///{database}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-recuperavel")
+        source = Source(
+            name="source-recuperavel", s3_bucket="source", aws_region="us-east-1",
+            destination_bucket="destination", destination_prefix="recovery/source",
+            migration_project=project,
+        )
+        wave = Wave(
+            source=source, name="wave-recuperavel", max_bytes=1, restore_days=7,
+            restore_tier="BULK", status="RESTORING",
+        )
+        session.add_all([project, source, wave]); session.flush()
+        session.add(Task(wave_id=wave.id, kind="POLL_RESTORE", state=TaskState.READY))
+        session.commit()
+        project_id, wave_id = project.id, wave.id
+        paused = main.pause_migration_project(project_id, session)
+        assert paused["status"] == "PAUSED"
+
+    engine.dispose()
+    reopened = create_engine(f"sqlite+pysqlite:///{database}")
+    ReopenedSession = sessionmaker(bind=reopened)
+    with ReopenedSession() as session:
+        assert session.get(main.MigrationProject, project_id).status == "PAUSED"
+        resumed = main.resume_migration_project(project_id, session)
+        # The read model correctly reports attention because this synthetic
+        # project has no inventory; the durable lifecycle state is resumed.
+        assert resumed["status"] == "COMPLETED_WITH_ATTENTION"
+        assert session.get(main.MigrationProject, project_id).status == "CONFIGURED"
+        assert session.get(Wave, wave_id).status == "READY_FOR_RESTORE"
+        assert session.scalar(select(Event.id).where(
+            Event.migration_project_id == project_id,
+            Event.kind == "MIGRATION_PROJECT_RESUMED",
+        )) is not None

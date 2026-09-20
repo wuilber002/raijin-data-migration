@@ -6,6 +6,23 @@ controle vazio: não importa PostgreSQL, catálogo Fujin, payloads ou filas de
 outro host. Para recuperar uma instalação existente, consulte o
 [runbook de recuperação](recovery-runbook.md).
 
+Em uma topologia Fujin LOCAL já saudável, prefira a atualização mínima do
+plano de controle. Depois do backup lógico, build e tag de rollback, execute:
+
+```bash
+sudo /opt/s3-oci-migration/release/scripts/update-fujin-local-raijin-runtime.sh \
+  localhost/s3-oci-migration:<nova-release> \
+  localhost/s3-oci-migration:<rollback>
+```
+
+O atualizador recusa a troca se houver dispatcher de transferência em execução
+ou item com lease ativo. Ele mantém PostgreSQL, Fujin, materializador, DNS e
+gateway online; troca somente app, Raikou e Raiju, aguarda a aplicação validar
+o schema e inicia os workers. Se a nova aplicação não ficar saudável, os três
+containers são restaurados automaticamente com a imagem de rollback. Polling
+de restore em estado `READY` pode aguardar essa curta janela sem nova submissão
+AWS/Fujin; stream ou multipart já admitido nunca deve ser interrompido.
+
 O deploy padrão inicia PostgreSQL, API, Raikou e Raiju em `REAL`. Fujin LOCAL é
 uma topologia opcional de pré-produção e só é ativada depois do aceite do
 runtime normal.

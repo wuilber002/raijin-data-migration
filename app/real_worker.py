@@ -57,8 +57,8 @@ from app.backend_contracts import (
 from app.simulator_admin import SimulatorAdminClient, SimulatorAdminError
 from app.simulator_ports import SimulatedDestinationPort, SimulatedSourcePort, SimulatorTransportError
 from app.main import (
-    AwsConnection, DiscoveryJob, Event, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, merge_discovery_rows, source_key_in_scope, source_prefix_values,
-    DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, transfer_priority, utcnow,
+    AwsConnection, DiscoveryJob, Event, MigrationProject, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, merge_discovery_rows, source_key_in_scope, source_prefix_values,
+    DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, select_global_transfer_lane_candidate, transfer_priority, utcnow,
 )
 
 # Raiju is the operational worker identity.  Raikou is the separate governance
@@ -787,8 +787,11 @@ def claim_task(session, lease_seconds: int, allowed_kinds: frozenset[str] | None
             (Task.lease_expires_at < now) | (Task.worker_id == WORKER_ID)
         )
     )
-    query = select(Task).join(Wave).join(Source).where(
-        available, Task.available_at <= now, Wave.status != "PAUSED", Source.archived_at.is_(None)
+    query = select(Task).join(Wave).join(Source).outerjoin(
+        MigrationProject, Source.migration_project_id == MigrationProject.id
+    ).where(
+        available, Task.available_at <= now, Wave.status != "PAUSED", Source.archived_at.is_(None),
+        or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"),
     )
     if allowed_kinds is not None:
         query = query.where(Task.kind.in_(allowed_kinds))
@@ -796,24 +799,34 @@ def claim_task(session, lease_seconds: int, allowed_kinds: frozenset[str] | None
         query.order_by(Task.available_at, Task.id).with_for_update(skip_locked=True).limit(64)
     ))
     task = None
+    # An interrupted dispatcher always resumes its own durable task before a
+    # new global decision. Its multipart checkpoint and link lease remain the
+    # authoritative safety boundary.
     for candidate in candidates:
-        if candidate.kind != "TRANSFER_CONTINUOUS":
+        if candidate.kind == "TRANSFER_CONTINUOUS" and candidate.state == TaskState.RUNNING and candidate.worker_id == WORKER_ID:
             task = candidate
             break
-        # One dispatcher per source protects object leases while allowing an
-        # independent source lane to run in another Raiju process.  The
-        # future project scheduler can widen this scope without changing the
-        # item lease contract.
-        live_same_source = session.scalar(select(Task.id).join(Wave).where(
+    if task is None:
+        for candidate in candidates:
+            if candidate.kind != "TRANSFER_CONTINUOUS":
+                task = candidate
+                break
+    if task is None:
+        # The host has one physical network ceiling. Do not allow independent
+        # source dispatchers to each allocate that ceiling concurrently.
+        live_dispatcher = session.scalar(select(Task.id).where(
             Task.kind == "TRANSFER_CONTINUOUS",
             Task.state == TaskState.RUNNING,
             Task.lease_expires_at >= now,
-            Wave.source_id == candidate.wave.source_id,
-            Task.id != candidate.id,
         ).limit(1))
-        if live_same_source is None:
-            task = candidate
-            break
+        if live_dispatcher is None:
+            transfer_candidates = [candidate for candidate in candidates if candidate.kind == "TRANSFER_CONTINUOUS"]
+            selected_item = select_global_transfer_lane_candidate(
+                session, {candidate.wave.source_id for candidate in transfer_candidates}, now
+            )
+            if selected_item is not None:
+                task = next((candidate for candidate in transfer_candidates
+                             if candidate.wave.source_id == selected_item.source_id), None)
     if not task:
         return None
     task.state, task.worker_id = TaskState.RUNNING, WORKER_ID
@@ -833,8 +846,13 @@ def claim_discovery_job(session, lease_seconds: int) -> DiscoveryJob | None:
         )
     )
     job = session.scalar(
-        select(DiscoveryJob)
-        .where(available, DiscoveryJob.available_at <= now)
+        select(DiscoveryJob).join(Source).outerjoin(
+            MigrationProject, Source.migration_project_id == MigrationProject.id
+        )
+        .where(
+            available, DiscoveryJob.available_at <= now,
+            or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"),
+        )
         .order_by(DiscoveryJob.available_at, DiscoveryJob.id)
         .with_for_update(skip_locked=True).limit(1)
     )
@@ -3088,7 +3106,7 @@ def _lane_event_summary(session, source: Source, kind: str, message: str,
         Event.source_id == source.id, Event.kind == kind,
     ).order_by(Event.created_at.desc(), Event.id.desc()).limit(1))
     now = utcnow()
-    if latest and (now - latest.created_at).total_seconds() < interval_seconds:
+    if latest and (now - _utc_timestamp(latest.created_at)).total_seconds() < interval_seconds:
         return
     event(session, kind, message, source_id=source.id, wave_id=wave_id)
 
@@ -3212,7 +3230,7 @@ def _continuous_raiju_worker_count(session, source: Source, available_objects: i
         )
         now = utcnow()
         if (latest is None or latest.message != message or
-                (now - latest.created_at).total_seconds() >= 300):
+                (now - _utc_timestamp(latest.created_at)).total_seconds() >= 300):
             event(session, "RAIJU_AUTOSCALE_HOST_GUARD", message, source_id=source.id)
     result = {"target": chosen, "observed_lane_mbps": 0.0,
               "observed_per_raiju_mbps": 0.0,
@@ -3687,6 +3705,23 @@ def claim_continuous_transfer_batch(session, source: Source, settings, task: Tas
     return selected
 
 
+def global_lane_has_competing_ready_item(session, source_id: int, now: datetime | None = None) -> bool:
+    """Whether another source has work awaiting the shared physical lane."""
+    reference = now or utcnow()
+    return session.scalar(select(TransferQueueItem.id).join(Wave).join(Source).outerjoin(
+        MigrationProject, Source.migration_project_id == MigrationProject.id
+    ).where(
+        TransferQueueItem.source_id != source_id,
+        TransferQueueItem.state.in_([
+            TransferQueueState.READY, TransferQueueState.RETRY_WAIT,
+            TransferQueueState.MULTIPART_RESUME,
+        ]),
+        or_(TransferQueueItem.retry_at.is_(None), TransferQueueItem.retry_at <= reference),
+        Wave.status != "PAUSED", Source.archived_at.is_(None),
+        or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"),
+    ).limit(1)) is not None
+
+
 def _return_unstarted_queue_items(session, items: list[TransferQueueItem], reason: str) -> None:
     for item in items:
         item.state = TransferQueueState.READY
@@ -4009,6 +4044,29 @@ def transfer_continuous(session, task: Task, settings) -> None:
             normal_concurrency.target, allocation["effective_worker_cap"]
         )
         worker_ceiling = allocation["target"]
+        # The isolated contract runtime may use SQLite for the Raijin control
+        # database. SQLite has one writer and cannot safely accept concurrent
+        # progress commits from several simulated Raijus. Serialize that
+        # specific test/development backend; deployed REAL and SIMULATION
+        # runtimes use PostgreSQL and retain the calculated concurrency.
+        serialized_simulation_sqlite = bool(
+            runtime_context.is_simulation
+            and session.get_bind().dialect.name == "sqlite"
+        )
+        if serialized_simulation_sqlite:
+            allocation = {
+                **allocation,
+                "target": 1,
+                "effective_worker_cap": 1,
+                "host_capacity_reason": (
+                    "Simulation SQLite uses one serialized writer; PostgreSQL and REAL "
+                    "backends retain the calculated concurrency"
+                ),
+                "reason": "Serialized Simulation SQLite execution",
+            }
+            normal_concurrency.target = 1
+            normal_concurrency.approved_target = 1
+            worker_ceiling = 1
         for batch_id in {item.dispatch_batch_id for item in initial if item.dispatch_batch_id}:
             batch = session.get(TransferDispatchBatch, batch_id)
             record_allocation(batch, allocation)
@@ -4023,6 +4081,7 @@ def transfer_continuous(session, task: Task, settings) -> None:
         # makespan has persisted destination evidence before virtual time is
         # advanced; REAL keeps the original continuous replenishment behavior.
         simulation_cycle_item_limit = (
+            1 if serialized_simulation_sqlite else
             max(len(initial), worker_ceiling) if runtime_context.is_simulation else None
         )
         cycle_dispatched_items = 0
@@ -4444,6 +4503,12 @@ def transfer_continuous(session, task: Task, settings) -> None:
                     desired_workers = allocation["target"]
                     occupied_slots = {entry[2] for entry in futures.values()}
                     free_slots = [slot for slot in range(1, desired_workers + 1) if slot not in occupied_slots]
+                    # Finish already admitted objects, but do not replenish
+                    # this source forever while another source has durable
+                    # eligible work. The next task claim records a fresh
+                    # global decision and grants the same physical lane.
+                    if global_lane_has_competing_ready_item(session, source.id):
+                        free_slots = []
                     # Prefer ordinary immediate admission when capacity exists.
                     for slot in free_slots:
                         if not simulation_cycle_has_capacity():
@@ -4570,6 +4635,8 @@ def transfer_continuous(session, task: Task, settings) -> None:
                     slot for slot in range(1, RAIJU_MAX_WORKERS + 1)
                     if slot not in {entry[2] for entry in futures.values()} and slot not in released_slots
                 ]
+                if global_lane_has_competing_ready_item(session, source.id):
+                    free_slots = []
                 starts = min(len(free_slots), max(0, desired_workers - len(futures)), ready_count)
                 for slot in free_slots[:starts]:
                     if not simulation_cycle_has_capacity():
@@ -4809,8 +4876,11 @@ def worker_loop_sleep_seconds(role: str = WORKER_ROLE) -> float:
     allowed_kinds = task_kinds_for_role(role)
     with SessionLocal() as session:
         due = (Task.state == TaskState.READY) & (Task.available_at <= utcnow() + timedelta(seconds=1))
-        query = select(Task.id).join(Wave).join(Source).where(
-            due, Wave.status != "PAUSED", Source.archived_at.is_(None)
+        query = select(Task.id).join(Wave).join(Source).outerjoin(
+            MigrationProject, Source.migration_project_id == MigrationProject.id
+        ).where(
+            due, Wave.status != "PAUSED", Source.archived_at.is_(None),
+            or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"),
         )
         if allowed_kinds is not None:
             query = query.where(Task.kind.in_(allowed_kinds))
@@ -4831,7 +4901,9 @@ def run_once(role: str = WORKER_ROLE) -> None:
         if role in {"transfer", "raiju", "all"}:
             reconciled = sum(
                 reconcile_completed_continuous_item_leases(session, source)
-                for source in session.scalars(select(Source).where(Source.archived_at.is_(None)))
+                for source in session.scalars(select(Source).outerjoin(
+                    MigrationProject, Source.migration_project_id == MigrationProject.id
+                ).where(Source.archived_at.is_(None), or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED")))
             )
             if reconciled:
                 session.commit()
@@ -4858,14 +4930,19 @@ def run_once(role: str = WORKER_ROLE) -> None:
             # object truth, this backfills the durable recovered-failure
             # evidence for a completed wave whose last transfer task failed
             # before a later task delivered every object successfully.
-            for source in session.scalars(select(Source).where(Source.archived_at.is_(None))):
+            for source in session.scalars(select(Source).outerjoin(
+                MigrationProject, Source.migration_project_id == MigrationProject.id
+            ).where(Source.archived_at.is_(None), or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"))):
                 reconcile_continuous_source_waves(session, source)
             if runtime_context.is_real:
                 refresh_due_global_aws_pricing(session)
             replan_dynamic_pipeline(session, settings)
-            for run in session.scalars(select(DynamicPipelineRun).where(
+            for run in session.scalars(select(DynamicPipelineRun).join(Source).outerjoin(
+                MigrationProject, Source.migration_project_id == MigrationProject.id
+            ).where(
                 DynamicPipelineRun.scheduled_restores.is_(True),
                 DynamicPipelineRun.status.not_in(["COMPLETED", "HISTORICAL", "NEEDS_ATTENTION"]),
+                or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"),
             )):
                 materialize_dynamic_pipeline_horizon(session, settings, run)
             release_dynamic_restore_horizon(session, settings)
@@ -4880,7 +4957,9 @@ def run_once(role: str = WORKER_ROLE) -> None:
         # the source eligible again instead of leaving it permanently stuck in
         # DISCOVERING.  The unfinished active slice is intentionally not added
         # to elapsed time because a power loss makes its exact end unknowable.
-        interrupted = list(session.scalars(select(Source).where(Source.status == "DISCOVERING"))) if role in {"governance", "raikou", "all"} else []
+        interrupted = list(session.scalars(select(Source).outerjoin(
+            MigrationProject, Source.migration_project_id == MigrationProject.id
+        ).where(Source.status == "DISCOVERING", or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED")))) if role in {"governance", "raikou", "all"} else []
         for pending_source in interrupted:
             pending_source.status = "DISCOVERY_QUEUED"
             pending_source.discovery_started_at = None
@@ -4898,7 +4977,9 @@ def run_once(role: str = WORKER_ROLE) -> None:
             session.commit()
         # Upgrade compatibility: sources queued by releases before the
         # discovery queue existed become visible jobs on the next worker loop.
-        legacy_queued = list(session.scalars(select(Source).where(Source.status == "DISCOVERY_QUEUED"))) if role in {"governance", "raikou", "all"} else []
+        legacy_queued = list(session.scalars(select(Source).outerjoin(
+            MigrationProject, Source.migration_project_id == MigrationProject.id
+        ).where(Source.status == "DISCOVERY_QUEUED", or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED")))) if role in {"governance", "raikou", "all"} else []
         for queued_source in legacy_queued:
             exists = session.scalar(select(DiscoveryJob.id).where(
                 DiscoveryJob.source_id == queued_source.id,

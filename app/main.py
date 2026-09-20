@@ -238,6 +238,28 @@ class MigrationProject(Base):
     sources: Mapped[list["Source"]] = relationship(back_populates="migration_project")
 
 
+class ProjectSchedulerState(Base):
+    """Durable, small fairness memory for the shared physical lane.
+
+    It deliberately contains no task checkpoint or AWS state.  Those remain
+    attached to their source/wave.  The row only breaks otherwise equivalent
+    cross-project choices after a restart.
+    """
+    __tablename__ = "project_scheduler_states"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("migration_projects.id"), unique=True, index=True
+    )
+    selection_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    last_selected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class Source(Base):
     __tablename__ = "sources"
 
@@ -743,9 +765,11 @@ class TransferQueueItem(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    # Reserved now for the future project-scoped lane. It intentionally has no
-    # foreign key until the migration-project aggregate is introduced.
-    project_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    # Nullable for legacy sources; new project-owned lane work receives the
+    # durable aggregate identity at enqueue time.
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("migration_projects.id"), nullable=True, index=True
+    )
     source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), index=True)
     wave_id: Mapped[int] = mapped_column(ForeignKey("waves.id"), index=True)
     object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), index=True)
@@ -778,6 +802,20 @@ class TransferQueueItem(Base):
     transferred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class TransferLaneDecision(Base):
+    """Immutable explanation of one cross-source physical-lane selection."""
+    __tablename__ = "transfer_lane_decisions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    project_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), index=True)
+    queue_item_id: Mapped[int] = mapped_column(ForeignKey("transfer_queue_items.id"), index=True)
+    priority_score: Mapped[int] = mapped_column(Integer, default=0)
+    reason: Mapped[str] = mapped_column(Text)
+    candidates_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 class TransferDispatchBatch(Base):
@@ -941,6 +979,12 @@ class Event(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     source_id: Mapped[int | None] = mapped_column(ForeignKey("sources.id"), nullable=True, index=True)
     wave_id: Mapped[int | None] = mapped_column(ForeignKey("waves.id"), nullable=True, index=True)
+    # Project context complements (and never replaces) the source and wave
+    # audit references.  It makes future project-level operations traceable
+    # without changing the existing source-local evidence model.
+    migration_project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("migration_projects.id"), nullable=True, index=True
+    )
     kind: Mapped[str] = mapped_column(String(64), index=True)
     message: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
@@ -1174,6 +1218,120 @@ def destination_listing_prefix(source: Source) -> str:
     return f"{prefix}/" if prefix else ""
 
 
+def destination_prefixes_overlap(left: str | None, right: str | None) -> bool:
+    """Whether two configured OCI routes can produce one equal object key.
+
+    Routes are directory-like prefixes because resolution always inserts one
+    slash before the original S3 key.  Literal string-prefix matching would
+    incorrectly treat ``finance`` and ``financial`` as overlapping; only a
+    shared directory boundary can collide.
+    """
+    left_normalized, right_normalized = (
+        normalize_destination_prefix(left), normalize_destination_prefix(right)
+    )
+    return (
+        not left_normalized or not right_normalized
+        or left_normalized == right_normalized
+        or left_normalized.startswith(f"{right_normalized}/")
+        or right_normalized.startswith(f"{left_normalized}/")
+    )
+
+
+def project_destination_route_conflicts(session: Session, project_id: int,
+                                        destination_bucket: str,
+                                        destination_prefix: str,
+                                        *, exclude_source_id: int | None = None) -> list[dict]:
+    """Return active sources whose immutable OCI route can collide.
+
+    ``project_id`` is retained in the API because the caller is adopting a
+    project source.  OCI keys, however, do not contain that ID: routes must be
+    globally unique among active sources sharing a destination bucket,
+    including legacy sources with identity routing.
+    """
+    query = select(Source).where(
+        Source.destination_bucket == destination_bucket,
+        Source.archived_at.is_(None),
+    )
+    if exclude_source_id is not None:
+        query = query.where(Source.id != exclude_source_id)
+    requested = normalize_destination_prefix(destination_prefix)
+    return [
+        {"source_id": source.id, "source_name": source.name,
+         "destination_bucket": source.destination_bucket,
+         "requested_prefix": requested,
+         "existing_prefix": normalize_destination_prefix(source.destination_prefix)}
+        for source in session.scalars(query)
+        if destination_prefixes_overlap(requested, source.destination_prefix)
+    ]
+
+
+def source_route_is_locked(session: Session, source_id: int) -> bool:
+    """A project route is immutable once inventory or any wave exists."""
+    return bool(
+        session.scalar(select(ObjectRecord.id).where(ObjectRecord.source_id == source_id).limit(1))
+        or session.scalar(select(Wave.id).where(Wave.source_id == source_id).limit(1))
+    )
+
+
+def migration_project_or_404(session: Session, project_id: int) -> MigrationProject:
+    project = session.get(MigrationProject, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Migration project not found")
+    return project
+
+
+def active_migration_project_or_409(session: Session, project_id: int) -> MigrationProject:
+    project = migration_project_or_404(session, project_id)
+    if project.archived_at is not None:
+        raise HTTPException(status_code=409, detail="Archived migration projects cannot receive sources")
+    return project
+
+
+def normalized_project_destination_route(session: Session, migration_project_id: int | None,
+                                         destination_bucket: str, destination_prefix: str,
+                                         *, exclude_source_id: int | None = None) -> tuple[MigrationProject | None, str]:
+    """Validate a source's project-owned destination route.
+
+    A legacy source has no project and must retain identity routing.  A
+    project source must instead own an explicit, non-empty directory prefix;
+    this makes its OCI address unambiguous before discovery freezes it.
+    """
+    try:
+        normalized_prefix = normalize_destination_prefix(destination_prefix)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if migration_project_id is None:
+        if normalized_prefix:
+            raise HTTPException(
+                status_code=422,
+                detail="Destination prefix requires an explicit migration project",
+            )
+        return None, ""
+    project = active_migration_project_or_409(session, migration_project_id)
+    if not normalized_prefix:
+        raise HTTPException(
+            status_code=422,
+            detail="Project sources require a non-empty destination prefix",
+        )
+    conflicts = project_destination_route_conflicts(
+        session,
+        project.id,
+        destination_bucket,
+        normalized_prefix,
+        exclude_source_id=exclude_source_id,
+    )
+    if conflicts:
+        names = ", ".join(sorted({item["source_name"] for item in conflicts}))
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"OCI destination route overlaps source(s): {names}. "
+                "Use a distinct directory prefix in this migration project."
+            ),
+        )
+    return project, normalized_prefix
+
+
 def s3_prefixes_overlap(left: str, right: str) -> bool:
     """Whether two normalized S3 prefix scopes can address the same key."""
     return not left or not right or left.startswith(right) or right.startswith(left)
@@ -1226,6 +1384,14 @@ class SourceCreate(BaseModel):
     aws_region: str
     aws_connection_id: int | None = None
     destination_bucket: str
+    # Project adoption is explicit.  A source outside a project keeps the
+    # legacy identity route and cannot accidentally acquire a destination
+    # prefix through an ordinary source edit.
+    migration_project_id: int | None = Field(default=None, ge=1)
+    migration_project_name: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _-]{1,127}$"
+    )
+    destination_prefix: str = Field(default="", max_length=1024)
     # Lower values are preferred only when deadline risk is equivalent.  The
     # default deliberately means "no business preference".
     business_priority: int = Field(default=999, ge=1, le=999)
@@ -1233,6 +1399,20 @@ class SourceCreate(BaseModel):
 
 class SourceUpdate(SourceCreate):
     pass
+
+
+class MigrationProjectCreate(BaseModel):
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9 _-]{1,127}$")
+    selection_policy: str = Field(default="DEADLINE_FIRST", pattern="^(DEADLINE_FIRST)$")
+
+
+class MigrationProjectUpdate(BaseModel):
+    selection_policy: str | None = Field(default=None, pattern="^(DEADLINE_FIRST)$")
+
+
+class SourceProjectAdoption(BaseModel):
+    migration_project_id: int = Field(ge=1)
+    destination_prefix: str = Field(min_length=1, max_length=1024)
 
 
 class SimulationScenarioBootstrap(BaseModel):
@@ -1589,8 +1769,12 @@ def create_schema() -> None:
     existing_run_columns = {column["name"] for column in inspect(engine).get_columns("dynamic_pipeline_runs")}
     existing_restore_attempt_columns = {column["name"] for column in inspect(engine).get_columns("restore_attempts")}
     existing_lane_columns = {column["name"] for column in inspect(engine).get_columns("transfer_queue_items")}
+    existing_lane_foreign_keys = {
+        foreign_key.get("name") for foreign_key in inspect(engine).get_foreign_keys("transfer_queue_items")
+    }
     existing_dispatch_columns = {column["name"] for column in inspect(engine).get_columns("transfer_dispatch_batches")}
     existing_discovery_change_columns = {column["name"] for column in inspect(engine).get_columns("discovery_changes")}
+    existing_event_columns = {column["name"] for column in inspect(engine).get_columns("events")}
     with engine.begin() as connection:
         if engine.dialect.name == "postgresql" and "simulation_enabled" in existing_runtime_columns:
             connection.execute(text("ALTER TABLE runtime_settings DROP COLUMN simulation_enabled"))
@@ -1608,6 +1792,7 @@ def create_schema() -> None:
             if column not in existing_runtime_columns:
                 connection.execute(text(f"ALTER TABLE runtime_settings ADD COLUMN {column} {sql_type}"))
         lane_columns = {
+            "project_id": "BIGINT",
             "dispatch_batch_id": "BIGINT",
             "available_virtual_at": "TIMESTAMP WITH TIME ZONE",
             "preemption_cooldown_until": "TIMESTAMP WITH TIME ZONE",
@@ -1617,6 +1802,22 @@ def create_schema() -> None:
         for column, sql_type in lane_columns.items():
             if column not in existing_lane_columns:
                 connection.execute(text(f"ALTER TABLE transfer_queue_items ADD COLUMN {column} {sql_type}"))
+        # Project adoption is prohibited once inventory or a wave exists, so
+        # this is both a safe historical backfill and a guard for databases
+        # upgraded between the routing and global-lane releases.
+        connection.execute(text("""
+            UPDATE transfer_queue_items
+            SET project_id = (
+                SELECT migration_project_id FROM sources
+                WHERE sources.id = transfer_queue_items.source_id
+            )
+            WHERE project_id IS NULL
+              AND EXISTS (
+                  SELECT 1 FROM sources
+                  WHERE sources.id = transfer_queue_items.source_id
+                    AND sources.migration_project_id IS NOT NULL
+              )
+        """))
         for column, sql_type in {
             "observed_lane_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 0",
             "observed_per_raiju_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 0",
@@ -1633,6 +1834,9 @@ def create_schema() -> None:
         for column, sql_type in source_columns.items():
             if column not in existing_source_columns:
                 connection.execute(text(f"ALTER TABLE sources ADD COLUMN {column} {sql_type}"))
+        for column, sql_type in {"migration_project_id": "BIGINT"}.items():
+            if column not in existing_event_columns:
+                connection.execute(text(f"ALTER TABLE events ADD COLUMN {column} {sql_type}"))
         connection.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_objects_source_destination_key_id "
             "ON objects (source_id, destination_object_key, id)"
@@ -1644,6 +1848,16 @@ def create_schema() -> None:
         }.items():
             if column not in existing_lane_columns:
                 connection.execute(text(f"ALTER TABLE transfer_queue_items ADD COLUMN {column} {sql_type}"))
+        # New PostgreSQL writes gain referential protection without making a
+        # legacy upgrade fail because of historical rows that predate projects.
+        # The normal backfill above repairs the known project-owned rows.
+        if (engine.dialect.name == "postgresql"
+                and "fk_transfer_queue_items_project" not in existing_lane_foreign_keys):
+            connection.execute(text(
+                "ALTER TABLE transfer_queue_items "
+                "ADD CONSTRAINT fk_transfer_queue_items_project "
+                "FOREIGN KEY (project_id) REFERENCES migration_projects(id) NOT VALID"
+            ))
         # Preserve visibility for discoveries completed before elapsed-time was
         # introduced.  New/retried discoveries use precise accumulated work
         # time; this one-time backfill is the best durable historical value.
@@ -1917,8 +2131,15 @@ def task_or_404(session: Session, task_id: int) -> Task:
     return task
 
 
-def record_event(session: Session, kind: str, message: str, source_id: int | None = None, wave_id: int | None = None) -> None:
-    session.add(Event(kind=kind, message=message, source_id=source_id, wave_id=wave_id))
+def record_event(session: Session, kind: str, message: str, source_id: int | None = None,
+                 wave_id: int | None = None, migration_project_id: int | None = None) -> None:
+    session.add(Event(
+        kind=kind,
+        message=message,
+        source_id=source_id,
+        wave_id=wave_id,
+        migration_project_id=migration_project_id,
+    ))
 
 
 def dynamic_reforecast_event_due(session: Session, wave_id: int, reference: datetime,
@@ -2098,6 +2319,7 @@ def enqueue_available_transfer_objects(session: Session, wave: Wave,
                 setattr(prior_item, field, value)
         else:
             session.add(TransferQueueItem(
+                project_id=wave.source.migration_project_id,
                 source_id=wave.source_id, wave_id=wave.id, object_id=obj.id,
                 **values,
             ))
@@ -2251,6 +2473,92 @@ def refresh_transfer_queue_priorities(session: Session, source_id: int | None = 
             ):
                 changed += 1
     return changed
+
+
+def select_global_transfer_lane_candidate(session: Session, source_ids: set[int],
+                                          now: datetime | None = None) -> TransferQueueItem | None:
+    """Choose the next source-owned lane task under one physical link budget.
+
+    The selected item is still executed through its source's durable task and
+    credentials. This coordinator only owns cross-source admission and its
+    explanation; it never merges manifests, restore jobs or checkpoints.
+    """
+    if not source_ids:
+        return None
+    reference = now or utcnow()
+    candidates = list(session.scalars(select(TransferQueueItem).join(Wave).join(Source).outerjoin(
+        MigrationProject, Source.migration_project_id == MigrationProject.id
+    ).where(
+        TransferQueueItem.source_id.in_(source_ids),
+        TransferQueueItem.state.in_([
+            TransferQueueState.READY, TransferQueueState.RETRY_WAIT,
+            TransferQueueState.MULTIPART_RESUME,
+        ]),
+        or_(TransferQueueItem.retry_at.is_(None), TransferQueueItem.retry_at <= reference),
+        Wave.status != "PAUSED", Source.archived_at.is_(None),
+        or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"),
+    ).order_by(
+        TransferQueueItem.priority_score.desc(),
+        TransferQueueItem.restore_expires_at.is_(None), TransferQueueItem.restore_expires_at,
+        TransferQueueItem.last_dispatched_at, TransferQueueItem.available_at, TransferQueueItem.id,
+    ).limit(8)))
+    if not candidates:
+        return None
+    project_ids = {item.project_id for item in candidates if item.project_id is not None}
+    fairness = {
+        state.project_id: state for state in session.scalars(select(ProjectSchedulerState).where(
+            ProjectSchedulerState.project_id.in_(project_ids)
+        ))
+    } if project_ids else {}
+    # Priority and expiry remain inviolable.  When their urgency is equal,
+    # prefer the project that received the lane least recently.  This makes
+    # fairness durable across Raikou restarts without introducing a second
+    # physical lane or changing work already leased to a Raiju.
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    def candidate_order(item: TransferQueueItem) -> tuple:
+        state = fairness.get(item.project_id)
+        last_project = state.last_selected_at if state and state.last_selected_at else epoch
+        if last_project.tzinfo is None:
+            last_project = last_project.replace(tzinfo=timezone.utc)
+        expiry = item.restore_expires_at
+        if expiry and expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        dispatched = item.last_dispatched_at or epoch
+        if dispatched.tzinfo is None:
+            dispatched = dispatched.replace(tzinfo=timezone.utc)
+        available = item.available_at
+        if available.tzinfo is None:
+            available = available.replace(tzinfo=timezone.utc)
+        return (-int(item.priority_score or 0), expiry is None, expiry or datetime.max.replace(tzinfo=timezone.utc),
+                last_project, dispatched, available, item.id)
+    selected = min(candidates, key=candidate_order)
+    source = session.get(Source, selected.source_id)
+    candidate_summary = [{
+        "item_id": item.id, "source_id": item.source_id, "project_id": item.project_id,
+        "priority": int(item.priority_score or 0), "expiry": item.restore_expires_at.isoformat()
+        if item.restore_expires_at else None,
+    } for item in candidates]
+    reason = selected.decision_reason or "global lane priority ordering"
+    session.add(TransferLaneDecision(
+        project_id=selected.project_id, source_id=selected.source_id,
+        queue_item_id=selected.id, priority_score=int(selected.priority_score or 0),
+        reason=reason, candidates_json=json.dumps(candidate_summary, sort_keys=True),
+    ))
+    record_event(
+        session, "GLOBAL_TRANSFER_LANE_DECISION",
+        (f"Global physical lane selected source '{source.name if source else selected.source_id}' "
+         f"item {selected.id}; priority {selected.priority_score}/100 ({selected.priority_band}); {reason}"),
+        source_id=selected.source_id, wave_id=selected.wave_id,
+        migration_project_id=selected.project_id,
+    )
+    if selected.project_id is not None:
+        state = fairness.get(selected.project_id)
+        if state is None:
+            state = ProjectSchedulerState(project_id=selected.project_id)
+            session.add(state)
+        state.selection_count = int(state.selection_count or 0) + 1
+        state.last_selected_at = reference
+    return selected
 
 
 def continuous_lane_backlog_seconds(session: Session, source_id: int) -> float:
@@ -4212,15 +4520,20 @@ def restore_queue_details(wave: Wave, task: Task, now: datetime, session: Sessio
 
 
 @app.get("/api/transfer-queue")
-def transfer_queue(session: Session = Depends(get_session)) -> dict:
+def transfer_queue(session: Session = Depends(get_session), project_id: int | None = None) -> dict:
     """Queue view for the dashboard; it only reads the local control database."""
+    project = migration_project_or_404(session, project_id) if project_id is not None else None
+    # The queue still has one physical lane.  A project filter is an
+    # observability lens only: it never changes admission, autoscaling or the
+    # shared network ceiling.
+    source_scope = Source.migration_project_id == project.id if project else True
     now = utcnow()
     transfer_kinds = ("SUBMIT_BATCH_RESTORE", "POLL_RESTORE", "TRANSFER_CONTINUOUS")
     tasks = list(session.scalars(
         select(Task).join(Wave).join(Source).where(
             Task.kind.in_(transfer_kinds), Task.state.in_([TaskState.READY, TaskState.RUNNING]),
             Wave.status.notin_(["PAUSED", "COMPLETED"]),
-            Source.archived_at.is_(None),
+            Source.archived_at.is_(None), source_scope,
         ).order_by(Task.available_at, Task.id)
     ))
     # At most one current task represents each wave.  Prefer a running Raiju
@@ -4252,7 +4565,7 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
                 TransferQueueState.LEASED, TransferQueueState.MULTIPART_RESUME,
                 TransferQueueState.RETRY_WAIT,
             ]),
-            Wave.status != "PAUSED", Source.archived_at.is_(None),
+            Wave.status != "PAUSED", Source.archived_at.is_(None), source_scope,
         )
         .group_by(TransferQueueItem.wave_id, TransferQueueItem.state)
     ))
@@ -4382,7 +4695,7 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
         select(Wave, Source).join(Source).where(
             Wave.planner_mode == "DYNAMIC",
             Wave.status == "RESTORE_SCHEDULED",
-            Source.archived_at.is_(None),
+            Source.archived_at.is_(None), source_scope,
         ).order_by(Wave.pipeline_run_id, Wave.id)
     ):
         if wave.id in queued_ids:
@@ -4418,12 +4731,14 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
         if expiry and (lane_totals["earliest_expiry_at"] is None or expiry < lane_totals["earliest_expiry_at"]):
             lane_totals["earliest_expiry_at"] = expiry
     priority_rows = list(session.execute(
-        select(TransferQueueItem.priority_band, func.count(TransferQueueItem.id)).where(
+        select(TransferQueueItem.priority_band, func.count(TransferQueueItem.id)).join(
+            Source, Source.id == TransferQueueItem.source_id
+        ).where(
             TransferQueueItem.state.in_([
                 TransferQueueState.AVAILABLE, TransferQueueState.READY,
                 TransferQueueState.LEASED, TransferQueueState.RETRY_WAIT,
                 TransferQueueState.MULTIPART_RESUME,
-            ])
+            ]), source_scope
         ).group_by(TransferQueueItem.priority_band)
     ))
     lane_totals["priority_bands"] = {str(band): int(count or 0) for band, count in priority_rows}
@@ -4431,9 +4746,12 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
     # it in the read model so operators can distinguish "critical work is
     # waiting" from "critical work already owns the next safe Raiju slot".
     lane_totals["handoff_reservations"] = int(session.scalar(
-        select(func.count(TransferQueueItem.id)).where(
+        select(func.count(TransferQueueItem.id)).join(
+            Source, Source.id == TransferQueueItem.source_id
+        ).where(
             TransferQueueItem.state == TransferQueueState.LEASED,
             TransferQueueItem.preemption_successor_item_id.is_not(None),
+            source_scope,
         )
     ) or 0)
     # The continuous lane is independent from a wave.  Its live operators
@@ -4450,7 +4768,7 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
             TransferQueueItem.state == TransferQueueState.LEASED,
             ObjectRecord.state == ObjectState.TRANSFERRING,
             Wave.status != "PAUSED",
-            Source.archived_at.is_(None),
+            Source.archived_at.is_(None), source_scope,
         )
         .order_by(Source.id, TransferQueueItem.last_dispatched_at, TransferQueueItem.id)
     ))
@@ -4466,7 +4784,7 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
             ObjectRecord.transfer_progress_at.is_not(None),
             ObjectRecord.transfer_progress_at < stalled_cutoff,
             Wave.status != "PAUSED",
-            Source.archived_at.is_(None),
+            Source.archived_at.is_(None), source_scope,
         )
         .order_by(ObjectRecord.transfer_progress_at, TransferQueueItem.id)
         .limit(20)
@@ -4577,9 +4895,11 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
             func.coalesce(func.sum(TransferQueueItem.size_bytes), 0),
         )
         .join(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
+        .join(Source, Source.id == TransferQueueItem.source_id)
         .where(
             TransferQueueItem.state == TransferQueueState.LEASED,
             ObjectRecord.state.in_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]),
+            source_scope,
         )
     ).one()
     lane_totals["reconciliation_items"] = int(reconciliation_items or 0)
@@ -4615,7 +4935,7 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
             ]),
             or_(TransferQueueItem.retry_at.is_(None), TransferQueueItem.retry_at <= now),
             Wave.status != "PAUSED",
-            Source.archived_at.is_(None),
+            Source.archived_at.is_(None), source_scope,
         )
         .order_by(
             TransferQueueItem.priority_score.desc(),
@@ -4653,11 +4973,13 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
         )
     else:
         lane_totals["next_decision"] = {"state": "NO_ELIGIBLE_ITEM"}
-    oldest_available_at = session.scalar(select(func.min(TransferQueueItem.available_at)).where(
+    oldest_available_at = session.scalar(select(func.min(TransferQueueItem.available_at)).join(
+        Source, Source.id == TransferQueueItem.source_id
+    ).where(
         TransferQueueItem.state.in_([
         TransferQueueState.AVAILABLE, TransferQueueState.READY,
         TransferQueueState.RETRY_WAIT, TransferQueueState.MULTIPART_RESUME,
-    ])))
+    ]), source_scope))
     if oldest_available_at and oldest_available_at.tzinfo is None:
         oldest_available_at = oldest_available_at.replace(tzinfo=timezone.utc)
     lane_totals["oldest_wait_seconds"] = max(0, int((now - oldest_available_at).total_seconds())) if oldest_available_at else 0
@@ -4699,7 +5021,7 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
     # an instantaneous Raiju thread.
     recent_batches = list(session.scalars(select(TransferDispatchBatch)
         .join(Source, Source.id == TransferDispatchBatch.source_id)
-        .where(Source.archived_at.is_(None))
+        .where(Source.archived_at.is_(None), source_scope)
         .order_by(TransferDispatchBatch.started_at.desc()).limit(8)))
     lane_totals["recent_dispatches"] = [{
         "at": batch.started_at, "source_id": batch.source_id, "wave_id": batch.wave_id,
@@ -4710,7 +5032,7 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
     } for batch in recent_batches]
     autoscale_states = list(session.scalars(select(TransferAutoscaleState)
         .join(Source, Source.id == TransferAutoscaleState.source_id)
-        .where(Source.archived_at.is_(None))
+        .where(Source.archived_at.is_(None), source_scope)
         .order_by(TransferAutoscaleState.updated_at.desc())))
     lane_totals["autoscale"] = [{
         "source_id": state.source_id,
@@ -4746,6 +5068,8 @@ def transfer_queue(session: Session = Depends(get_session)) -> dict:
         lane_totals["bytes"] / reference_bytes_per_second, 2
     ) if reference_bytes_per_second > 0 else None
     return {
+        "project_id": project.id if project else None,
+        "project_name": project.name if project else None,
         "waves": waves,
         "planned_lookahead": planned,
         "restore_schedule": restore_schedule,
@@ -4768,9 +5092,16 @@ def flight_board_availability(source_id: int | None = Query(default=None, ge=1),
 @app.get("/api/flight-board")
 def flight_board(source_id: int | None = Query(default=None, ge=1),
                  run_id: int | None = Query(default=None, ge=1),
+                 # Keep a plain None default here.  Besides FastAPI requests,
+                 # the read model is invoked directly by operational tests and
+                 # internal callers; a Query(...) default would otherwise leak
+                 # into those calls as a truthy pseudo project id.
+                 project_id: int | None = None,
                  session: Session = Depends(get_session)) -> dict:
-    """Return local-only phases for one source, or for one durable pipeline run."""
+    """Return local-only phases for one source, run, or migration project."""
     now = utcnow()
+    if project_id is not None and (source_id is not None or run_id is not None):
+        raise HTTPException(status_code=422, detail="Project timeline cannot be combined with source_id or run_id")
     filters = [Wave.planner_mode == "DYNAMIC"]
     source_name = None
     if source_id is not None:
@@ -4778,6 +5109,10 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         filters.append(Wave.source_id == source_id)
     if run_id is not None:
         filters.append(Wave.pipeline_run_id == run_id)
+    if project_id is not None:
+        project = migration_project_or_404(session, project_id)
+        source_name = project.name
+        filters.append(Source.migration_project_id == project.id)
     rows = list(session.execute(
         select(Wave, Source).join(Source).where(*filters)
         .order_by(Wave.planned_transfer_start_at.nulls_last(), Wave.id).limit(500)
@@ -4785,7 +5120,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     wave_ids = [wave.id for wave, _source in rows]
     if not wave_ids:
         return {"waves": [], "generated_at": now, "truncated": False, "source_id": source_id,
-                "source_name": source_name}
+                "project_id": project_id, "source_name": source_name}
     # The board is an observability read model.  Replanning a pipeline here
     # used to make opening the modal compete with the workers and could turn
     # a simple visualization into a slow, mutating operation.  Raikou owns
@@ -5585,7 +5920,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     return {"waves": board_waves,
             "transfer_lane": {"enabled": True, "phases": transfer_lane_phases,
                               "idle_breakdown": lane_idle},
-            "generated_at": now, "source_id": source_id,
+            "generated_at": now, "source_id": source_id, "project_id": project_id,
             "source_name": source_name,
             "timeline_start_at": timeline_start,
             "timeline_content_end_at": timeline_content_end,
@@ -6064,6 +6399,456 @@ def delete_aws_connection(connection_id: int, session: Session = Depends(get_ses
     return {"id": connection_id, "deleted": True}
 
 
+def migration_project_completion_evidence(session: Session, project: MigrationProject,
+                                          sources: list[Source] | None = None) -> dict:
+    """Derive project completion from the same durable evidence as a source.
+
+    A terminal wave alone is not proof of delivery: a project is complete only
+    after every current object is either deeply verified or accepted by the
+    normal OCI delivery-integrity path.  This remains a read model: no source,
+    wave, object or audit record is mutated while reporting it.
+    """
+    sources = sources if sources is not None else list(session.scalars(select(Source).where(
+        Source.migration_project_id == project.id
+    ).order_by(Source.id)))
+    source_ids = [source.id for source in sources]
+    totals: dict[int, tuple[int, int, int, int, int]] = {}
+    if source_ids:
+        for source_id, count, transferred, verified, accepted, failed in session.execute(select(
+            ObjectRecord.source_id,
+            func.count(ObjectRecord.id),
+            func.coalesce(func.sum(case((ObjectRecord.state.in_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((ObjectRecord.state == ObjectState.VERIFIED, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((ObjectRecord.delivery_integrity_status == "OCI_ACCEPTED", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((ObjectRecord.state == ObjectState.FAILED, 1), else_=0)), 0),
+        ).where(
+            ObjectRecord.source_id.in_(source_ids), ObjectRecord.is_current_revision.is_(True)
+        ).group_by(ObjectRecord.source_id)):
+            totals[int(source_id)] = tuple(int(value or 0) for value in (
+                count, transferred, verified, accepted, failed
+            ))
+    pending_audits = set(session.scalars(select(Wave.source_id).join(Task).where(
+        Wave.source_id.in_(source_ids) if source_ids else False,
+        Task.kind == "VERIFY_INTEGRITY",
+        Task.state.in_([TaskState.READY, TaskState.RUNNING]),
+    ))) if source_ids else set()
+    entries: list[dict] = []
+    for source in sources:
+        count, transferred, verified, accepted, failed = totals.get(source.id, (0, 0, 0, 0, 0))
+        delivered = bool(count) and (verified == count or (transferred == count and accepted == count))
+        blockers: list[str] = []
+        if not count:
+            blockers.append("inventário ausente")
+        if failed:
+            blockers.append(f"{failed} objeto(s) com falha")
+        if source.destination_validation_status == "DIFFERENT":
+            blockers.append("destino OCI divergente")
+        if count and transferred == count and not delivered:
+            blockers.append("integridade de entrega pendente")
+        if source.id in pending_audits:
+            blockers.append("auditoria profunda pendente")
+        entries.append({
+            "source_id": source.id, "source_name": source.name,
+            "objects": count, "transferred": transferred, "verified": verified,
+            "delivery_accepted": accepted, "failed": failed,
+            "delivery_complete": delivered,
+            "attention": bool(blockers), "blockers": blockers,
+        })
+    return {
+        "sources": entries,
+        "all_delivered": bool(entries) and all(entry["delivery_complete"] for entry in entries),
+        "has_attention": any(entry["attention"] for entry in entries),
+    }
+
+
+def migration_project_summary(session: Session, project: MigrationProject) -> dict:
+    """Return durable project metadata and a derived, non-authoritative state."""
+    sources = list(session.scalars(select(Source).where(
+        Source.migration_project_id == project.id
+    ).order_by(Source.id)))
+    source_ids = [source.id for source in sources]
+    waves = list(session.scalars(select(Wave).where(Wave.source_id.in_(source_ids)))) if source_ids else []
+    wave_statuses = {wave.status for wave in waves}
+    completion = migration_project_completion_evidence(session, project, sources)
+    scheduler = session.scalar(select(ProjectSchedulerState).where(
+        ProjectSchedulerState.project_id == project.id
+    ))
+    if project.archived_at:
+        derived_state = "ARCHIVED"
+    elif project.status == "PAUSED":
+        derived_state = "PAUSED"
+    elif any(source.status == "DISCOVERING" for source in sources):
+        derived_state = "DISCOVERING"
+    elif wave_statuses.intersection({"RESTORING", "RESTORE_DRAINING", "TRANSFERRING", "TRANSFER_DRAINING"}):
+        derived_state = "RUNNING"
+    elif (completion["has_attention"] or wave_statuses.intersection(
+            {"FAILED", "RESTORE_REAPPROVAL_REQUIRED", "TRANSFERRED_WITH_ERRORS", "VERIFICATION_FAILED"})):
+        derived_state = "COMPLETED_WITH_ATTENTION"
+    elif completion["all_delivered"]:
+        derived_state = "COMPLETED"
+    elif sources and all(source.status == "DISCOVERED" for source in sources):
+        derived_state = "READY"
+    else:
+        derived_state = "CONFIGURED"
+    return {
+        "id": project.id,
+        "name": project.name,
+        "status": derived_state,
+        "selection_policy": project.selection_policy,
+        "archived_at": project.archived_at,
+        "created_at": project.created_at,
+        "updated_at": project.updated_at,
+        "source_count": len(sources),
+        "completion": completion,
+        "scheduler": {
+            "selection_count": int(scheduler.selection_count or 0) if scheduler else 0,
+            "last_selected_at": scheduler.last_selected_at if scheduler else None,
+            "fairness": "least-recently-selected when priority and expiry are equivalent",
+        },
+        "sources": [{
+            "id": source.id,
+            "name": source.name,
+            "destination_bucket": source.destination_bucket,
+            "destination_prefix": normalize_destination_prefix(source.destination_prefix),
+            "route_locked": source_route_is_locked(session, source.id),
+        } for source in sources],
+    }
+
+
+def migration_project_metrics(session: Session, project: MigrationProject,
+                              *, include_costs: bool = False) -> dict:
+    """Aggregate project evidence without changing source/wave ownership."""
+    sources = list(session.scalars(select(Source).where(
+        Source.migration_project_id == project.id
+    ).order_by(Source.id)))
+    source_ids = [source.id for source in sources]
+    object_totals = {"objects": 0, "bytes": 0, "transferred_objects": 0,
+                     "transferred_bytes": 0, "verified_objects": 0,
+                     "failed_objects": 0}
+    classes: dict[str, dict[str, int]] = {}
+    if source_ids:
+        rows = session.execute(select(
+            ObjectRecord.storage_class,
+            func.count(ObjectRecord.id), func.coalesce(func.sum(ObjectRecord.size_bytes), 0),
+            func.coalesce(func.sum(case((ObjectRecord.state.in_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((ObjectRecord.state.in_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]), ObjectRecord.size_bytes), else_=0)), 0),
+            func.coalesce(func.sum(case((ObjectRecord.state == ObjectState.VERIFIED, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((ObjectRecord.state == ObjectState.FAILED, 1), else_=0)), 0),
+        ).where(
+            ObjectRecord.source_id.in_(source_ids), ObjectRecord.is_current_revision.is_(True)
+        ).group_by(ObjectRecord.storage_class)).all()
+        for storage_class, count, size, transferred, transferred_bytes, verified, failed in rows:
+            label = str(storage_class or "UNKNOWN")
+            classes[label] = {"objects": int(count or 0), "bytes": int(size or 0)}
+            object_totals["objects"] += int(count or 0)
+            object_totals["bytes"] += int(size or 0)
+            object_totals["transferred_objects"] += int(transferred or 0)
+            object_totals["transferred_bytes"] += int(transferred_bytes or 0)
+            object_totals["verified_objects"] += int(verified or 0)
+            object_totals["failed_objects"] += int(failed or 0)
+    waves = list(session.scalars(select(Wave).where(Wave.source_id.in_(source_ids)).order_by(Wave.id))) if source_ids else []
+    metrics = {
+        **migration_project_summary(session, project),
+        "inventory": object_totals,
+        "storage_classes": classes,
+        "discovery_elapsed_seconds": int(sum(float(source.discovery_elapsed_seconds or 0) for source in sources)),
+        "waves": {
+            "total": len(waves),
+            "by_status": {status: sum(wave.status == status for wave in waves) for status in sorted({wave.status for wave in waves})},
+        },
+        "sources_detail": [{
+            "id": source.id, "name": source.name, "s3_bucket": source.s3_bucket,
+            "aws_region": source.aws_region, "s3_prefixes": source_prefix_values(source),
+            "destination_bucket": source.destination_bucket,
+            "destination_prefix": normalize_destination_prefix(source.destination_prefix),
+            "discovery_status": source.status,
+            "destination_validation_status": source.destination_validation_status,
+        } for source in sources],
+    }
+    if include_costs:
+        estimates = [wave_cost_estimate(session, wave) for wave in waves]
+        metrics["cost"] = {
+            "currency": next((estimate["currency"] for estimate in estimates), "USD"),
+            "waves": len(estimates),
+            "one_time": round(sum(float(estimate["totals"]["one_time"] or 0) for estimate in estimates), 6),
+            "recurring_monthly": round(sum(float(estimate["totals"]["recurring_monthly"] or 0) for estimate in estimates), 6),
+            "optional_deep_audit": round(sum(float(estimate["totals"]["optional_deep_audit"] or 0) for estimate in estimates), 6),
+            "complete": all(bool(estimate["complete"]) for estimate in estimates),
+            "note": "Soma de estimativas por wave; custos não são rateados entre sources.",
+        }
+    return metrics
+
+
+@app.get("/api/migration-projects")
+def list_migration_projects(session: Session = Depends(get_session)) -> list[dict]:
+    projects = list(session.scalars(select(MigrationProject).order_by(MigrationProject.id)))
+    return [migration_project_summary(session, project) for project in projects]
+
+
+@app.get("/api/migration-projects/{project_id}/summary")
+def migration_project_report(project_id: int, include_costs: bool = False,
+                             session: Session = Depends(get_session)) -> dict:
+    return migration_project_metrics(session, migration_project_or_404(session, project_id),
+                                     include_costs=include_costs)
+
+
+@app.get("/api/migration-projects/{project_id}/inventory.csv")
+def export_migration_project_inventory(project_id: int,
+                                       session: Session = Depends(get_session)) -> StreamingResponse:
+    project = migration_project_or_404(session, project_id)
+    content = io.StringIO()
+    writer = csv.writer(content, lineterminator="\n")
+    writer.writerow(["project", "source", "s3_bucket", "aws_region", "s3_prefixes", "destination_bucket", "destination_prefix", "object_key", "destination_object_key", "version_id", "size_bytes", "storage_class", "state", "wave_id"])
+    rows = session.execute(select(ObjectRecord, Source).join(Source).where(
+        Source.migration_project_id == project.id, ObjectRecord.is_current_revision.is_(True)
+    ).order_by(Source.id, ObjectRecord.object_key))
+    for obj, source in rows:
+        writer.writerow([
+            project.name, source.name, source.s3_bucket, source.aws_region,
+            ";".join(source_prefix_values(source)), source.destination_bucket,
+            normalize_destination_prefix(source.destination_prefix), obj.object_key,
+            object_destination_key(obj), obj.version_id or "", obj.size_bytes,
+            obj.storage_class or "", obj.state, obj.wave_id or "",
+        ])
+    return StreamingResponse(iter([content.getvalue()]), media_type="text/csv", headers={
+        "Content-Disposition": f'attachment; filename="migration-project-{project.id}-inventory.csv"'
+    })
+
+
+@app.get("/api/migration-projects/{project_id}/lane-decisions")
+def migration_project_lane_decisions(project_id: int, limit: int = Query(default=50, ge=1, le=500),
+                                     session: Session = Depends(get_session)) -> list[dict]:
+    migration_project_or_404(session, project_id)
+    decisions = session.scalars(select(TransferLaneDecision).where(
+        TransferLaneDecision.project_id == project_id
+    ).order_by(TransferLaneDecision.id.desc()).limit(limit))
+    return [{
+        "id": decision.id, "source_id": decision.source_id,
+        "queue_item_id": decision.queue_item_id, "priority_score": decision.priority_score,
+        "reason": decision.reason, "candidates": json.loads(decision.candidates_json or "[]"),
+        "created_at": decision.created_at,
+    } for decision in decisions]
+
+
+@app.get("/api/migration-projects/{project_id}/wave-groups")
+def migration_project_wave_groups(project_id: int,
+                                  max_wave_bytes: int = Query(default=1 * 1024**4, ge=1, le=10 * 1024**4),
+                                  session: Session = Depends(get_session)) -> dict:
+    """Logical small-wave groups for reading and selection, never AWS work."""
+    project = migration_project_or_404(session, project_id)
+    groups: list[dict] = []
+    for source in session.scalars(select(Source).where(
+        Source.migration_project_id == project.id
+    ).order_by(Source.id)):
+        waves = list(session.scalars(select(Wave).where(
+            Wave.source_id == source.id, Wave.max_bytes <= max_wave_bytes
+        ).order_by(Wave.id)))
+        if not waves:
+            continue
+        wave_ids = [wave.id for wave in waves]
+        task_by_wave: dict[int, Task] = {}
+        for task in session.scalars(select(Task).where(
+            Task.wave_id.in_(wave_ids)
+        ).order_by(Task.wave_id, Task.id.desc())):
+            task_by_wave.setdefault(task.wave_id, task)
+        groups.append({
+            "source_id": source.id, "source_name": source.name,
+            "criterion_max_wave_bytes": max_wave_bytes,
+            "waves": [{
+                "wave_id": wave.id, "wave_name": wave.name, "status": wave.status,
+                "max_bytes": wave.max_bytes, "restore_tier": wave.restore_tier,
+                "restore_days": wave.restore_days, "batch_job_id": wave.batch_job_id,
+                "task": ({"kind": task_by_wave[wave.id].kind,
+                          "state": task_by_wave[wave.id].state,
+                          "error": task_by_wave[wave.id].error}
+                         if wave.id in task_by_wave else None),
+                "cost": wave_cost_estimate(session, wave)["totals"],
+                "actions": {
+                    "report": f"/api/waves/{wave.id}/report",
+                    "cost": f"/api/waves/{wave.id}/cost-estimate",
+                    "manifest": f"/api/waves/{wave.id}/manifest.csv",
+                },
+            } for wave in waves],
+            "objects": int(session.scalar(select(func.count(ObjectRecord.id)).where(
+                ObjectRecord.wave_id.in_(wave_ids)
+            )) or 0),
+        })
+    return {"project_id": project.id, "project_name": project.name,
+            "groups": groups,
+            "note": "Grupos são apenas uma visão lógica; cada wave mantém manifest, restore, custo e expiração próprios."}
+
+
+@app.post("/api/migration-projects", status_code=201)
+def create_migration_project(payload: MigrationProjectCreate,
+                             session: Session = Depends(get_session)) -> dict:
+    if session.scalar(select(MigrationProject.id).where(MigrationProject.name == payload.name)):
+        raise HTTPException(status_code=409, detail="Migration project name already exists")
+    project = MigrationProject(name=payload.name, selection_policy=payload.selection_policy)
+    session.add(project)
+    session.flush()
+    record_event(
+        session,
+        "MIGRATION_PROJECT_CREATED",
+        f"Migration project '{project.name}' configured",
+        migration_project_id=project.id,
+    )
+    session.commit()
+    return migration_project_summary(session, project)
+
+
+@app.put("/api/migration-projects/{project_id}")
+def update_migration_project(project_id: int, payload: MigrationProjectUpdate,
+                             session: Session = Depends(get_session)) -> dict:
+    project = active_migration_project_or_409(session, project_id)
+    if payload.selection_policy is not None:
+        project.selection_policy = payload.selection_policy
+    record_event(
+        session,
+        "MIGRATION_PROJECT_UPDATED",
+        f"Migration project '{project.name}' metadata updated",
+        migration_project_id=project.id,
+    )
+    session.commit()
+    return migration_project_summary(session, project)
+
+
+@app.post("/api/migration-projects/{project_id}/archive")
+def archive_migration_project(project_id: int, session: Session = Depends(get_session)) -> dict:
+    project = migration_project_or_404(session, project_id)
+    if project.archived_at is None:
+        active_waves = project_active_waves(session, project.id)
+        discovering = session.scalar(select(Source.id).where(
+            Source.migration_project_id == project.id,
+            Source.status.in_(["DISCOVERING", "DISCOVERY_QUEUED"]),
+        ).limit(1))
+        if active_waves or discovering:
+            raise HTTPException(
+                status_code=409,
+                detail="Pause or complete all project sources before archiving; archive never abandons active work",
+            )
+        project.archived_at = utcnow()
+        project.status = "ARCHIVED"
+        record_event(
+            session,
+            "MIGRATION_PROJECT_ARCHIVED",
+            (f"Migration project '{project.name}' archived; existing source operations "
+             "remain source-local and unchanged"),
+            migration_project_id=project.id,
+        )
+        session.commit()
+    return migration_project_summary(session, project)
+
+
+def project_active_waves(session: Session, project_id: int) -> list[Wave]:
+    """Waves affected by a project lifecycle action, excluding history."""
+    return list(session.scalars(select(Wave).join(Source).where(
+        Source.migration_project_id == project_id,
+        Wave.status.not_in(["COMPLETED", "VERIFIED", "TRANSFERRED_WITH_ERRORS", "FAILED", "VERIFICATION_FAILED"]),
+    ).order_by(Wave.id)))
+
+
+@app.post("/api/migration-projects/{project_id}/pause")
+def pause_migration_project(project_id: int, session: Session = Depends(get_session)) -> dict:
+    project = active_migration_project_or_409(session, project_id)
+    if project.status == "PAUSED":
+        return migration_project_summary(session, project)
+    waves = project_active_waves(session, project.id)
+    paused = 0
+    # Reuse the source/wave action so task cancellation and leased-item
+    # recovery retain their already-tested semantics. A project never reaches
+    # into another source's task or evidence.
+    for wave in waves:
+        if wave.status != "PAUSED":
+            pause_wave(wave.id, session)
+            paused += 1
+    project.status = "PAUSED"
+    record_event(
+        session, "MIGRATION_PROJECT_PAUSED",
+        f"Migration project '{project.name}' paused {paused} active wave(s)",
+        migration_project_id=project.id,
+    )
+    session.commit()
+    return migration_project_summary(session, project)
+
+
+@app.post("/api/migration-projects/{project_id}/resume")
+def resume_migration_project(project_id: int, session: Session = Depends(get_session)) -> dict:
+    project = active_migration_project_or_409(session, project_id)
+    if project.status != "PAUSED":
+        raise HTTPException(status_code=409, detail="Only a paused migration project can be resumed")
+    paused_waves = list(session.scalars(select(Wave).join(Source).where(
+        Source.migration_project_id == project.id, Wave.status == "PAUSED",
+    ).order_by(Wave.id)))
+    for wave in paused_waves:
+        resume_wave(wave.id, session)
+    project.status = "CONFIGURED"
+    record_event(
+        session, "MIGRATION_PROJECT_RESUMED",
+        f"Migration project '{project.name}' resumed {len(paused_waves)} wave(s)",
+        migration_project_id=project.id,
+    )
+    session.commit()
+    return migration_project_summary(session, project)
+
+
+@app.post("/api/migration-projects/{project_id}/sources/{source_id}")
+def adopt_source_into_migration_project(project_id: int, source_id: int,
+                                        payload: SourceProjectAdoption,
+                                        session: Session = Depends(get_session)) -> dict:
+    if payload.migration_project_id != project_id:
+        raise HTTPException(status_code=422, detail="Project id must match the request path")
+    project, destination_prefix = normalized_project_destination_route(
+        session, project_id, active_source_or_409(session, source_id).destination_bucket,
+        payload.destination_prefix, exclude_source_id=source_id,
+    )
+    source = active_source_or_409(session, source_id)
+    if source_route_is_locked(session, source.id):
+        raise HTTPException(
+            status_code=409,
+            detail="A source with inventory or waves cannot change migration project routing",
+        )
+    source.migration_project_id = project.id if project else None
+    source.destination_prefix = destination_prefix
+    record_event(
+        session,
+        "SOURCE_ADOPTED_INTO_MIGRATION_PROJECT",
+        (f"Source '{source.name}' adopted into migration project '{project.name}' "
+         f"with OCI prefix '{destination_prefix}'"),
+        source_id=source.id,
+        migration_project_id=project.id,
+    )
+    session.commit()
+    return {"source_id": source.id, "migration_project_id": project.id,
+            "destination_prefix": destination_prefix}
+
+
+@app.delete("/api/migration-projects/{project_id}/sources/{source_id}")
+def remove_source_from_migration_project(project_id: int, source_id: int,
+                                         session: Session = Depends(get_session)) -> dict:
+    project = migration_project_or_404(session, project_id)
+    source = active_source_or_409(session, source_id)
+    if source.migration_project_id != project.id:
+        raise HTTPException(status_code=404, detail="Source is not associated with this migration project")
+    if source_route_is_locked(session, source.id):
+        raise HTTPException(
+            status_code=409,
+            detail="A source with inventory or waves cannot change migration project routing",
+        )
+    previous_prefix = source.destination_prefix
+    source.migration_project_id = None
+    source.destination_prefix = ""
+    record_event(
+        session,
+        "SOURCE_REMOVED_FROM_MIGRATION_PROJECT",
+        (f"Source '{source.name}' removed from migration project '{project.name}' "
+         f"before discovery; OCI prefix '{previous_prefix}' released"),
+        source_id=source.id,
+        migration_project_id=project.id,
+    )
+    session.commit()
+    return {"source_id": source.id, "migration_project_id": None, "destination_prefix": ""}
+
+
 @app.get("/api/sources")
 def list_sources(session: Session = Depends(get_session)) -> list[dict]:
     if runtime_context.is_simulation:
@@ -6126,6 +6911,10 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
     return [{"id": s.id, "name": s.name, "s3_bucket": s.s3_bucket, "s3_prefix": s.s3_prefix,
              "s3_prefixes": source_prefix_values(s),
              "aws_region": s.aws_region, "destination_bucket": s.destination_bucket, "status": s.status,
+             "migration_project_id": s.migration_project_id,
+             "migration_project_name": (s.migration_project.name if s.migration_project else None),
+             "destination_prefix": normalize_destination_prefix(s.destination_prefix),
+             "destination_route_locked": source_route_is_locked(session, s.id),
              "aws_bucket_region": s.aws_bucket_region,
              "aws_connection_id": s.aws_connection_id,
              "business_priority": int(s.business_priority or 999),
@@ -6180,14 +6969,43 @@ def create_source(payload: SourceCreate, session: Session = Depends(get_session)
         raise HTTPException(status_code=409, detail=(
             f"S3 prefix scope overlaps active source(s): {names}. Archive the conflicting source or remove the overlapping prefix."
         ))
-    source_data = payload.model_dump(exclude={"s3_prefixes"})
+    if payload.migration_project_id is not None and payload.migration_project_name is not None:
+        raise HTTPException(status_code=422, detail="Choose an existing migration project or provide a new project name, not both")
+    project: MigrationProject | None = None
+    project_created = False
+    if payload.migration_project_name is not None:
+        if session.scalar(select(MigrationProject.id).where(MigrationProject.name == payload.migration_project_name)):
+            raise HTTPException(status_code=409, detail="Migration project name already exists")
+        project = MigrationProject(name=payload.migration_project_name)
+        session.add(project)
+        session.flush()
+        project_created = True
+    if project is not None:
+        migration_project_id = project.id
+    else:
+        migration_project_id = payload.migration_project_id
+    project, destination_prefix = normalized_project_destination_route(
+        session, migration_project_id, payload.destination_bucket, payload.destination_prefix
+    )
+    source_data = payload.model_dump(exclude={"s3_prefixes", "migration_project_name"})
+    source_data["migration_project_id"] = project.id if project else None
+    source_data["destination_prefix"] = destination_prefix
     source_data["s3_prefix"] = prefixes[0]
     source = Source(**source_data)
     freeze_source_endpoint_configuration(source, connection)
     session.add(source)
     session.flush()
     session.add_all(SourcePrefix(source_id=source.id, prefix=prefix) for prefix in prefixes)
-    record_event(session, "SOURCE_CREATED", f"Source '{source.name}' configured", source_id=source.id)
+    if project_created:
+        record_event(
+            session, "MIGRATION_PROJECT_CREATED",
+            f"Migration project '{project.name}' configured with its first source",
+            migration_project_id=project.id,
+        )
+    record_event(
+        session, "SOURCE_CREATED", f"Source '{source.name}' configured",
+        source_id=source.id, migration_project_id=(project.id if project else None),
+    )
     session.commit()
     return {"id": source.id, "name": source.name, "status": source.status}
 
@@ -6217,14 +7035,40 @@ def update_source(source_id: int, payload: SourceUpdate, session: Session = Depe
         raise HTTPException(status_code=409, detail=(
             f"S3 prefix scope overlaps active source(s): {names}. Archive the conflicting source or remove the overlapping prefix."
         ))
-    for field, value in payload.model_dump(exclude={"s3_prefixes"}).items():
+    if payload.migration_project_name is not None:
+        raise HTTPException(status_code=422, detail="Create a migration project before associating an existing source")
+    # Older source editors do not know project fields.  Omitted fields must
+    # preserve an unstarted project's route rather than silently detaching it.
+    requested_project_id = (payload.migration_project_id
+                            if "migration_project_id" in payload.model_fields_set
+                            else source.migration_project_id)
+    requested_destination_prefix = (payload.destination_prefix
+                                    if "destination_prefix" in payload.model_fields_set
+                                    else source.destination_prefix)
+    project, destination_prefix = normalized_project_destination_route(
+        session, requested_project_id, payload.destination_bucket,
+        requested_destination_prefix, exclude_source_id=source.id,
+    )
+    source_data = payload.model_dump(exclude={"s3_prefixes", "migration_project_name"})
+    if "migration_project_id" in payload.model_fields_set:
+        source_data["migration_project_id"] = project.id if project else None
+    else:
+        source_data.pop("migration_project_id", None)
+    if "destination_prefix" in payload.model_fields_set:
+        source_data["destination_prefix"] = destination_prefix
+    else:
+        source_data.pop("destination_prefix", None)
+    for field, value in source_data.items():
         setattr(source, field, value)
     if payload.aws_connection_id is not None:
         freeze_source_endpoint_configuration(source, connection)
     source.s3_prefix = prefixes[0]
     session.query(SourcePrefix).filter(SourcePrefix.source_id == source.id).delete(synchronize_session=False)
     session.add_all(SourcePrefix(source_id=source.id, prefix=prefix) for prefix in prefixes)
-    record_event(session, "SOURCE_UPDATED", f"Source '{source.name}' configuration updated", source_id=source.id)
+    record_event(
+        session, "SOURCE_UPDATED", f"Source '{source.name}' configuration updated",
+        source_id=source.id, migration_project_id=(project.id if project else None),
+    )
     session.commit()
     return {"id": source.id, "name": source.name, "status": source.status}
 
@@ -6316,6 +7160,8 @@ def active_source_or_409(session: Session, source_id: int) -> Source:
     source = source_or_404(session, source_id)
     if source.archived_at:
         raise HTTPException(status_code=409, detail="Archived sources are read-only")
+    if source.migration_project and source.migration_project.archived_at:
+        raise HTTPException(status_code=409, detail="Source belongs to an archived migration project and is read-only")
     return source
 
 
@@ -6339,6 +7185,12 @@ def delete_unexecuted_source_data(session: Session, source_id: int) -> dict[str,
     else:
         deleted["restore_results"], deleted["restore_attempts"] = 0, 0
     deleted["tasks"] = session.query(Task).filter(Task.wave_id.in_(wave_ids)).delete(synchronize_session=False) if wave_ids else 0
+    # A decision is audit evidence only after work is actually executed.  A
+    # pristine source may be deleted, so remove its unclaimed planning traces
+    # before queue rows; this also keeps PostgreSQL FK enforcement explicit.
+    deleted["transfer_lane_decisions"] = session.query(TransferLaneDecision).filter(
+        TransferLaneDecision.source_id == source_id
+    ).delete(synchronize_session=False)
     # Object-level transfer work is durable as well.  It must be removed
     # before inventory objects/waves, otherwise PostgreSQL correctly blocks
     # deletion through the queue-item foreign keys.
@@ -8338,11 +9190,25 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
     # restore slot when all of its objects are available, even while the
     # continuous transfer lane is still copying it.
     active_statuses = {"RESTORE_REQUESTED", "RESTORE_REQUEST_ACCEPTED", "RESTORING"}
+    global_active_restore_slots = int(session.scalar(select(func.count(Wave.id)).join(Source).outerjoin(
+        MigrationProject, Source.migration_project_id == MigrationProject.id
+    ).where(
+        or_(
+            Wave.status.in_(active_statuses),
+            and_(Wave.status == "RESTORE_SCHEDULED", Wave.id.in_(
+                select(Task.wave_id).where(Task.kind == "SUBMIT_BATCH_RESTORE")
+            )),
+        ), Source.archived_at.is_(None),
+        or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"),
+    )) or 0)
+    global_slots_available = max(0, int(settings.dynamic_restore_max_slots or 1) - global_active_restore_slots)
     runs = list(session.scalars(select(DynamicPipelineRun).where(
         DynamicPipelineRun.scheduled_restores.is_(True),
         DynamicPipelineRun.status.not_in(["COMPLETED", "HISTORICAL"]),
     )))
     for run in runs:
+        if run.source.migration_project and run.source.migration_project.status == "PAUSED":
+            continue
         # A failed wave is a durable operator decision point.  Do not consume
         # additional restore windows or costs by marching later waves forward
         # after the transfer lane has already stopped.
@@ -8378,7 +9244,7 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
                         source_id=run.source_id,
                         wave_id=next_wave.id,
                     )
-        release_capacity = adaptive_restore_slot_limit(session, run, settings)
+        source_release_capacity = adaptive_restore_slot_limit(session, run, settings)
         available_backlog_seconds = continuous_lane_backlog_seconds(session, run.source_id)
         # Restore and transfer are now decoupled.  Do not wait for a calendar
         # slot when Raiju has less than its minimum healthy stock; use the
@@ -8395,7 +9261,8 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
         projected_backlog_seconds = available_backlog_seconds
         projected_at_seconds = 0.0
         configured_horizon = int(run.restore_horizon_waves or settings.dynamic_restore_horizon_waves or 1)
-        horizon = configured_horizon if release_capacity == 2 else max(configured_horizon, release_capacity + 1)
+        horizon = (configured_horizon if source_release_capacity == 2
+                   else max(configured_horizon, source_release_capacity + 1))
         # Keep a future slice mutable.  The baseline is always two concurrent
         # restores; Raikou may safely add slots only after sufficient evidence.
         waves = list(session.scalars(select(Wave).where(Wave.pipeline_run_id == run.id).order_by(
@@ -8406,6 +9273,10 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
                 Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE"
             ).limit(1)) is not None
         ))
+        # The source forecast determines how many concurrent restores are
+        # useful; the runtime ceiling determines how many may exist across all
+        # projects. Both constraints are required for one physical host.
+        release_capacity = min(source_release_capacity, occupied + global_slots_available)
 
         def record_restore_deferral(wave: Wave, reason: str) -> None:
             """Explain a due-but-unsubmitted restore without flooding events."""
@@ -8539,6 +9410,7 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
                          f"Dynamic pipeline run {run.id} released restore for wave '{wave.name}' within release capacity {release_capacity} of materialized horizon {horizon}; {release_reason}",
                          source_id=wave.source_id, wave_id=wave.id)
             occupied += 1
+            global_slots_available = max(0, global_slots_available - 1)
             projected_backlog_seconds = post_release_backlog_seconds
             projected_at_seconds = max(projected_at_seconds, restore_lead_seconds)
             released += 1
@@ -8709,6 +9581,8 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
         DynamicPipelineRun.status.not_in(["COMPLETED", "HISTORICAL"]),
     )))
     for run in runs:
+        if run.source.migration_project and run.source.migration_project.status == "PAUSED":
+            continue
         changes_before_run = changed
         refresh_dynamic_pipeline_run(session, run)
         if run.status == "NEEDS_ATTENTION":

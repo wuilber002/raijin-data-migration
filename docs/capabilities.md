@@ -36,9 +36,22 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
 - Congela para cada objeto/revisão a chave de destino OCI resolvida no
   discovery. A rota padrão permanece compatível (`chave OCI = chave S3`), mas
   a transferência, multipart, validação e auditoria usam a chave persistida,
-  não uma configuração de source recalculada durante retry. A base interna
-  para projetos multi-source existe, mas cadastro de projetos, associação de
-  sources e scheduler compartilhado ainda não são capacidades operacionais.
+  não uma configuração de source recalculada durante retry. A API permite
+  cadastrar um projeto de migração e associar uma source ainda sem inventário
+  ou wave, com prefixo OCI não vazio e sem colisão de rota no mesmo bucket,
+  inclusive com fontes de outro projeto ou fontes legadas ativas.
+  A associação pode ser desfeita apenas antes dessa fronteira operacional; a
+  rota histórica permanece imutável. O namespace OCI continua pertencendo ao
+  runtime/tenancy, não ao projeto. Cada projeto possui resumo consolidado,
+  inventário CSV e custos calculados como soma explícita das waves, mantendo
+  o drill-down de source, bucket e região. O operador pode pausar ou retomar
+  todas as waves ativas de um projeto; arquivamento exige ausência de trabalho
+  ativo e preserva toda a evidência. A conclusão consolidada não depende apenas
+  de waves terminais: cada source precisa ter todos os objetos atuais entregues
+  com integridade OCI aceita (ou verificação profunda concluída). Divergência
+  de destino, falha, integridade pendente ou auditoria profunda em fila deixam
+  o projeto como `COMPLETED_WITH_ATTENTION`, com os bloqueios discriminados por
+  source.
 - Descobre objetos por API S3 paginada, com checkpoint, retomada, limitação de
   requisições por conexão e acompanhamento em fila durável.
 - Importa CSV/GZIP ou `manifest.json` do S3 Inventory para evitar chamadas de
@@ -78,6 +91,18 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   fronteiras de restore, custo e auditoria, mas não monopoliza os Raiju. Um
   objeto disponível de outra wave pode ser copiado assim que se torna mais
   urgente ou necessário para manter a lane ocupada.
+- Quando há sources de projetos distintos, a **admissão da lane física é
+  global**: o Raikou escolhe a próxima source por risco de expiração,
+  prioridade, elegibilidade e espera, registra os candidatos e concede todo o
+  orçamento de rede a um único dispatcher ativo. Ao surgir trabalho em outra
+  source, o dispatcher atual conclui apenas os objetos já admitidos e devolve
+  a decisão ao coordenador; nenhum stream ou multipart é interrompido. Os
+  slots de restore também respeitam o teto global do runtime, sem misturar
+  manifestos, Batch Jobs ou polling de waves.
+- Em empate de prioridade e expiração, o coordenador usa a última seleção
+  durável de cada projeto para favorecer o que recebeu a lane há mais tempo.
+  Essa fairness nunca supera risco de expiração ou prioridade e não interrompe
+  um objeto/multipart já admitido.
 - O operador configura globalmente o estoque mínimo, alvo e máximo da lane
   (padrões de 3h, 6h e 24h), os lotes normais (100 objetos ou 1 GiB) e os
   micro-lotes críticos (20 objetos ou 256 MiB). O Raikou usa esses limites
@@ -530,6 +555,21 @@ com testes de escala e operação real:
   vez de leituras de payload.
 - Cobertura de testes de carga, falhas de rede, reinício de VM e grandes objetos
   multipart.
+- Ensaios operacionais multi-source em AWS/OCI reais antes de promover a
+  capacidade para produção; o contrato local cobre o coordenador global, mas
+  não substitui a medição do link e das APIs em ambiente externo.
+- A validação técnica multi-source inclui rotas com a mesma key original,
+  reutilização de conexão entre regiões, teto global de restores, vencedor
+  único da lane, fairness durável e recuperação do lifecycle após reabertura
+  do banco. Os validadores exercitam ainda os 11 templates Simulation e
+  catálogos lógicos de 640.000 objetos / 100 TB. O ensaio integrado publicado
+  contra Fujin LOCAL e o reinício real da VM continuam critérios operacionais
+  separados antes da promoção.
+- A topologia Fujin LOCAL pode atualizar apenas o plano de controle Raijin. O
+  procedimento protegido mantém banco e serviços Fujin online, recusa rollout
+  com transferência/lease ativo, valida o novo schema antes dos workers e
+  restaura automaticamente app, Raikou e Raiju pela imagem anterior se o
+  health check falhar.
 
 ## Referências relacionadas
 
