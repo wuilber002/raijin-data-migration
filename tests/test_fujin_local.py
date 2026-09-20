@@ -534,6 +534,14 @@ def test_oracle_linux_podman_launcher_keeps_raijin_real_and_the_data_plane_priva
     assert 'printf \'STANDARD\\n\'' in bootstrap
     assert '"$install_root/VERSION"' in bootstrap
     assert 'basename "$(readlink -f "$install_root")"' in bootstrap
+    assert 'release_image="localhost/s3-oci-migration:$build_revision"' in bootstrap
+    assert 'podman build --no-cache' in bootstrap
+    assert 'RAIJIN_IMAGE="$release_image" /usr/local/sbin/s3-oci-start-fujin-local-runtime' in bootstrap
+    standard_launcher = Path("scripts/start-runtime.sh").read_text(encoding="utf-8")
+    assert 'image="${RAIJIN_IMAGE:-localhost/s3-oci-migration:latest}"' in standard_launcher
+    updater = Path("scripts/update-fujin-local-raijin-runtime.sh").read_text(encoding="utf-8")
+    assert "identity['raijin_build_revision']" in updater
+    assert "expected_revision" in updater
     coredns = Path("docker/fujin-local.Corefile").read_text(encoding="utf-8")
     assert "forward . /etc/resolv.conf" in coredns
     assert "forward . 127.0.0.11" not in coredns

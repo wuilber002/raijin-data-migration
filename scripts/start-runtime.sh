@@ -7,7 +7,7 @@ secret_root=/etc/s3-oci-migration/secrets
 runtime_root=/run/s3-oci-migration
 mode_control_root=/var/lib/s3-oci-migration/mode-control
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
-image=localhost/s3-oci-migration:latest
+image="${RAIJIN_IMAGE:-localhost/s3-oci-migration:latest}"
 network=s3-oci-migration
 
 case "$mode" in

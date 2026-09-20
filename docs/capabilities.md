@@ -574,6 +574,9 @@ com testes de escala e operação real:
   operação do Raijin. O bootstrap reconstrói a topologia privada completa após
   reboot, mantendo o Raijin em `REAL`; perfis inválidos falham de forma segura
   em vez de iniciar `STANDARD` ou `SIMULATION` por engano.
+- Releases da VM usam imagem imutável identificada pelo hash do build. O
+  rollout e o bootstrap conferem a revisão reportada pela API, evitando que
+  cache de construção ou uma tag reaproveitada mascare código antigo.
 
 ## Referências relacionadas
 

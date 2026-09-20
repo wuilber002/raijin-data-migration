@@ -18,8 +18,9 @@ sudo /opt/s3-oci-migration/release/scripts/update-fujin-local-raijin-runtime.sh 
 O atualizador recusa a troca se houver dispatcher de transferência em execução
 ou item com lease ativo. Ele mantém PostgreSQL, Fujin, materializador, DNS e
 gateway online; troca somente app, Raikou e Raiju, aguarda a aplicação validar
-o schema e inicia os workers. Se a nova aplicação não ficar saudável, os três
-containers são restaurados automaticamente com a imagem de rollback. Polling
+o schema e a revisão Git esperada antes de iniciar os workers. Se a nova
+aplicação não ficar saudável ou reportar outro build, os três containers são
+restaurados automaticamente com a imagem de rollback. Polling
 de restore em estado `READY` pode aguardar essa curta janela sem nova submissão
 AWS/Fujin; stream ou multipart já admitido nunca deve ser interrompido.
 
@@ -266,9 +267,10 @@ Without build metadata the revision is shown as `development`, so an operator
 can distinguish an unversioned local image from a traceable release.
 
 Na VM, o bootstrap lê a versão semântica do arquivo `VERSION` da release e
-deriva a revisão do commit Git ou do nome do diretório imutável. Assim, a
-identidade exibida no About é preservada mesmo quando a imagem precisa ser
-reconstruída automaticamente depois de um reboot.
+deriva a revisão do commit Git ou do nome do diretório imutável. A imagem é
+endereçada por essa revisão; se ainda não existir, é construída uma única vez
+sem cache. Assim, a identidade exibida no About é preservada depois de reboot
+e o cache do builder não pode reaproveitar metadados de outra release.
 
 Não ative os dois perfis juntos. Em um diretório PostgreSQL novo, o init cria
 `migration_simulation` e o usuário dedicado usando o Secret

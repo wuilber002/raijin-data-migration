@@ -77,7 +77,7 @@ remove_raijin() {
 }
 
 start_raijin() {
-  local image="$1" role worker_role
+  local image="$1" expected_revision="${1##*:}" role worker_role
   podman run -d --name s3-oci-app --replace --restart unless-stopped \
     --network-alias local-app "${common[@]}" "$image"
   podman network connect "$data_network" s3-oci-app
@@ -85,7 +85,7 @@ start_raijin() {
   configure_private_dns s3-oci-app
   for attempt in $(seq 1 60); do
     if podman exec s3-oci-app python3 -c \
-      "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=2)); assert data['status']=='ok'" \
+      "import json,urllib.request; health=json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=2)); identity=json.load(urllib.request.urlopen('http://127.0.0.1:8080/api/runtime',timeout=2)); assert health['status']=='ok'; assert '$expected_revision' in ('latest', identity['raijin_build_revision'])" \
       >/dev/null 2>&1; then
       break
     fi

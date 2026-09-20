@@ -159,10 +159,16 @@ fi
   echo "Release version and revision must not be empty" >&2
   exit 1
 }
-podman build \
-  --build-arg "RAIJIN_SERVICE_VERSION=$service_version" \
-  --build-arg "RAIJIN_BUILD_REVISION=$build_revision" \
-  -t localhost/s3-oci-migration:latest "$install_root"
+release_image="localhost/s3-oci-migration:$build_revision"
+if ! podman image exists "$release_image"; then
+  # Some Podman releases do not include changed ARG values in every cached
+  # layer key. A release image is built only once, without cache, and then
+  # addressed by its immutable revision on every subsequent boot.
+  podman build --no-cache \
+    --build-arg "RAIJIN_SERVICE_VERSION=$service_version" \
+    --build-arg "RAIJIN_BUILD_REVISION=$build_revision" \
+    -t "$release_image" "$install_root"
+fi
 mode_file=/etc/s3-oci-migration/operation-mode
 if [[ ! -s "$mode_file" ]]; then
   printf 'REAL\n' >"$mode_file"
@@ -193,9 +199,9 @@ if [[ "$deployment_profile" == LOCAL ]]; then
   # Raijin remains in REAL and sees Fujin only through ordinary private
   # provider endpoints.  Keeping this choice separate from operation-mode
   # makes a host reboot reconstruct the same eight-container topology.
-  /usr/local/sbin/s3-oci-start-fujin-local-runtime
+  RAIJIN_IMAGE="$release_image" /usr/local/sbin/s3-oci-start-fujin-local-runtime
 else
-  /usr/local/sbin/s3-oci-start-runtime "$operation_mode"
+  RAIJIN_IMAGE="$release_image" /usr/local/sbin/s3-oci-start-runtime "$operation_mode"
 fi
 
 cat >/etc/systemd/system/s3-oci-migration.service <<'EOF'
