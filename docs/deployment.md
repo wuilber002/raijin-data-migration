@@ -205,6 +205,9 @@ O bootstrap usa esse perfil para reconstruir Fujin, DNS, materializador,
 Raijin, workers e gateway após um reboot. Instalações sem o arquivo preservam
 compatibilidade e assumem `STANDARD`. Valores diferentes de `STANDARD` e
 `LOCAL` interrompem o bootstrap, em vez de iniciar uma topologia inesperada.
+Uma topologia já saudável só é reutilizada quando seus containers próprios
+também correspondem à imagem imutável da release ativa; caso contrário, o
+bootstrap converge o conjunto inteiro para a revisão aprovada.
 
 ### 7. Atualizar uma instalação existente
 

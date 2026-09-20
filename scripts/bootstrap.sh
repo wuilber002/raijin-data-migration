@@ -10,6 +10,17 @@ oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 deployment_profile_file=/etc/s3-oci-migration/deployment-profile
 bootstrap_complete=false
 
+service_version="${RAIJIN_SERVICE_VERSION:-$(tr -d '[:space:]' <"$install_root/VERSION")}"
+build_revision="${RAIJIN_BUILD_REVISION:-}"
+if [[ -z "$build_revision" ]]; then
+  build_revision="$(git -C "$install_root" rev-parse --short HEAD 2>/dev/null || basename "$(readlink -f "$install_root")")"
+fi
+[[ -n "$service_version" && -n "$build_revision" ]] || {
+  echo "Release version and revision must not be empty" >&2
+  exit 1
+}
+release_image="localhost/s3-oci-migration:$build_revision"
+
 cleanup_failed_bootstrap() {
   local exit_status=$?
   trap - EXIT
@@ -53,6 +64,14 @@ for container in s3-oci-postgres s3-oci-app s3-oci-governance-worker s3-oci-tran
     break
   fi
 done
+if [[ "$local_runtime_complete" == true ]]; then
+  for container in s3-oci-app s3-oci-governance-worker s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer; do
+    if [[ "$(podman inspect --format '{{.ImageName}}' "$container" 2>/dev/null || true)" != "$release_image" ]]; then
+      local_runtime_complete=false
+      break
+    fi
+  done
+fi
 if [[ "$local_runtime_complete" == true ]]; then
   bootstrap_complete=true
   trap - EXIT
@@ -150,16 +169,6 @@ if ! podman exec s3-oci-postgres psql -U migration -d migration -tAc \
   podman exec s3-oci-postgres createdb -U migration -O migration_simulation migration_simulation
 fi
 
-service_version="${RAIJIN_SERVICE_VERSION:-$(tr -d '[:space:]' <"$install_root/VERSION")}"
-build_revision="${RAIJIN_BUILD_REVISION:-}"
-if [[ -z "$build_revision" ]]; then
-  build_revision="$(git -C "$install_root" rev-parse --short HEAD 2>/dev/null || basename "$(readlink -f "$install_root")")"
-fi
-[[ -n "$service_version" && -n "$build_revision" ]] || {
-  echo "Release version and revision must not be empty" >&2
-  exit 1
-}
-release_image="localhost/s3-oci-migration:$build_revision"
 if ! podman image exists "$release_image"; then
   # Some Podman releases do not include changed ARG values in every cached
   # layer key. A release image is built only once, without cache, and then

@@ -535,6 +535,8 @@ def test_oracle_linux_podman_launcher_keeps_raijin_real_and_the_data_plane_priva
     assert '"$install_root/VERSION"' in bootstrap
     assert 'basename "$(readlink -f "$install_root")"' in bootstrap
     assert 'release_image="localhost/s3-oci-migration:$build_revision"' in bootstrap
+    assert "'{{.ImageName}}'" in bootstrap
+    assert '!= "$release_image"' in bootstrap
     assert 'podman build --no-cache' in bootstrap
     assert 'RAIJIN_IMAGE="$release_image" /usr/local/sbin/s3-oci-start-fujin-local-runtime' in bootstrap
     standard_launcher = Path("scripts/start-runtime.sh").read_text(encoding="utf-8")
