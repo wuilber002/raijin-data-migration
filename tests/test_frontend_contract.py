@@ -852,7 +852,7 @@ def test_simulation_scenario_form_uses_grouped_integers_and_gb_units():
     simulation = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
 
     assert "Logical size (GB)" in simulation
-    assert "DATA physical budget (GB)" in simulation
+    assert "DATA stream budget (GB)" in simulation
     assert 'value="100.000"' in simulation
     assert 'value="1.000"' in simulation
     assert 'value="3.600"' in simulation

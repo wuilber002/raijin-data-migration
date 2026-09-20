@@ -57,7 +57,7 @@ from app.backend_contracts import (
 from app.simulator_admin import SimulatorAdminClient, SimulatorAdminError
 from app.simulator_ports import SimulatedDestinationPort, SimulatedSourcePort, SimulatorTransportError
 from app.main import (
-    AwsConnection, DiscoveryJob, Event, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, merge_discovery_rows, source_key_in_scope, source_prefix_values,
+    AwsConnection, DiscoveryJob, Event, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, merge_discovery_rows, source_key_in_scope, source_prefix_values,
     DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, transfer_priority, utcnow,
 )
 
@@ -3300,6 +3300,12 @@ def _continuous_aggregate_rate_sample(session, state: TransferAutoscaleState,
     state.sample_progress_json = json.dumps(current, separators=(",", ":"))
     state.observed_lane_mbps = rate
     state.observed_at = now
+    session.add(TransferLaneMeasurement(
+        source_id=state.source_id,
+        observed_at=now,
+        aggregate_mbps=rate,
+        active_workers=len(current),
+    ))
     return rate, True
 
 
@@ -3951,6 +3957,12 @@ def transfer_continuous(session, task: Task, settings) -> None:
             batch.effective_worker_cap = int(allocation.get("effective_worker_cap", allocation["target"]) or 0)
             batch.observed_lane_mbps = float(allocation["observed_lane_mbps"])
             batch.observed_per_raiju_mbps = float(allocation["observed_per_raiju_mbps"])
+            # The batch may repeat the last UI/controller rate while the
+            # 20-second measurement window is still open. Preserve that
+            # diagnostic value, but stamp it only when this decision received
+            # a new byte-delta sample; forecasting consumes stamped samples.
+            if allocation.get("sample_is_new"):
+                batch.observed_at = allocation.get("observed_at") or utcnow()
             batch.host_capacity_factor = float(allocation["host_capacity_factor"])
             batch.host_capacity_reason = str(allocation["host_capacity_reason"])
             batch.marginal_gain_mbps = float(allocation["marginal_gain_mbps"])
@@ -4076,6 +4088,8 @@ def transfer_continuous(session, task: Task, settings) -> None:
                 "active_workers": len(futures),
                 "observed_lane_mbps": observed_mbps,
                 "observed_per_raiju_mbps": observed_mbps / max(1, len(futures)),
+                "sample_is_new": sample_is_new,
+                "observed_at": sample_now if sample_is_new else None,
                 "marginal_gain_mbps": float(normal_concurrency.last_marginal_gain_mbps),
                 "host_capacity_factor": capacity.factor,
                 "host_capacity_reason": capacity.reason,

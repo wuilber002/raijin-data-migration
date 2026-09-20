@@ -24,7 +24,7 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 
 from datetime import datetime, timedelta, timezone
 
-from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, transfer_queue, wave_cost_estimate
+from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, transfer_queue, wave_cost_estimate
 from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, simulated_network_retry_after, simulation_restore_poll_clock_leader, simulation_source_lane_has_committed_work, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
 from app.simulator_ports import SimulatorTransportError
 from app import real_worker
@@ -908,6 +908,11 @@ def test_aggregate_lane_rate_uses_progress_delta_once_per_window():
         obj.transfer_progress_at = now + timedelta(seconds=20)
         rate, fresh = real_worker._continuous_aggregate_rate_sample(session, state, [item.id], now=now + timedelta(seconds=20))
         assert fresh is True and rate == 20.0
+        measurement = session.scalar(select(TransferLaneMeasurement).where(
+            TransferLaneMeasurement.source_id == source.id
+        ))
+        assert measurement is not None
+        assert measurement.aggregate_mbps == 20.0
         repeated_rate, repeated_fresh = real_worker._continuous_aggregate_rate_sample(session, state, [item.id], now=now + timedelta(seconds=25))
         assert repeated_rate == 20.0 and repeated_fresh is False
 
@@ -1564,8 +1569,8 @@ def test_reforecast_uses_sustained_degraded_lane_without_changing_capacity_model
                         destination_bucket="destination")
         session.add(source); session.flush()
         session.add_all([
-            TransferDispatchBatch(source_id=source.id, observed_lane_mbps=rate,
-                                  started_at=reference - timedelta(minutes=offset))
+            TransferLaneMeasurement(source_id=source.id, aggregate_mbps=rate,
+                                    observed_at=reference - timedelta(minutes=offset))
             for offset, rate in (
                 (1, 420), (2, 400), (3, 390),       # current 10-minute window
                 (11, 410), (12, 405), (13, 395),    # independent prior window
@@ -1596,9 +1601,37 @@ def test_reforecast_ignores_one_short_degraded_lane_window(monkeypatch):
                         destination_bucket="destination")
         session.add(source); session.flush()
         session.add_all([
-            TransferDispatchBatch(source_id=source.id, observed_lane_mbps=rate,
-                                  started_at=reference - timedelta(minutes=offset))
+            TransferLaneMeasurement(source_id=source.id, aggregate_mbps=rate,
+                                    observed_at=reference - timedelta(minutes=offset))
             for offset, rate in ((1, 260), (2, 255), (3, 250))
+        ])
+        session.flush()
+        monkeypatch.setattr("app.main.continuous_lane_capacity_profile", lambda *_args: {
+            "samples": 1, "p25_mbps": 970, "effective_mbps": 970,
+            "basis": "DURABLE_LANE_HISTORY",
+        })
+        profile = continuous_lane_forecast_profile(session, source.id, 1100, now=reference)
+
+    assert profile["basis"] == "DURABLE_LANE_HISTORY"
+    assert profile["effective_mbps"] == 970
+
+
+def test_reforecast_ignores_repeated_dispatch_rate_without_a_new_measurement(monkeypatch):
+    """A carried UI rate is not a second independent byte-delta window."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    reference = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+    with Session() as session:
+        source = Source(name="forecast-repeated-rate", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        session.add_all([
+            # These were rendered/recorded in dispatch decisions, but did not
+            # represent a newly completed aggregate measurement window.
+            TransferDispatchBatch(source_id=source.id, observed_lane_mbps=400,
+                                  started_at=reference - timedelta(minutes=offset))
+            for offset in (1, 2, 3, 11, 12, 13)
         ])
         session.flush()
         monkeypatch.setattr("app.main.continuous_lane_capacity_profile", lambda *_args: {
@@ -2480,10 +2513,13 @@ def test_dynamic_replan_uses_control_mode_logical_elapsed_time():
         session.flush()
         changed = replan_dynamic_pipeline(session, settings, now=initial)
         assert changed == 1
-        assert future.planned_transfer_start_at == initial + timedelta(seconds=300)
+        # The scheduler never learns Fujin's local delay. An unsubmitted BULK
+        # restore needs the public 48-hour reference plus the default 6-hour
+        # operational reserve even in CONTROL acceptance tests.
+        assert future.planned_transfer_start_at == initial + timedelta(hours=54)
         event = session.scalar(select(Event).where(Event.kind == "DYNAMIC_WAVE_REPLANNED"))
         assert event is not None
-        assert "simulated logical transfer duration" in event.message
+        assert "transfer 2026-08-27T18:00:00" in event.message
 
 
 def test_dynamic_replan_does_not_pin_unsubmitted_wave_to_an_old_calendar_slot():
@@ -2508,7 +2544,7 @@ def test_dynamic_replan_does_not_pin_unsubmitted_wave_to_an_old_calendar_slot():
                       planned_transfer_start_at=initial + timedelta(days=22))
         session.add_all([source, settings, run, completed, future]); session.flush()
         assert replan_dynamic_pipeline(session, settings, now=initial) == 1
-        assert future.planned_transfer_start_at == initial + timedelta(seconds=300)
+        assert future.planned_transfer_start_at == initial + timedelta(hours=54)
         assert future.planned_restore_at == initial
 
 
@@ -2619,6 +2655,35 @@ def test_real_replan_keeps_overdue_restore_eligibility_stable_while_capacity_is_
         )) == events_after_material_change
 
 
+def test_real_replan_never_keeps_an_unsubmitted_restore_on_an_impossible_transfer_date():
+    """A planned timestamp is not evidence that AWS received the restore."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    initial = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+    with Session() as session:
+        source = Source(id=1200, name="late-submission", s3_bucket="source",
+                        aws_region="us-east-1", destination_bucket="destination", backend_kind="REAL")
+        settings = RuntimeSettings(id=1, max_throughput_mbps=1100,
+                                   dynamic_restore_safety_seconds=6 * 3600)
+        run = DynamicPipelineRun(id=1201, source_id=source.id, status="SCHEDULED",
+                                 scheduled_restores=True, restore_safety_seconds=6 * 3600)
+        waiting = Wave(id=1202, source_id=source.id, pipeline_run_id=run.id,
+                       name="late", max_bytes=1, restore_days=7, restore_tier="BULK",
+                       status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
+                       predicted_transfer_seconds=60,
+                       planned_restore_at=initial - timedelta(hours=2),
+                       planned_transfer_start_at=initial - timedelta(hours=1))
+        obj = ObjectRecord(id=1203, source_id=source.id, wave_id=waiting.id,
+                           object_key="late.bin", size_bytes=1,
+                           state=ObjectState.WAVE_ASSIGNED)
+        session.add_all([source, settings, run, waiting, obj]); session.flush()
+
+        assert replan_dynamic_pipeline(session, settings, now=initial) == 1
+        assert waiting.planned_restore_at == initial
+        assert waiting.planned_transfer_start_at >= initial + timedelta(hours=54)
+
+
 def test_dynamic_restore_slot_correction_is_persisted_independently_of_lane_forecast():
     source = Path("app/main.py").read_text(encoding="utf-8")
     assert "schedule_shift_threshold = 60 if simulated else DYNAMIC_SCHEDULE_MIN_SHIFT_SECONDS" in source
@@ -2713,6 +2778,44 @@ def test_restore_release_checks_maximum_buffer_after_adding_candidate_wave():
             Task.kind == "SUBMIT_BATCH_RESTORE"
         )))
         assert released_wave_ids == {waves[0].id}
+
+
+def test_restore_release_records_why_a_due_wave_remains_unsubmitted():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    initial = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+    with Session() as session:
+        source = Source(id=1220, name="restore-deferral", s3_bucket="source",
+                        aws_region="us-east-1", destination_bucket="destination")
+        settings = RuntimeSettings(id=1, dynamic_restore_max_slots=2)
+        run = DynamicPipelineRun(id=1221, source_id=source.id, status="SCHEDULED",
+                                 scheduled_restores=True, restore_horizon_waves=3)
+        active = [
+            Wave(id=1222 + index, source_id=source.id, pipeline_run_id=run.id,
+                 name=f"active-{index}", max_bytes=1, restore_days=7,
+                 restore_tier="BULK", status="RESTORING", planner_mode="DYNAMIC",
+                 planned_restore_at=initial, planned_transfer_start_at=initial + timedelta(hours=48))
+            for index in range(2)
+        ]
+        waiting = Wave(id=1224, source_id=source.id, pipeline_run_id=run.id,
+                       name="waiting", max_bytes=1, restore_days=7, restore_tier="BULK",
+                       status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
+                       planned_restore_at=initial - timedelta(minutes=1),
+                       planned_transfer_start_at=initial + timedelta(hours=48))
+        session.add_all([source, settings, run, *active, waiting]); session.flush()
+        session.add_all([
+            Task(wave_id=wave.id, kind="SUBMIT_BATCH_RESTORE", state=TaskState.SUCCEEDED)
+            for wave in active
+        ])
+        session.flush()
+
+        assert release_dynamic_restore_horizon(session, settings, now=initial) == 0
+        event = session.scalar(select(Event).where(
+            Event.wave_id == waiting.id, Event.kind == "DYNAMIC_RESTORE_DEFERRED"
+        ))
+        assert event is not None
+        assert "restore slot" in event.message
 
 
 def test_dynamic_repacking_is_debounced_and_forecasts_require_material_change():

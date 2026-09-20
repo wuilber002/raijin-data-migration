@@ -109,9 +109,14 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   de host, memória e pool PostgreSQL são limites de admissão, não metas.
 - O reforecast das waves futuras usa a capacidade histórica da lane. Uma taxa
   degradada recente só substitui essa referência após confirmação em duas
-  janelas independentes; uma oscilação curta de host não desloca o calendário.
+  janelas independentes de bytes agregados. Valores repetidos apenas para
+  telemetria de um despacho não são nova evidência e não movem o calendário.
   Essa contenção não atrasa prioridades e retries por expiração, que continuam
-  decididos diretamente pela fila viva.
+  decididos diretamente pela fila viva. Uma wave dinâmica ainda não submetida
+  nunca conserva um início de transferência impossível: o plano a reposiciona
+  para, no mínimo, a janela pública do tier somada à margem de segurança a
+  partir da nova decisão; a submissão AWS continua sendo uma tarefa durável e
+  separada, governada por slots e pelo estoque da lane.
 - A tarefa durável da lane contínua pode manter uma wave como âncora histórica,
   mas é reancorada automaticamente para a próxima wave com backlog quando a
   anterior conclui. Assim a console não mostra trabalho vivo em uma wave

@@ -773,6 +773,11 @@ class TransferDispatchBatch(Base):
     # its guardrails auditable without emitting an event per object.
     observed_lane_mbps: Mapped[float] = mapped_column(Float, default=0)
     observed_per_raiju_mbps: Mapped[float] = mapped_column(Float, default=0)
+    # A displayed value may be carried forward while a batch is admitted, but
+    # only this timestamp marks an independent aggregate-byte sample.  The
+    # reforecast must never mistake a repeated controller value for new lane
+    # evidence.
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     host_capacity_factor: Mapped[float] = mapped_column(Float, default=1)
     host_capacity_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     marginal_gain_mbps: Mapped[float] = mapped_column(Float, default=0)
@@ -817,6 +822,26 @@ class TransferAutoscaleState(Base):
     capacity_reason: Mapped[str] = mapped_column(Text, default="")
     decision_reason: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class TransferLaneMeasurement(Base):
+    """Independent aggregate-byte observation used by control and forecast.
+
+    Dispatch batches document claims.  They are not measurement intervals:
+    one batch can remain active for hours and its displayed rate may be
+    repeated between checkpoints.  This compact append-only series records
+    only completed, source-wide 20-second progress windows.
+    """
+    __tablename__ = "transfer_lane_measurements"
+    __table_args__ = (
+        Index("ix_transfer_lane_measurements_source_observed", "source_id", "observed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    aggregate_mbps: Mapped[float] = mapped_column(Float, default=0)
+    active_workers: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class TransferLaneSegment(Base):
@@ -1517,6 +1542,7 @@ def create_schema() -> None:
         for column, sql_type in {
             "observed_lane_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 0",
             "observed_per_raiju_mbps": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "observed_at": "TIMESTAMP WITH TIME ZONE",
             "active_workers": "INTEGER NOT NULL DEFAULT 0",
             "effective_worker_cap": "INTEGER NOT NULL DEFAULT 0",
             "host_capacity_factor": "DOUBLE PRECISION NOT NULL DEFAULT 1",
@@ -7244,9 +7270,9 @@ def continuous_lane_forecast_profile(session: Session, source_id: int,
     Completed lane segments remain the durable source of truth for the normal
     capacity model.  A sustained recent slowdown, however, must be reflected
     in *future-wave forecasts* before enough objects finish to enter that
-    history.  This helper intentionally reads the durable Raikou decision
-    samples and is used only by the reforecast path: it never influences the
-    Raiju autoscaler or restore-slot admission.
+    history. This helper intentionally reads the dedicated durable
+    aggregate-byte measurements and is used only by the reforecast path: it
+    never influences the Raiju autoscaler or restore-slot admission.
     """
     profile = dict(continuous_lane_capacity_profile(session, source_id, configured_mbps))
     reference = now or utcnow()
@@ -7254,18 +7280,19 @@ def continuous_lane_forecast_profile(session: Session, source_id: int,
     cutoff = reference - window
     prior_cutoff = cutoff - window
     samples = list(session.execute(select(
-        TransferDispatchBatch.started_at,
-        TransferDispatchBatch.observed_lane_mbps
+        TransferLaneMeasurement.observed_at,
+        TransferLaneMeasurement.aggregate_mbps,
     ).where(
-        TransferDispatchBatch.source_id == source_id,
-        TransferDispatchBatch.started_at >= prior_cutoff,
-        TransferDispatchBatch.observed_lane_mbps > 0,
-    ).order_by(TransferDispatchBatch.started_at.desc()).limit(96)))
+        TransferLaneMeasurement.source_id == source_id,
+        TransferLaneMeasurement.observed_at >= prior_cutoff,
+        TransferLaneMeasurement.aggregate_mbps > 0,
+    ).order_by(TransferLaneMeasurement.observed_at.desc()).limit(96)))
     def as_utc_timestamp(value: datetime) -> datetime:
         return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-    recent_rates = [float(rate) for started_at, rate in samples if as_utc_timestamp(started_at) >= cutoff]
-    prior_rates = [float(rate) for started_at, rate in samples
-                   if prior_cutoff <= as_utc_timestamp(started_at) < cutoff]
+    recent_rates = [float(rate) for observed_at, rate in samples
+                    if as_utc_timestamp(observed_at) >= cutoff]
+    prior_rates = [float(rate) for observed_at, rate in samples
+                   if prior_cutoff <= as_utc_timestamp(observed_at) < cutoff]
     # A current dip must be corroborated by a distinct earlier window before
     # it changes a calendar. This keeps a brief host guard, rollout or object
     # boundary from moving several mutable waves by days. Dispatch and expiry
@@ -8261,8 +8288,23 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
                 Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE"
             ).limit(1)) is not None
         ))
+
+        def record_restore_deferral(wave: Wave, reason: str) -> None:
+            """Explain a due-but-unsubmitted restore without flooding events."""
+            if dynamic_reforecast_event_due(
+                    session, wave.id, scheduler_now, "DYNAMIC_RESTORE_DEFERRED"):
+                record_event(
+                    session, "DYNAMIC_RESTORE_DEFERRED",
+                    f"Wave '{wave.name}' remains planned without AWS submission: {reason}",
+                    source_id=wave.source_id, wave_id=wave.id,
+                )
+
         for wave in waves:
             if occupied >= release_capacity:
+                if wave.status == "RESTORE_SCHEDULED":
+                    record_restore_deferral(
+                        wave, f"all {release_capacity} restore slot(s) are occupied"
+                    )
                 break
             if wave.status != "RESTORE_SCHEDULED":
                 continue
@@ -8282,6 +8324,12 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
                 0.0, restore_lead_seconds - projected_at_seconds
             ))
             if backlog_at_first_file >= maximum_buffer:
+                if not (wave.planned_restore_at and wave.planned_restore_at > scheduler_now):
+                    record_restore_deferral(
+                        wave,
+                        f"projected lane stock at first availability is already at the maximum buffer "
+                        f"({backlog_at_first_file:.0f}s >= {int(maximum_buffer)}s)",
+                    )
                 continue
             post_release_backlog_seconds = backlog_at_first_file + estimated_wave_seconds
             # Evaluate the safety ceiling after adding the candidate wave.
@@ -8292,6 +8340,12 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
             # first slice could deadlock the pipeline forever.
             oversized_seed = occupied == 0 and backlog_at_first_file < minimum_buffer
             if post_release_backlog_seconds > maximum_buffer and not oversized_seed:
+                if not (wave.planned_restore_at and wave.planned_restore_at > scheduler_now):
+                    record_restore_deferral(
+                        wave,
+                        f"adding its projected work would exceed the maximum lane buffer "
+                        f"({post_release_backlog_seconds:.0f}s > {int(maximum_buffer)}s)",
+                    )
                 continue
             is_future_restore = bool(wave.planned_restore_at and wave.planned_restore_at > scheduler_now)
             # A future restore may be pulled forward only while the projected
@@ -8696,6 +8750,16 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             has_batch_task = session.scalar(select(Task.id).where(
                 Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE"
             ).limit(1)) is not None
+            # A planned restore has not been sent to AWS.  Its transfer slot
+            # therefore cannot be earlier than a new request made now plus
+            # the public tier window and the configured safety reserve.  This
+            # is deliberately independent of Fujin: the scheduler must be
+            # correct against real S3 even when local acceptance is faster.
+            restore_lead = int(
+                wave.predicted_restore_complete_seconds
+                or restore_forecast_seconds(wave.restore_tier, settings, source=run.source)[1]
+            ) + int(run.restore_safety_seconds or settings.dynamic_restore_safety_seconds)
+            is_unsubmitted_restore = not has_batch_task and wave.status == "RESTORE_SCHEDULED"
             restore_requested_at = (
                 wave.restore_requested_virtual_at
                 if simulated else real_restore_requested_at.get(wave.id)
@@ -8733,6 +8797,11 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                 restore_floor = wave.planned_restore_at
             if restore_floor:
                 lane_start = max(lane_start, restore_floor)
+            if is_unsubmitted_restore:
+                lane_start = max(
+                    lane_start,
+                    scheduler_now + timedelta(seconds=restore_lead),
+                )
             constrained_by_prior_wave = bool(cursor and cursor > lane_start)
             decision_basis = cursor_basis if constrained_by_prior_wave else observed_basis
             start = max(lane_start, cursor) if cursor else lane_start
@@ -8748,10 +8817,6 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             # A transfer forecast can safely be fixed even after its restore
             # was submitted. The restore timestamp itself is immutable once a
             # Batch task exists because changing it would falsify evidence.
-            restore_lead = int(
-                wave.predicted_restore_complete_seconds
-                or restore_forecast_seconds(wave.restore_tier, settings, source=run.source)[1]
-            ) + int(run.restore_safety_seconds or settings.dynamic_restore_safety_seconds)
             # ``start`` may be constrained by the source-wide transfer cursor
             # so that the lane forecast does not double-count parallel work.
             # It must never, however, reserve the restore lane.  Future
@@ -8759,7 +8824,6 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             # horizon is solely responsible for holding them while its bounded
             # slots are occupied.  Coupling this timestamp to ``start`` made
             # the board falsely place restores after all transfer work.
-            is_unsubmitted_restore = not has_batch_task and wave.status == "RESTORE_SCHEDULED"
             if is_unsubmitted_restore:
                 # ``planned_restore_at`` is the durable eligibility forecast,
                 # not a second hand that follows wall time while all restore
@@ -8768,12 +8832,12 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                 # routine governance cycles idempotent. The actual submission
                 # remains independently recorded by restore_requested_at.
                 restore_target = simulated_restore_slot_floor or scheduler_now
-                if (wave.planned_restore_at is not None
-                        and wave.planned_restore_at <= scheduler_now
-                        and restore_target <= scheduler_now):
-                    new_restore_at = wave.planned_restore_at
-                else:
-                    new_restore_at = restore_target
+                # An expired planning instant is not a restore submission.
+                # Re-anchor it at the current durable decision point so the
+                # board and event history never imply AWS received a request
+                # in the past. The release horizon still controls whether a
+                # task may actually be created now.
+                new_restore_at = restore_target
             else:
                 new_restore_at = max(scheduler_now, start - timedelta(seconds=restore_lead))
             transfer_shifted = abs((wave.planned_transfer_start_at - start).total_seconds()) if wave.planned_transfer_start_at else float("inf")
