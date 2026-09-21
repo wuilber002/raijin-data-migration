@@ -67,7 +67,8 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   valores grandes, separador visual e unidade comum para comparação direta; o
   inventário também informa o tempo agregado de discovery em seu rodapé, sem
   repetir essa duração abaixo dos cards. O card de entregues apresenta ainda
-  o percentual concluído de arquivos e de volume junto de cada medida.
+  o percentual concluído de arquivos e de volume como primeiro valor, acima
+  da quantidade entregue e do respectivo total descoberto.
   Estado, sources, waves e custo mantêm seu valor principal centralizado nos
   dois eixos, independentemente de cabeçalho ou rodapé; o tempo de discovery
   fica centralizado no rodapé do inventário. O custo one-time acumulado de

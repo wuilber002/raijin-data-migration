@@ -582,6 +582,8 @@ def test_project_summary_hides_duplicate_discovery_total_and_shows_delivery_perc
     assert "function enhanceProjectDelivery()" in page
     assert "migration-project-delivery-percent" in page
     assert "done*100/total" in page
+    assert "part.prepend(label)" in page
+    assert "part.querySelector('b')?.after(label)" not in page
     assert "minimumFractionDigits:2,maximumFractionDigits:2" in page
 
 
