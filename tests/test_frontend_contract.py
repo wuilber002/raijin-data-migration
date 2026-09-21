@@ -487,10 +487,21 @@ def test_project_and_source_controls_share_one_card_without_redundant_source_lis
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "const panel=document.createElement('div')" in page
     assert "panel.id='migration-project-panel';panel.className='migration-project-area'" in page
-    assert "parent.classList.add('project-source-card');parent.prepend(panel)" in page
+    assert "parent.prepend(panel)" in page
     assert "parent.before(panel)" not in page
+    assert "project-source-card" not in page
     assert "migration-project-sources" not in page
     assert "data.sources_detail" not in page
+
+
+def test_consolidated_project_csv_lives_in_the_source_objects_modal():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    modal = page[page.index('id="discovered-objects-modal"'):page.index('id="object-detail-modal"')]
+    project_panel = page[page.index("panel.innerHTML=`<div class=\"row\"><h2>Projetos de migração"):page.index("const parent=document.querySelector", page.index("panel.innerHTML=`<div class=\"row\"><h2>Projetos de migração"))]
+    assert 'id="migration-project-csv"' in modal
+    assert "CSV consolidado" in modal
+    assert 'id="migration-project-csv"' not in project_panel
+    assert "name==='csv'?document.querySelector('#migration-project-csv')" in page
 
 
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():

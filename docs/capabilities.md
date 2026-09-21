@@ -51,7 +51,9 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   também remove da tela qualquer source que não pertença ao novo contexto.
   Projeto, métricas agregadas e controles de source ocupam um único card; o
   resumo não repete uma lista estática das sources, pois o próprio combobox
-  filtrado é a referência operacional do vínculo ativo.
+  filtrado é a referência operacional do vínculo ativo. A exportação CSV
+  consolidada do projeto fica junto da consulta de objetos, dentro do modal
+  aberto pela ação **Objetos** da source selecionada.
   A associação pode ser desfeita apenas antes dessa fronteira operacional; a
   rota histórica permanece imutável. O namespace OCI continua pertencendo ao
   runtime/tenancy, não ao projeto. Cada projeto possui resumo consolidado,
