@@ -49,6 +49,9 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   sources: o combobox lista somente as sources vinculadas a ele e fica
   indisponível enquanto nenhum projeto estiver ativo. A troca de projeto
   também remove da tela qualquer source que não pertença ao novo contexto.
+  Projeto, métricas agregadas e controles de source ocupam um único card; o
+  resumo não repete uma lista estática das sources, pois o próprio combobox
+  filtrado é a referência operacional do vínculo ativo.
   A associação pode ser desfeita apenas antes dessa fronteira operacional; a
   rota histórica permanece imutável. O namespace OCI continua pertencendo ao
   runtime/tenancy, não ao projeto. Cada projeto possui resumo consolidado,

@@ -483,6 +483,16 @@ def test_project_panel_omits_removed_operational_buttons_and_dead_ui_code():
     assert "migration-project-groups" not in page
 
 
+def test_project_and_source_controls_share_one_card_without_redundant_source_list():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "const panel=document.createElement('div')" in page
+    assert "panel.id='migration-project-panel';panel.className='migration-project-area'" in page
+    assert "parent.classList.add('project-source-card');parent.prepend(panel)" in page
+    assert "parent.before(panel)" not in page
+    assert "migration-project-sources" not in page
+    assert "data.sources_detail" not in page
+
+
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="source-context-tags"' in page
