@@ -506,11 +506,25 @@ def test_consolidated_project_csv_lives_in_the_source_objects_modal():
 
 def test_project_delivery_card_compares_transferred_and_discovered_totals():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    assert 'class="migration-project-progress"' in page
-    assert '<small>Arquivos</small><b>${fmt(inv.transferred_objects||0)} / ${fmt(inv.objects||0)}</b>' in page
+    assert 'class="migration-project-delivery-lines"' in page
+    assert '<small>Files</small><b>${fmt(inv.transferred_objects||0)} / ${fmt(inv.objects||0)}</b>' in page
     assert '<small>Size</small><b>${bytes(inv.transferred_bytes||0)} / ${bytes(inv.bytes||0)}</b>' in page
+    assert "migration-project-progress-item" not in page
     assert "última execução de discovery, somados de todas as sources" in page
     assert "já transferidos e confirmados no destino OCI" in page
+
+
+def test_project_summary_counts_sources_and_waves_formats_cost_and_tags_state():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert '<small class="with-help">Sources ' in page
+    assert '<b>${fmt(data.source_count||0)}</b>' in page
+    assert '<small class="with-help">Waves ' in page
+    assert '<b>${fmt(waves.total||0)}</b>' in page
+    assert "money(cost.one_time,'USD')" in page
+    assert "todas as waves de todas as sources do projeto" in page
+    assert "function projectStatusTag(status)" in page
+    assert "COMPLETED_WITH_ATTENTION:'discovered'" in page
+    assert "COMPLETED WITH ATTENTION — processamento terminou" in page
 
 
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
