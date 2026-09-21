@@ -65,6 +65,9 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   inventário agregado do progresso entregue: arquivos transferidos sobre o
   total descoberto e bytes transferidos sobre o tamanho total descoberto,
   acompanhados de ajuda contextual sobre origem e abrangência das métricas.
+  Os valores principais de inventário e entrega usam branco e escala 20%
+  maior para leitura rápida; o custo acumulado também usa branco, preservando
+  sua escala própria para evitar estouro horizontal.
   O mesmo resumo mostra as quantidades agregadas de sources e waves, apresenta
   o estado em texto amplo sobre um card com cor semântica, sem usar vermelho
   para lifecycle, e oferece uma matriz explicativa de todos os estados na
