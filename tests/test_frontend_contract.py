@@ -528,7 +528,12 @@ def test_project_summary_counts_sources_and_waves_formats_cost_and_tags_state():
     assert "function projectStatusTooltip()" in page
     assert "stateHelp.dataset.richHelp=projectStatusTooltip()" in page
     assert "status-tooltip-grid" in page
-    assert "COMPLETED WITH ATTENTION','O processamento terminou" in page
+    assert "project-status-tooltip-grid" in page
+    assert "function ensureProjectStateHelp(target=document)" in page
+    assert "document.addEventListener('mouseover',event=>ensureProjectStateHelp(event.target),true)" in page
+    assert "await show();ensureProjectStateHelp(summary)" in page
+    assert "Status possíveis do projeto" in page
+    assert "COMPLETED WITH ATTENTION','Processamento concluído com pendências" in page
 
 
 def test_project_state_card_reflects_status_without_error_red():

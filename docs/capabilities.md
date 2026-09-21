@@ -60,7 +60,9 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   O mesmo resumo mostra as quantidades agregadas de sources e waves, apresenta
   o estado em texto amplo sobre um card com cor semântica, sem usar vermelho
   para lifecycle, e oferece uma matriz explicativa de todos os estados na
-  tooltip. Inventário e entregues dividem internamente arquivos e volume com
+  tooltip. Essa ajuda é reconstruída no carregamento, na interação e na troca
+  de idioma, com uma tag colorida e uma descrição alinhada para cada estado.
+  Inventário e entregues dividem internamente arquivos e volume com
   valores grandes, separador visual e unidade comum para comparação direta; o
   inventário também informa o tempo agregado de discovery.
   Estado, sources, waves e custo mantêm seu valor principal centralizado nos
