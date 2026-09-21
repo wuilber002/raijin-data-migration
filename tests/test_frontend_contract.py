@@ -530,8 +530,10 @@ def test_project_summary_counts_sources_and_waves_formats_cost_and_tags_state():
     assert "status-tooltip-grid" in page
     assert "project-status-tooltip-grid" in page
     assert "function ensureProjectStateHelp(target=document)" in page
-    assert "document.addEventListener('mouseover',event=>ensureProjectStateHelp(event.target),true)" in page
-    assert "await show();ensureProjectStateHelp(summary)" in page
+    assert "const projectStateTooltipLayer=document.createElement('div')" in page
+    assert "function showProjectStateTooltip(target)" in page
+    assert "event.stopImmediatePropagation();ensureProjectStateHelp(target);showProjectStateTooltip(target)" in page
+    assert "await show();ensureProjectStateHelp(summary);enhanceProjectDelivery()" in page
     assert "Status possíveis do projeto" in page
     assert "COMPLETED WITH ATTENTION','Processamento concluído com pendências" in page
 
@@ -572,6 +574,15 @@ def test_project_summary_uses_large_values_and_internal_metric_divisions():
     assert 'migration-project-card-footer migration-project-inventory-footer">Tempo de discovery: ${duration(data.discovery_elapsed_seconds||0)}' in page
     assert ".migration-project-inventory-footer{text-align:center}" in page
     assert "migration-project-cost-value" in page
+
+
+def test_project_summary_hides_duplicate_discovery_total_and_shows_delivery_percentages():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert ".migration-project-summary~p.hint{display:none}" in page
+    assert "function enhanceProjectDelivery()" in page
+    assert "migration-project-delivery-percent" in page
+    assert "done*100/total" in page
+    assert "minimumFractionDigits:2,maximumFractionDigits:2" in page
 
 
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
