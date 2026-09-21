@@ -471,6 +471,18 @@ def test_source_selector_is_scoped_by_the_active_project():
     assert "document.addEventListener('raijin:project-changed',()=>applyProjectSourceContext()" in page
 
 
+def test_project_panel_omits_removed_operational_buttons_and_dead_ui_code():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'id="migration-project-timeline"' not in page
+    assert 'id="migration-project-pause"' not in page
+    assert 'id="migration-project-resume"' not in page
+    assert "button('timeline')" not in page
+    assert "button('pause')" not in page
+    assert "button('resume')" not in page
+    assert "Grupos de waves" not in page
+    assert "migration-project-groups" not in page
+
+
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="source-context-tags"' in page

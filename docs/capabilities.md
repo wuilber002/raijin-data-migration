@@ -53,9 +53,11 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   rota histórica permanece imutável. O namespace OCI continua pertencendo ao
   runtime/tenancy, não ao projeto. Cada projeto possui resumo consolidado,
   inventário CSV e custos calculados como soma explícita das waves, mantendo
-  o drill-down de source, bucket e região. O operador pode pausar ou retomar
-  todas as waves ativas de um projeto; arquivamento exige ausência de trabalho
-  ativo e preserva toda a evidência. A conclusão consolidada não depende apenas
+  o drill-down de source, bucket e região. As APIs preservam as operações de
+  pausar ou retomar todas as waves ativas de um projeto, mas esses controles,
+  a timeline consolidada e os grupos de waves não são exibidos no painel de
+  projeto. O arquivamento exige ausência de trabalho ativo e preserva toda a
+  evidência. A conclusão consolidada não depende apenas
   de waves terminais: cada source precisa ter todos os objetos atuais entregues
   com integridade OCI aceita (ou verificação profunda concluída). Divergência
   de destino, falha, integridade pendente ou auditoria profunda em fila deixam
