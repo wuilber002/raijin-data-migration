@@ -61,7 +61,9 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   o estado em uma tag e em um card com cor semântica, sem usar vermelho para
   lifecycle, e oferece uma matriz explicativa de todos os estados na tooltip.
   O custo one-time acumulado de todas as waves de todas as sources do projeto
-  é formatado em USD com duas casas decimais.
+  é formatado em USD com duas casas decimais. Os seis cards distribuem-se por
+  toda a largura útil sem espaçamentos reservados ou dimensões individuais e
+  reorganizam-se responsivamente em três, duas ou uma coluna.
   A associação pode ser desfeita apenas antes dessa fronteira operacional; a
   rota histórica permanece imutável. O namespace OCI continua pertencendo ao
   runtime/tenancy, não ao projeto. Cada projeto possui resumo consolidado,

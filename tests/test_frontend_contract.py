@@ -542,6 +542,19 @@ def test_project_state_card_reflects_status_without_error_red():
     assert "#7f1d1d" not in project_styles
 
 
+def test_project_summary_cards_fill_the_available_width_without_manual_gaps():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    styles = page[page.index('.migration-project-summary{'):page.index('.migration-project-state{')]
+    assert "width:100%" in styles
+    assert "grid-template-columns:repeat(6,minmax(0,1fr))" in styles
+    assert "align-items:stretch" in styles
+    assert ".migration-project-summary>.metric" in styles
+    assert "width:100%!important" in styles
+    assert "max-width:none!important" in styles
+    assert "margin:0!important" in styles
+    assert "grid-column:auto!important" in styles
+
+
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="source-context-tags"' in page

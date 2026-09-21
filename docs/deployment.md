@@ -263,7 +263,7 @@ The About page reports the semantic release and the exact build revision. CI
 or a manual release should inject the Git commit while building, for example:
 
 ```bash
-RAIJIN_SERVICE_VERSION=0.7.7 RAIJIN_BUILD_REVISION="$(git rev-parse --short HEAD)" docker compose build
+RAIJIN_SERVICE_VERSION=0.7.8 RAIJIN_BUILD_REVISION="$(git rev-parse --short HEAD)" docker compose build
 ```
 
 Without build metadata the revision is shown as `development`, so an operator
