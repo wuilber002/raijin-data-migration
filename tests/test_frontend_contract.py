@@ -461,11 +461,21 @@ def test_project_is_required_before_the_ui_can_create_a_source():
     assert 'id="source-destination-prefix"' in page
 
 
+def test_source_selector_is_scoped_by_the_active_project():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "function projectScopedSources()" in page
+    assert "sources.filter(source=>String(source.migration_project_id||'')===projectId)" in page
+    assert "async function applyProjectSourceContext()" in page
+    assert "trigger.disabled=requiresProject" in page
+    assert "Selecione um projeto para listar suas sources." in page
+    assert "document.addEventListener('raijin:project-changed',()=>applyProjectSourceContext()" in page
+
+
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="source-context-tags"' in page
     assert 'class="source-inventory-heading"' in page
-    assert 'sources.map(x=>`<option value="${x.id}">${escape(x.name)}</option>`)' in page
+    assert 'visible.map(x=>`<option value="${x.id}">${escape(x.name)}</option>`)' in page
     assert "<b>Prefixos S3</b>" in page
 
 

@@ -45,6 +45,10 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   históricas também podem ser vinculadas administrativamente a um projeto sem
   reescrever bucket, prefixo, `destination_object_key`, waves ou evidências; o
   vínculo apenas completa o contexto de projeto da source e da fila durável.
+  Na console, o projeto selecionado é o contexto de navegação da área de
+  sources: o combobox lista somente as sources vinculadas a ele e fica
+  indisponível enquanto nenhum projeto estiver ativo. A troca de projeto
+  também remove da tela qualquer source que não pertença ao novo contexto.
   A associação pode ser desfeita apenas antes dessa fronteira operacional; a
   rota histórica permanece imutável. O namespace OCI continua pertencendo ao
   runtime/tenancy, não ao projeto. Cada projeto possui resumo consolidado,
