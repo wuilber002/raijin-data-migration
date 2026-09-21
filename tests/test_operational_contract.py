@@ -546,6 +546,34 @@ def test_source_selector_exposes_one_operational_status_per_source():
         assert restoring_row["pipeline_status"] == "IN_PROGRESS"
 
 
+def test_source_selector_keeps_deactivated_sources_visible_with_explicit_state():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        deactivated_at = datetime.now(timezone.utc)
+        source = Source(
+            id=906, name="historical", s3_bucket="bucket-history",
+            aws_region="us-east-1", destination_bucket="destination",
+            status="ARCHIVED", archived_at=deactivated_at,
+        )
+        session.add(source)
+        session.commit()
+
+        row = next(item for item in list_sources(session) if item["id"] == source.id)
+
+        assert row["status"] == "ARCHIVED"
+        assert row["lifecycle_status"] == "DEACTIVATED"
+        assert row["operational_status"] == "CONFIGURED"
+        assert row["deactivated"] is True
+        assert row["deactivated_at"].replace(tzinfo=timezone.utc) == deactivated_at
+
+    app_source = Path("app/main.py").read_text(encoding="utf-8")
+    assert '@app.post("/api/sources/{source_id}/deactivate")' in app_source
+    assert 'source.archived_at = utcnow()' in app_source
+    assert 'source.archived_at, source.status = utcnow(), "DEACTIVATED"' not in app_source
+
+
 def test_global_actionable_failure_banner_ignores_archived_sources():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

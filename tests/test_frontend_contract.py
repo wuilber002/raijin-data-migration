@@ -595,11 +595,15 @@ def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
     assert "<b>Prefixos S3</b>" in page
 
 
-def test_archiving_a_source_clears_the_migration_selection_and_url_state():
+def test_deactivating_a_source_keeps_it_selected_and_visible_for_history():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    handler = page[page.index("async function removeOrArchiveSource"):page.index("let sourceMessageRotationTimer")]
-    assert "sourceSelect.value=''" in handler
+    handler = page[page.index("async function removeOrDeactivateSource"):page.index("let sourceMessageRotationTimer")]
+    assert "'/deactivate'" in handler
+    assert "sourceSelect.value=selectedSource" in handler
     assert "await selectSource()" in handler
+    assert "sourceDisplayName" in page
+    assert "source-deactivated-marker" in page
+    assert "⏸️" in page
 
 
 def test_wave_cost_estimate_and_connection_pricing_are_available_in_modals():
@@ -806,7 +810,7 @@ def test_buttons_use_content_width_and_standard_horizontal_spacing():
     assert "padding-right:1em!important" in page
     assert "button.hidden{display:none!important}" in page
     assert 'id="waves-queue-all" class="secondary hidden" onclick="queueAllPlannedWaves()" disabled' in page
-    assert "queueAll.classList.toggle('hidden',!hasSource)" in page
+    assert "queueAll.classList.toggle('hidden',!operational)" in page
     assert 'id="source-validate-destination"' in page
     assert 'id="source-edit-action"' in page
 

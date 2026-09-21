@@ -31,8 +31,16 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
 - Permite vários prefixes independentes em uma única source, mas impede que
   fontes ativas do mesmo bucket tenham escopos iguais ou sobrepostos. A regra
   usa a semântica literal do S3 (`app/` também cobre `app/images/`) e evita
-  discovery, restore e transferência duplicados. Sources arquivadas não
+  discovery, restore e transferência duplicados. Sources desativadas não
   bloqueiam um novo cadastro.
+- Desativa uma source com histórico sem apagar suas evidências. A desativação
+  cancela trabalho pendente, mantém a source fora dos schedulers e bloqueia
+  ações mutáveis, mas ela continua no combobox do projeto para consulta de
+  inventário, waves, eventos e relatórios. O nome recebe o marcador `⏸️`; a
+  tag à direita continua exibindo o status global real da migração, sem
+  confundir ciclo de vida com progresso operacional. Registros que versões
+  anteriores chamavam de arquivados são apresentados automaticamente nesse
+  mesmo padrão.
 - Congela para cada objeto/revisão a chave de destino OCI resolvida no
   discovery. A rota padrão permanece compatível (`chave OCI = chave S3`), mas
   a transferência, multipart, validação e auditoria usam a chave persistida,
@@ -263,7 +271,7 @@ ser dispensados com `×` sem bloquear a console. A mesma condição permanece na
 fila rotativa do rodapé enquanto estiver verdadeira. Um alerta dispensado só
 volta ao topo se a condição for resolvida e ocorrer novamente.
 O contador global de falhas considera somente a tarefa mais recente de cada
-wave pertencente a uma source ativa. Falhas de sources arquivadas permanecem
+wave pertencente a uma source ativa. Falhas de sources desativadas permanecem
 no histórico auditável, mas deixam de representar uma pendência operacional
 atual.
 

@@ -324,6 +324,10 @@ class Source(Base):
     # the prior inventory or the migration history attached to it.
     last_discovery_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     discovery_generation: Mapped[int] = mapped_column(Integer, default=0)
+    # Legacy database name retained for a zero-downtime schema transition.
+    # For sources this timestamp now means "deactivated at": deactivation
+    # preserves evidence and keeps the source visible, while excluding it
+    # from every scheduler/worker query.
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     destination_validation_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     destination_validation_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -1369,7 +1373,7 @@ def require_non_overlapping_source_scope(session: Session, source: Source) -> No
         names = ", ".join(sorted({item["source_name"] for item in conflicts}))
         raise HTTPException(
             status_code=409,
-            detail=(f"S3 scope overlaps active source(s): {names}. Archive the conflicting source or remove the overlapping prefix."),
+            detail=(f"S3 scope overlaps active source(s): {names}. Deactivate the conflicting source or remove the overlapping prefix."),
         )
 
 
@@ -6909,7 +6913,12 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
         # Returning to Migration must show a source created in Fujin without
         # requiring a full-browser reload, even if a prior bind was cut off.
         recover_orphaned_simulation_sources(session)
-    sources = list(session.scalars(select(Source).where(Source.archived_at.is_(None)).order_by(Source.id)))
+    # Deactivated sources remain selectable so their inventory, waves and
+    # audit trail can still be consulted.  Execution paths continue to use
+    # ``archived_at IS NULL`` as the backward-compatible active predicate.
+    sources = list(session.scalars(select(Source).where(
+        Source.backend_kind != "SIMULATED_DELETED"
+    ).order_by(Source.id)))
     source_ids = [s.id for s in sources]
     wave_statuses: dict[int, set[str]] = {}
     if source_ids:
@@ -6937,9 +6946,9 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
         total, verified, transferred, delivery_verified = totals.get(source.id, (0, 0, 0, 0))
         if source.destination_validation_status == "DIFFERENT":
             return "DESTINATION_DIVERGENT"
-        if source.status == "DISCOVERED" and total and (verified == total or (transferred == total and delivery_verified == total)):
+        if total and (verified == total or (transferred == total and delivery_verified == total)):
             return "COMPLETED"
-        if source.status == "DISCOVERED" and total and transferred == total:
+        if total and transferred == total:
             return "AWAITING_INTEGRITY_VERIFICATION"
         return "IN_PROGRESS" if total else "NOT_STARTED"
 
@@ -6964,7 +6973,8 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
         return "CONFIGURED"
     return [{"id": s.id, "name": s.name, "s3_bucket": s.s3_bucket, "s3_prefix": s.s3_prefix,
              "s3_prefixes": source_prefix_values(s),
-             "aws_region": s.aws_region, "destination_bucket": s.destination_bucket, "status": s.status,
+             "aws_region": s.aws_region, "destination_bucket": s.destination_bucket,
+             "status": s.status,
              "migration_project_id": s.migration_project_id,
              "migration_project_name": (s.migration_project.name if s.migration_project else None),
              "destination_prefix": normalize_destination_prefix(s.destination_prefix),
@@ -6979,7 +6989,12 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
              "discovery_objects_inserted": s.discovery_objects_inserted,
              "last_discovery_mode": s.last_discovery_mode, "discovery_generation": s.discovery_generation,
              "simulation_fidelity": s.simulation_fidelity,
-             "discovery_can_resume": bool(s.discovery_continuation_token), "archived_at": s.archived_at,
+             "discovery_can_resume": bool(s.discovery_continuation_token),
+             "deactivated": s.archived_at is not None, "deactivated_at": s.archived_at,
+             "lifecycle_status": ("DEACTIVATED" if s.archived_at is not None else "ACTIVE"),
+             # Compatibility for older API clients; new clients must use
+             # deactivated/deactivated_at.
+             "archived_at": s.archived_at,
              # Inventory and migration are separate lifecycles.  In
              # particular, DISCOVERED means the inventory is ready; it must
              # not make an active continuous pipeline look idle.
@@ -7031,7 +7046,7 @@ def create_source(payload: SourceCreate, session: Session = Depends(get_session)
     if conflicts:
         names = ", ".join(sorted({item["source_name"] for item in conflicts}))
         raise HTTPException(status_code=409, detail=(
-            f"S3 prefix scope overlaps active source(s): {names}. Archive the conflicting source or remove the overlapping prefix."
+            f"S3 prefix scope overlaps active source(s): {names}. Deactivate the conflicting source or remove the overlapping prefix."
         ))
     project, destination_prefix = normalized_project_destination_route(
         session, payload.migration_project_id, payload.destination_bucket, payload.destination_prefix
@@ -7076,7 +7091,7 @@ def update_source(source_id: int, payload: SourceUpdate, session: Session = Depe
     if conflicts:
         names = ", ".join(sorted({item["source_name"] for item in conflicts}))
         raise HTTPException(status_code=409, detail=(
-            f"S3 prefix scope overlaps active source(s): {names}. Archive the conflicting source or remove the overlapping prefix."
+            f"S3 prefix scope overlaps active source(s): {names}. Deactivate the conflicting source or remove the overlapping prefix."
         ))
     if payload.migration_project_name is not None:
         raise HTTPException(status_code=422, detail="Create a migration project before associating an existing source")
@@ -7170,7 +7185,7 @@ def retire_legacy_aws_configuration(session: Session = Depends(get_session)) -> 
         Source.aws_connection_id.is_(None), Source.archived_at.is_(None)
     )) or 0
     if legacy_sources:
-        raise HTTPException(status_code=409, detail="Migrate or archive every active legacy source before retiring global AWS configuration")
+        raise HTTPException(status_code=409, detail="Migrate or deactivate every active legacy source before retiring global AWS configuration")
     running = session.scalar(select(func.count(Task.id)).where(Task.state == TaskState.RUNNING)) or 0
     if running:
         raise HTTPException(status_code=409, detail="Pause or wait for running tasks before retiring global AWS configuration")
@@ -7202,7 +7217,7 @@ def source_has_executed_wave(session: Session, source_id: int) -> bool:
 def active_source_or_409(session: Session, source_id: int) -> Source:
     source = source_or_404(session, source_id)
     if source.archived_at:
-        raise HTTPException(status_code=409, detail="Archived sources are read-only")
+        raise HTTPException(status_code=409, detail="Deactivated sources are read-only")
     if source.migration_project and source.migration_project.archived_at:
         raise HTTPException(status_code=409, detail="Source belongs to an archived migration project and is read-only")
     return source
@@ -7254,7 +7269,7 @@ def cancel_active_wave_tasks(session: Session, wave: Wave, reason: str) -> int:
     """Durably remove pending work for an operator-paused wave.
 
     A wave state alone is not enough: queued tasks survive restarts and used
-    to remain visible after a source had been archived.  Cancellation keeps
+    to remain executable after a source had been deactivated. Cancellation keeps
     the immutable task record while making it ineligible for every worker.
     """
     tasks = list(session.scalars(select(Task).where(
@@ -7286,8 +7301,8 @@ def cancel_active_wave_tasks(session: Session, wave: Wave, reason: str) -> int:
     return len(tasks) + len(items)
 
 
-def deactivate_archived_source_work(session: Session, source: Source, reason: str) -> int:
-    """Stop all executable control-plane work owned by an archived source."""
+def deactivate_source_work(session: Session, source: Source, reason: str) -> int:
+    """Stop all executable control-plane work owned by a deactivated source."""
     cancelled = 0
     terminal = {"COMPLETED", "VERIFIED", "TRANSFERRED", "TRANSFERRED_WITH_ERRORS", "VERIFICATION_FAILED"}
     for wave in session.scalars(select(Wave).where(Wave.source_id == source.id)):
@@ -7311,19 +7326,23 @@ def deactivate_archived_source_work(session: Session, source: Source, reason: st
     return cancelled
 
 
-def reconcile_archived_source_work(session: Session) -> int:
-    """Backstop for sources archived by an earlier Raijin release."""
+def reconcile_deactivated_source_work(session: Session) -> int:
+    """Backstop for deactivated sources, including legacy archived rows."""
     cancelled = 0
     for source in session.scalars(select(Source).where(Source.archived_at.is_not(None))):
-        cancelled += deactivate_archived_source_work(session, source, "source is archived")
+        cancelled += deactivate_source_work(session, source, "source is deactivated")
     return cancelled
+
+
+# Compatibility for workers imported from a release during a rolling deploy.
+reconcile_archived_source_work = reconcile_deactivated_source_work
 
 
 @app.delete("/api/sources/{source_id}")
 def delete_source(source_id: int, session: Session = Depends(get_session)) -> dict:
     source = source_or_404(session, source_id)
     if source_has_executed_wave(session, source_id):
-        raise HTTPException(status_code=409, detail="This source has an executed wave and must be archived, not deleted")
+        raise HTTPException(status_code=409, detail="This source has an executed wave and must be deactivated, not deleted")
     try:
         deleted = delete_unexecuted_source_data(session, source_id)
         session.delete(source)
@@ -7332,20 +7351,32 @@ def delete_source(source_id: int, session: Session = Depends(get_session)) -> di
         session.rollback()
         # Do not expose a raw database exception to the browser.  The source
         # remains untouched because the transaction was rolled back.
-        raise HTTPException(status_code=409, detail="The source could not be deleted because it still has protected operational records. Refresh the source and archive it if a wave was executed.") from error
+        raise HTTPException(status_code=409, detail="The source could not be deleted because it still has protected operational records. Refresh the source and deactivate it if a wave was executed.") from error
     return {"id": source_id, "deleted": True, "removed": deleted}
 
 
-@app.post("/api/sources/{source_id}/archive")
-def archive_source(source_id: int, session: Session = Depends(get_session)) -> dict:
+@app.post("/api/sources/{source_id}/deactivate")
+def deactivate_source(source_id: int, session: Session = Depends(get_session)) -> dict:
     source = source_or_404(session, source_id)
     if not source_has_executed_wave(session, source_id):
-        raise HTTPException(status_code=409, detail="A source without an executed wave must be deleted, not archived")
-    cancelled = deactivate_archived_source_work(session, source, "source archived by operator")
-    source.archived_at, source.status = utcnow(), "ARCHIVED"
-    record_event(session, "SOURCE_ARCHIVED", f"Source '{source.name}' archived; {cancelled} pending task(s) cancelled and historical data retained", source_id=source.id)
+        raise HTTPException(status_code=409, detail="A source without an executed wave must be deleted, not deactivated")
+    if source.archived_at is not None:
+        return {"id": source.id, "status": source.status, "lifecycle_status": "DEACTIVATED", "deactivated": True,
+                "deactivated_at": source.archived_at}
+    cancelled = deactivate_source_work(session, source, "source deactivated by operator")
+    # Preserve inventory/migration status: lifecycle deactivation is an
+    # independent dimension represented by archived_at for DB compatibility.
+    source.archived_at = utcnow()
+    record_event(session, "SOURCE_DEACTIVATED", f"Source '{source.name}' deactivated; {cancelled} pending task(s) cancelled and historical data retained", source_id=source.id)
     session.commit()
-    return {"id": source.id, "status": source.status, "archived_at": source.archived_at}
+    return {"id": source.id, "status": source.status, "lifecycle_status": "DEACTIVATED", "deactivated": True,
+            "deactivated_at": source.archived_at}
+
+
+@app.post("/api/sources/{source_id}/archive", deprecated=True)
+def archive_source_compatibility(source_id: int, session: Session = Depends(get_session)) -> dict:
+    """Legacy route: old clients now perform source deactivation."""
+    return deactivate_source(source_id, session)
 
 
 @app.post("/api/sources/{source_id}/inventory/import", status_code=201)

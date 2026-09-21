@@ -42,5 +42,6 @@ have been reviewed. The operator identity that runs this script must have the
 normal delete permissions on the named test buckets; the RAIJIN migration role
 must remain read/write-only for migration, without delete permissions.
 
-Finally archive or delete the test source in **Migrations** according to its
-wave history, and retain the wave report and manifest as test evidence.
+Finally deactivate or delete the test source in **Migrations** according to its
+wave history. A deactivated source remains visible for historical consultation;
+retain the wave report and manifest as test evidence.
