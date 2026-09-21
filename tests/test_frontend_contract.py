@@ -506,9 +506,10 @@ def test_consolidated_project_csv_lives_in_the_source_objects_modal():
 
 def test_project_delivery_card_compares_transferred_and_discovered_totals():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    assert 'class="migration-project-delivery-lines"' in page
-    assert '<small>Files</small><b>${fmt(inv.transferred_objects||0)} / ${fmt(inv.objects||0)}</b>' in page
-    assert '<small>Size</small><b>${bytes(inv.transferred_bytes||0)} / ${bytes(inv.bytes||0)}</b>' in page
+    assert 'class="migration-project-dual"' in page
+    assert '<b>${fmt(inv.transferred_objects||0)}</b><small>de ${fmt(inv.objects||0)} arquivos</small>' in page
+    assert '<b>${size.done}</b><small>de ${size.total} ${size.unit}</small>' in page
+    assert "function projectSizePair(done,total)" in page
     assert "migration-project-progress-item" not in page
     assert "última execução de discovery, somados de todas as sources" in page
     assert "já transferidos e confirmados no destino OCI" in page
@@ -517,13 +518,13 @@ def test_project_delivery_card_compares_transferred_and_discovered_totals():
 def test_project_summary_counts_sources_and_waves_formats_cost_and_tags_state():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert '<small class="with-help">Sources ' in page
-    assert '<b>${fmt(data.source_count||0)}</b>' in page
+    assert '<b class="migration-project-primary-value">${fmt(data.source_count||0)}</b>' in page
     assert '<small class="with-help">Waves ' in page
-    assert '<b>${fmt(waves.total||0)}</b>' in page
+    assert '<b class="migration-project-primary-value">${fmt(waves.total||0)}</b>' in page
     assert "money(cost.one_time,'USD')" in page
     assert "todas as waves de todas as sources do projeto" in page
-    assert "function projectStatusTag(status)" in page
-    assert "COMPLETED_WITH_ATTENTION:'discovered'" in page
+    assert 'class="migration-project-status-value">${escape(status)}</strong>' in page
+    assert "function projectStatusTag(status)" not in page
     assert "function projectStatusTooltip()" in page
     assert "stateHelp.dataset.richHelp=projectStatusTooltip()" in page
     assert "status-tooltip-grid" in page
@@ -537,7 +538,7 @@ def test_project_state_card_reflects_status_without_error_red():
     assert "READY:'audited'" in page
     assert "COMPLETED_WITH_ATTENTION:'waiting'" in page
     assert 'project-state-${projectStatusTone(data.status)}' in page
-    project_styles = page[page.index('.migration-project-state-card.project-state-neutral'):page.index('.migration-project-delivery-lines')]
+    project_styles = page[page.index('.migration-project-state-card.project-state-neutral'):page.index('@media(max-width:1150px)')]
     assert "project-state-error" not in project_styles
     assert "#7f1d1d" not in project_styles
 
@@ -546,13 +547,23 @@ def test_project_summary_cards_fill_the_available_width_without_manual_gaps():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     styles = page[page.index('.migration-project-summary{'):page.index('.migration-project-state{')]
     assert "width:100%" in styles
-    assert "grid-template-columns:repeat(6,minmax(0,1fr))" in styles
+    assert "grid-template-columns:minmax(165px,1.65fr)" in styles
+    assert "minmax(220px,1.95fr)" in styles
     assert "align-items:stretch" in styles
     assert ".migration-project-summary>.metric" in styles
     assert "width:100%!important" in styles
     assert "max-width:none!important" in styles
     assert "margin:0!important" in styles
     assert "grid-column:auto!important" in styles
+
+
+def test_project_summary_uses_large_values_and_internal_metric_divisions():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "min-height:135px" in page
+    assert ".migration-project-primary-value" in page
+    assert ".migration-project-dual>span+span{border-left:" in page
+    assert "Tempo de discovery: ${duration(data.discovery_elapsed_seconds||0)}" in page
+    assert "migration-project-cost-value" in page
 
 
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
