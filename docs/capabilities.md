@@ -63,9 +63,11 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   tooltip. Inventário e entregues dividem internamente arquivos e volume com
   valores grandes, separador visual e unidade comum para comparação direta; o
   inventário também informa o tempo agregado de discovery.
-  O custo one-time acumulado de todas as waves de todas as sources do projeto
-  é formatado em USD com duas casas decimais e recebe o mesmo destaque central
-  das contagens. Os seis cards têm altura uniforme, distribuem-se por toda a
+  Estado, sources, waves e custo mantêm seu valor principal centralizado nos
+  dois eixos, independentemente de cabeçalho ou rodapé; o tempo de discovery
+  fica centralizado no rodapé do inventário. O custo one-time acumulado de
+  todas as waves de todas as sources do projeto é formatado em USD com duas
+  casas decimais. Os seis cards têm altura uniforme, distribuem-se por toda a
   largura útil sem espaços reservados e reorganizam-se responsivamente em três,
   duas ou uma coluna.
   A associação pode ser desfeita apenas antes dessa fronteira operacional; a

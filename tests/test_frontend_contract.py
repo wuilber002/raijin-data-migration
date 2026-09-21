@@ -545,7 +545,7 @@ def test_project_state_card_reflects_status_without_error_red():
 
 def test_project_summary_cards_fill_the_available_width_without_manual_gaps():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    styles = page[page.index('.migration-project-summary{'):page.index('.migration-project-state{')]
+    styles = page[page.index('.migration-project-summary{'):page.index('.migration-project-centered-card .migration-project-state')]
     assert "width:100%" in styles
     assert "grid-template-columns:minmax(165px,1.65fr)" in styles
     assert "minmax(220px,1.95fr)" in styles
@@ -561,8 +561,11 @@ def test_project_summary_uses_large_values_and_internal_metric_divisions():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "min-height:135px" in page
     assert ".migration-project-primary-value" in page
+    assert ".migration-project-centered-card .migration-project-state,.migration-project-centered-card .migration-project-primary-value{position:absolute;top:50%;left:50%" in page
+    assert page.count('metric migration-project-centered-card') == 4
     assert ".migration-project-dual>span+span{border-left:" in page
-    assert "Tempo de discovery: ${duration(data.discovery_elapsed_seconds||0)}" in page
+    assert 'migration-project-card-footer migration-project-inventory-footer">Tempo de discovery: ${duration(data.discovery_elapsed_seconds||0)}' in page
+    assert ".migration-project-inventory-footer{text-align:center}" in page
     assert "migration-project-cost-value" in page
 
 
