@@ -53,7 +53,10 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   resumo não repete uma lista estática das sources, pois o próprio combobox
   filtrado é a referência operacional do vínculo ativo. A exportação CSV
   consolidada do projeto fica junto da consulta de objetos, dentro do modal
-  aberto pela ação **Objetos** da source selecionada.
+  aberto pela ação **Objetos** da source selecionada. O resumo diferencia o
+  inventário agregado do progresso entregue: arquivos transferidos sobre o
+  total descoberto e bytes transferidos sobre o tamanho total descoberto,
+  acompanhados de ajuda contextual sobre origem e abrangência das métricas.
   A associação pode ser desfeita apenas antes dessa fronteira operacional; a
   rota histórica permanece imutável. O namespace OCI continua pertencendo ao
   runtime/tenancy, não ao projeto. Cada projeto possui resumo consolidado,

@@ -504,6 +504,15 @@ def test_consolidated_project_csv_lives_in_the_source_objects_modal():
     assert "name==='csv'?document.querySelector('#migration-project-csv')" in page
 
 
+def test_project_delivery_card_compares_transferred_and_discovered_totals():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'class="migration-project-progress"' in page
+    assert '<small>Arquivos</small><b>${fmt(inv.transferred_objects||0)} / ${fmt(inv.objects||0)}</b>' in page
+    assert '<small>Size</small><b>${bytes(inv.transferred_bytes||0)} / ${bytes(inv.bytes||0)}</b>' in page
+    assert "última execução de discovery, somados de todas as sources" in page
+    assert "já transferidos e confirmados no destino OCI" in page
+
+
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="source-context-tags"' in page
