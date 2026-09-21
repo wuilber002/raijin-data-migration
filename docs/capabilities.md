@@ -58,8 +58,10 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   total descoberto e bytes transferidos sobre o tamanho total descoberto,
   acompanhados de ajuda contextual sobre origem e abrangência das métricas.
   O mesmo resumo mostra as quantidades agregadas de sources e waves, apresenta
-  o estado em uma tag semântica e formata em USD, com duas casas decimais, o
-  custo one-time acumulado de todas as waves de todas as sources do projeto.
+  o estado em uma tag e em um card com cor semântica, sem usar vermelho para
+  lifecycle, e oferece uma matriz explicativa de todos os estados na tooltip.
+  O custo one-time acumulado de todas as waves de todas as sources do projeto
+  é formatado em USD com duas casas decimais.
   A associação pode ser desfeita apenas antes dessa fronteira operacional; a
   rota histórica permanece imutável. O namespace OCI continua pertencendo ao
   runtime/tenancy, não ao projeto. Cada projeto possui resumo consolidado,

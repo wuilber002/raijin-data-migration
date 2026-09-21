@@ -524,7 +524,22 @@ def test_project_summary_counts_sources_and_waves_formats_cost_and_tags_state():
     assert "todas as waves de todas as sources do projeto" in page
     assert "function projectStatusTag(status)" in page
     assert "COMPLETED_WITH_ATTENTION:'discovered'" in page
-    assert "COMPLETED WITH ATTENTION — processamento terminou" in page
+    assert "function projectStatusTooltip()" in page
+    assert "stateHelp.dataset.richHelp=projectStatusTooltip()" in page
+    assert "status-tooltip-grid" in page
+    assert "COMPLETED WITH ATTENTION','O processamento terminou" in page
+
+
+def test_project_state_card_reflects_status_without_error_red():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "function projectStatusTone(status)" in page
+    assert "RUNNING:'transferring'" in page
+    assert "READY:'audited'" in page
+    assert "COMPLETED_WITH_ATTENTION:'waiting'" in page
+    assert 'project-state-${projectStatusTone(data.status)}' in page
+    project_styles = page[page.index('.migration-project-state-card.project-state-neutral'):page.index('.migration-project-delivery-lines')]
+    assert "project-state-error" not in project_styles
+    assert "#7f1d1d" not in project_styles
 
 
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
