@@ -67,7 +67,8 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   acompanhados de ajuda contextual sobre origem e abrangência das métricas.
   Os valores principais de inventário e entrega usam branco e escala ampliada
   para leitura rápida; o custo acumulado também usa branco, preservando
-  sua escala própria para evitar estouro horizontal.
+  sua escala própria para evitar estouro horizontal. O card de inventário tem
+  largura prioritária e seus valores não quebram linha.
   O mesmo resumo mostra as quantidades agregadas de sources e waves, apresenta
   o estado em texto amplo sobre um card com cor semântica, sem usar vermelho
   para lifecycle, e oferece uma matriz explicativa de todos os estados na

@@ -554,8 +554,8 @@ def test_project_summary_cards_fill_the_available_width_without_manual_gaps():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     styles = page[page.index('.migration-project-summary{'):page.index('.migration-project-centered-card .migration-project-state')]
     assert "width:100%" in styles
-    assert "grid-template-columns:minmax(165px,1.65fr)" in styles
-    assert "minmax(220px,1.95fr)" in styles
+    assert "grid-template-columns:minmax(155px,1.45fr)" in styles
+    assert "minmax(225px,2fr)" in styles
     assert "align-items:stretch" in styles
     assert ".migration-project-summary>.metric" in styles
     assert "width:100%!important" in styles
@@ -575,6 +575,8 @@ def test_project_summary_uses_large_values_and_internal_metric_divisions():
     assert ".migration-project-inventory-footer{text-align:center}" in page
     assert "migration-project-cost-value" in page
     assert ".migration-project-dual b{max-width:100%;margin:0;color:#fff;font-size:2.09rem" in page
+    assert "minmax(225px,2fr) minmax(205px,1.85fr)" in page
+    assert "font-size:2.09rem;line-height:1.05;white-space:nowrap" in page
     assert ".migration-project-cost-value{color:#fff;font-size:2.25rem!important" in page
 
 
