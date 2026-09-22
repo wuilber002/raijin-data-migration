@@ -1112,6 +1112,18 @@ def test_refresh_restores_the_current_view_and_selected_source_without_duplicate
     assert "else if(view==='migrations'){await Promise.all([loadTasks(),loadEvents()])}" in page
 
 
+def test_selected_project_is_persisted_in_and_restored_from_the_url():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert "const requestedProjectId=new URLSearchParams(location.search).get('project')||''" in page
+    assert "window.raijinSelectedProjectId=/^[1-9]\\d*$/.test(requestedProjectId)?requestedProjectId:''" in page
+    assert "url.searchParams.set('project',value)" in page
+    assert "url.searchParams.delete('project')" in page
+    assert "document.addEventListener('raijin:project-changed',event=>persistProjectSelection(event.detail?.projectId))" in page
+    assert "available.some(p=>String(p.id)===projectId)" in page
+    assert "options().then(()=>{if(selected()&&$('#view-queue').classList.contains('active'))return renderFilteredQueue()})" in page
+
+
 def test_reprocess_requires_a_second_explicit_confirmation_when_restore_cost_may_recur():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
 

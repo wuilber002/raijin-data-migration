@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 # Version identifiers are deliberately centralized: the About page and the
 # API report the release that is actually running, rather than a duplicated
 # presentation-only value.
-RAIJIN_SERVICE_VERSION = os.environ.get("RAIJIN_SERVICE_VERSION", "0.7.18").strip() or "0.7.18"
+RAIJIN_SERVICE_VERSION = os.environ.get("RAIJIN_SERVICE_VERSION", "0.7.19").strip() or "0.7.19"
 RAIJIN_BUILD_REVISION = os.environ.get("RAIJIN_BUILD_REVISION", "development").strip() or "development"
 SIMULATOR_CONTRACT_VERSION = "2"
 SIMULATOR_SERVICE_VERSION = "0.1.0"

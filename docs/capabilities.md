@@ -59,7 +59,9 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   também remove da tela qualquer source que não pertença ao novo contexto. Na
   fila operacional, o seletor de projeto e a ação **Waves timeline** formam um
   único grupo alinhado à direita, com a timeline imediatamente à direita do
-  seletor.
+  seletor. A seleção também é persistida no parâmetro `project` da URL: links
+  compartilhados e recarregamentos restauram o mesmo contexto, enquanto uma
+  seleção inexistente ou arquivada é descartada com segurança.
   Projeto, métricas agregadas e controles de source ocupam um único card; o
   resumo não repete uma lista estática das sources, pois o próprio combobox
   filtrado é a referência operacional do vínculo ativo. A exportação CSV
