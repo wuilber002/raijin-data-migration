@@ -483,6 +483,14 @@ def test_project_panel_omits_removed_operational_buttons_and_dead_ui_code():
     assert "migration-project-groups" not in page
 
 
+def test_queue_project_selector_and_timeline_are_grouped_at_the_right():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert ".queue-project-filter{display:flex;align-items:end;justify-content:flex-end" in page
+    assert "margin-left:auto" in page
+    assert "const timelineButton=$('#flight-board-button');if(timelineButton)filter.append(timelineButton)" in page
+    assert page.index("filter.append(timelineButton)") > page.index("filter.innerHTML='<label>Projeto")
+
+
 def test_project_and_source_controls_share_one_card_without_redundant_source_list():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "const panel=document.createElement('div')" in page

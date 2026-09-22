@@ -56,7 +56,10 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   Na console, o projeto selecionado é o contexto de navegação da área de
   sources: o combobox lista somente as sources vinculadas a ele e fica
   indisponível enquanto nenhum projeto estiver ativo. A troca de projeto
-  também remove da tela qualquer source que não pertença ao novo contexto.
+  também remove da tela qualquer source que não pertença ao novo contexto. Na
+  fila operacional, o seletor de projeto e a ação **Waves timeline** formam um
+  único grupo alinhado à direita, com a timeline imediatamente à direita do
+  seletor.
   Projeto, métricas agregadas e controles de source ocupam um único card; o
   resumo não repete uma lista estática das sources, pois o próprio combobox
   filtrado é a referência operacional do vínculo ativo. A exportação CSV

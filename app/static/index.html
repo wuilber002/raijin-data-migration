@@ -1578,7 +1578,7 @@ refreshAll();
   })();
 </script>
 <style>
-  .queue-project-filter{display:flex;align-items:end;gap:.45rem;margin-left:auto}.queue-project-filter label{display:grid;gap:.2rem;font-size:.78rem;color:#bfdbfe}.queue-project-filter select{min-width:220px}@media(max-width:650px){.queue-project-filter{width:100%;margin-left:0}.queue-project-filter select{width:100%}}
+  .queue-project-filter{display:flex;align-items:end;justify-content:flex-end;gap:.45rem;margin-left:auto}.queue-project-filter label{display:grid;gap:.2rem;font-size:.78rem;color:#bfdbfe}.queue-project-filter select{min-width:280px}@media(max-width:650px){.queue-project-filter{width:100%;margin-left:0;flex-wrap:wrap}.queue-project-filter label{flex:1;min-width:0}.queue-project-filter select{width:100%;min-width:0}}
 </style>
 <script>
   // Project selection is an observability filter.  It never creates a second
@@ -1588,6 +1588,7 @@ refreshAll();
     const filter=document.createElement('div');filter.className='queue-project-filter';
     filter.innerHTML='<label>Projeto <select id="queue-project-select"><option value="">Todas as sources</option></select></label>';
     row.append(filter);
+    const timelineButton=$('#flight-board-button');if(timelineButton)filter.append(timelineButton);
     const select=filter.querySelector('select');
     const selected=()=>String(window.raijinSelectedProjectId||'');
     async function options(){const projects=await api('/api/migration-projects');select.innerHTML='<option value="">Todas as sources</option>'+projects.filter(p=>p.status!=='ARCHIVED').map(p=>`<option value="${p.id}">${escape(p.name)} — ${escape(p.status)}</option>`).join('');select.value=selected()}
