@@ -297,15 +297,17 @@ cat >/etc/systemd/system/s3-oci-platform-status.timer <<'EOF'
 Description=Refresh S3 to OCI migration platform status
 
 [Timer]
-OnBootSec=30
+OnActiveSec=30
 OnUnitActiveSec=60
+AccuracySec=5
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
 systemctl daemon-reload
-systemctl enable --now s3-oci-platform-status.timer
+systemctl enable s3-oci-platform-status.timer
+systemctl restart s3-oci-platform-status.timer
 /usr/local/sbin/s3-oci-write-platform-status
 
 # Remove the legacy task-advancing simulation worker. The replacement backend

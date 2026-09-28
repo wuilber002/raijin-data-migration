@@ -42,9 +42,14 @@ copiados diariamente e a retenção padrão de 35 dias cobre toda a quarentena
 padrão de 30 dias.
 
 O comando exige confirmação explícita, aceita somente arquivos do diretório de
-backups, cria um backup adicional do estado atual antes de restaurar e aguarda
-`/healthz` voltar a responder. Se a API não retornar saudável, não reenvie
-restores AWS: investigue `sudo journalctl -u s3-oci-migration.service -n 200`.
+backups e cria um backup adicional do estado atual. Ele mantém o PostgreSQL em
+execução, interrompe somente os processos capazes de escrever no banco-alvo,
+recria exclusivamente esse banco vazio e importa o dump via `stdin`. Os
+escritores só são retomados depois de uma importação bem-sucedida; em qualquer
+falha permanecem parados para impedir operação sobre estado parcial. Quando os
+escritores estavam ativos no início, o utilitário também aguarda `/healthz`
+voltar a responder. Se isso não ocorrer, não reenvie restores AWS: investigue
+`sudo journalctl -u s3-oci-migration.service -n 200`.
 
 Após a recuperação, execute **Validate OCI destination** nas sources com ondas
 concluídas e revise a fila antes de retomar qualquer wave.
@@ -54,3 +59,8 @@ concluídas e revise a fila antes de retomar qualquer wave.
 Em ambiente de teste, execute um `pg_dump` manual, faça uma alteração inofensiva
 na console, restaure o dump e confirme que o inventário, uma wave e o histórico
 voltaram ao estado esperado. Registre data, operador, arquivo e resultado.
+
+O exercício de pré-produção de 25/09/2026 restaurou o dump
+`migration-20260925T122710Z.dump`, confirmou os 9.317 objetos da source ativa
+como `TRANSFERRED` e recuperou a API saudável. O ensaio também detectou e
+corrigiu os casos de schema evoluído e de writers previamente parados.

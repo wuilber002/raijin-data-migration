@@ -11,13 +11,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, create_engine, inspect
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, String, Text, create_engine, inspect
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from app.aws_restore_semantics import s3_restore_expiry, utc_datetime
 
 
-LOCAL_SCHEMA_VERSION = 20
+LOCAL_SCHEMA_VERSION = 21
 
 
 def utcnow() -> datetime:
@@ -246,6 +246,11 @@ class LocalMultipartPart(LocalBase):
 
 class LocalAuditEvent(LocalBase):
     __tablename__ = "local_audit_events"
+    __table_args__ = (
+        Index("ix_local_audit_bucket_created_id", "bucket", "created_at", "id"),
+        Index("ix_local_audit_object_created_id", "object_key", "created_at", "id"),
+        Index("ix_local_audit_created_id", "created_at", "id"),
+    )
 
     # SQLite requires the literal INTEGER type for auto-increment primary
     # keys; production PostgreSQL still maps it to its normal integer serial.
@@ -282,6 +287,21 @@ def migrate(database_url: str) -> None:
         for name, definition in expected_audit_columns.items():
             if name not in existing_audit_columns:
                 connection.exec_driver_sql(f"ALTER TABLE local_audit_events ADD COLUMN {name} {definition}")
+        # The console filters this append-only table by resource and time.
+        # Composite indexes prevent millions of historical rows from being
+        # scanned before the newest matching page can be returned.
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_local_audit_bucket_created_id "
+            "ON local_audit_events (bucket, created_at, id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_local_audit_object_created_id "
+            "ON local_audit_events (object_key, created_at, id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_local_audit_created_id "
+            "ON local_audit_events (created_at, id)"
+        )
         # Content-Length on HEAD is object metadata, not bytes carried in the
         # response. Repair observations produced before this distinction was
         # enforced by the request middleware.

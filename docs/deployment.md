@@ -17,10 +17,14 @@ sudo /opt/s3-oci-migration/release/scripts/update-fujin-local-raijin-runtime.sh 
 
 O atualizador recusa a troca se houver dispatcher de transferência em execução
 ou item com lease ativo. Ele mantém PostgreSQL, Fujin, materializador, DNS e
-gateway online; troca somente app, Raikou e Raiju, aguarda a aplicação validar
-o schema e a revisão Git esperada antes de iniciar os workers. Se a nova
-aplicação não ficar saudável ou reportar outro build, os três containers são
-restaurados automaticamente com a imagem de rollback. Polling
+gateway online; inicia uma aplicação candidata ao lado da atual, valida health,
+schema e revisão Git, e somente então faz o handoff do alias privado e inicia
+Raikou/Raiju. O gateway repete falhas transitórias durante essa troca e recarrega
+seu DNS depois da retirada do app antigo. Ao fim, o script exige que app,
+Raikou e Raiju usem exatamente a imagem alvo e registra se o Fujin permanece em
+outra release — ele não substitui Fujin implicitamente. Se a candidata falhar
+antes do handoff, o runtime antigo permanece online; se houver falha posterior,
+os três containers são restaurados pela imagem de rollback. Polling
 de restore em estado `READY` pode aguardar essa curta janela sem nova submissão
 AWS/Fujin; stream ou multipart já admitido nunca deve ser interrompido.
 
@@ -49,6 +53,12 @@ runtime normal.
 Depois do deploy, abra **Configurações → Inventário de buckets OCI** e use **Atualizar buckets OCI**. A consulta ocorre somente sob demanda via OCI Resource Search no tenancy e o resultado é persistido no PostgreSQL. O cadastro de origem aceita apenas um bucket presente nesse cache; a policy da Dynamic Group continua sendo a autorização efetiva para escrita.
 
 O PostgreSQL é iniciado com `--shm-size=512m`. Esse limite evita que consultas de consolidação do Resultado final e da timeline esgotem o `/dev/shm` padrão de containers em sources com muitos segmentos de transferência.
+
+O schema aditivo cria `project_closure_reports` no startup. Antes de publicar
+uma release que introduza essa tabela, execute o backup PostgreSQL normal. PDF
+e ZIP finais são persistidos no banco para preservar os bytes emitidos; inclua
+essa tabela no dimensionamento e na política de retenção dos backups. O pacote
+não é removido quando projeto ou source são desativados.
 
 Uma origem com apenas cadastro, discovery, inventário ou ondas ainda não executadas pode ser excluída definitivamente, removendo também esses dados de preview. Depois que um worker assumir qualquer onda, a interface disponibiliza somente **Arquivar**: ela pausa ondas não concluídas, remove a origem da lista diária e mantém todo o histórico para auditoria.
 
@@ -189,6 +199,13 @@ publica após manifesto e SHA-256. O serviço `fujin-local` que expõe S3 monta 
 mesmo volume em somente leitura. Não adicione esse volume aos containers do
 Raijin nem ao modo `SIMULATION`.
 
+Ao atualizar uma base Fujin criada antes da versão 0.8.9, a primeira migração
+cria índices compostos na tabela de auditoria (`bucket/object_key`, data e id).
+Em históricos com milhões de eventos essa construção pode consumir I/O e
+retardar temporariamente as APIs Fujin; execute a atualização sem Deep Audit
+ativo e aguarde o health check concluir. Os payloads e eventos não são
+reescritos, e as inicializações seguintes apenas confirmam os índices.
+
 `s3-oci-start-fujin-local-runtime` é uma transição de topologia: faça drain e
 parada controlada do runtime normal antes de executá-lo. Nunca faça essa troca
 durante transferência ativa.
@@ -263,7 +280,7 @@ The About page reports the semantic release and the exact build revision. CI
 or a manual release should inject the Git commit while building, for example:
 
 ```bash
-RAIJIN_SERVICE_VERSION=0.7.19 RAIJIN_BUILD_REVISION="$(git rev-parse --short HEAD)" docker compose build
+RAIJIN_SERVICE_VERSION=0.8.9 RAIJIN_BUILD_REVISION="$(git rev-parse --short HEAD)" docker compose build
 ```
 
 Without build metadata the revision is shown as `development`, so an operator
@@ -368,7 +385,18 @@ Não execute a troca por navegador, por máquina remota ou durante uma
 migração. Quando a API retornar `409`, conclua, pause ou recupere as tarefas
 informadas antes de repetir a chamada.
 
-O painel de saúde também mostra o estado do serviço systemd da plataforma, dos containers PostgreSQL e aplicação, do timer de backup lógico e do timer que atualiza esse estado. O host gera um pequeno JSON em `/run/s3-oci-migration` a cada minuto; o container web apenas o lê, sem acesso ao socket Podman, systemd ou privilégios de host.
+O painel de saúde também mostra o estado do serviço systemd da plataforma, dos containers PostgreSQL e aplicação, do timer de backup lógico e do timer que atualiza esse estado. O host gera um pequeno JSON em `/run/s3-oci-migration` a cada minuto; o container web apenas o lê, sem acesso ao socket Podman, systemd ou privilégios de host. O JSON deixa de ser aceito depois de três minutos, para que CPU, memória, serviços e backup congelados não pareçam atuais. O atualizador controlado reinstala o helper, reinicia o timer e exige um snapshot novo antes de declarar sucesso.
+
+Depois de qualquer atualização na VM, valide explicitamente o agendamento e a atualidade do snapshot:
+
+```bash
+sudo systemctl show s3-oci-platform-status.timer \
+  -p ActiveState -p NextElapseUSecRealtime -p NextElapseUSecMonotonic
+curl -fsS http://127.0.0.1:8080/raijin/api/platform/status
+```
+
+O timer deve estar ativo e possuir uma próxima execução; a API deve retornar
+`available: true`, `stale: false` e `age_seconds` inferior a 180.
 
 O stack anexa o Block Volume `*-fujin-payloads` de 15 TB como `/dev/oracleoci/oraclevdb`. O bootstrap o formata como XFS apenas se estiver vazio e o monta em `/var/lib/s3-oci-migration/fujin-payloads` com permissões `0700`. Esse diretório é bind-mounted somente no container Fujin da topologia **LOCAL**; PostgreSQL, API e workers Raijin nunca o recebem. Em operação REAL normal, nenhum container o monta. LOCAL mantém RAIJIN em REAL, mas direciona seus SDKs aos endpoints privados do Fujin. Ao aplicar a alteração em uma VM já existente, execute uma vez `sudo /opt/s3-oci-migration/release/scripts/bootstrap.sh` após a attachment ficar `ATTACHED`.
 

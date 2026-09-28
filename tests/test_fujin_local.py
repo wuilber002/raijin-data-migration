@@ -23,7 +23,7 @@ import boto3
 from botocore.config import Config
 import oci
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -358,8 +358,8 @@ def test_local_console_exposes_only_local_administration_controls():
     assert "id='audit-bucket'" in page and "/api/local/audit/buckets" in page
     assert "if(auditQuery)await loadAuditPage(auditPage)" in page
     assert "Nenhum evento é carregado automaticamente" in page
-    assert "query.set('limit','10')" in page and "query.set('offset',String(auditPage*10))" in page
-    assert "/api/local/audit/count?" in page and "${auditPage+1}/${totalPages}" in page
+    assert "query.set('limit','11')" in page and "query.set('offset',String(auditPage*10))" in page
+    assert "/api/local/audit/count?" not in page and "Página ${auditPage+1}" in page
     assert "html,body,*{overflow-anchor:none}" in page and "stabilizePointerClicks()" in page
     assert "updateUrlState" in page and "initialUrlState.get('view')" in page
     assert "audit_page" in page and "selected_id" in page and "restoreUrlSelection" in page
@@ -496,6 +496,11 @@ def test_local_ui_gateway_resolves_provider_aliases_after_container_restart():
     assert "$raijin_local_upstream" in config
     assert "rewrite ^/raijin/(.*)$ /$1 break;" in config
     assert "proxy_pass http://$raijin_local_upstream:8080;" in config
+    assert "location ~ ^/api/sources/[0-9]+/validate-destination$" in config
+    assert "proxy_read_timeout 10m;" in config
+    assert "location = /favicon.ico" in config
+    assert "/static/favicon.svg" in config
+    assert Path("app/static/favicon.svg").is_file()
     assert "proxy_ssl_server_name on" in config
     assert "rewrite ^/fujin/api/(.*)$ /api/$1 break;" in config
     assert "location /fujin/static/" in config
@@ -544,6 +549,21 @@ def test_oracle_linux_podman_launcher_keeps_raijin_real_and_the_data_plane_priva
     updater = Path("scripts/update-fujin-local-raijin-runtime.sh").read_text(encoding="utf-8")
     assert "identity['raijin_build_revision']" in updater
     assert "expected_revision" in updater
+    assert 'candidate_name="s3-oci-app-candidate"' in updater
+    assert 'start_app "$candidate_name" "$target_image"' in updater
+    assert 'podman rename "$candidate_name" s3-oci-app' in updater
+    assert 'podman exec s3-oci-local-ui-gateway nginx -s reload' in updater
+    assert "validate_release_images" in updater
+    assert '[[ "$actual" == "$image" ]]' in updater
+    assert "Candidate failed before handoff" in updater
+    assert "active transfer/lease record(s) remain" in updater
+    config = Path("docker/nginx-local-ui.conf").read_text(encoding="utf-8")
+    assert "proxy_next_upstream error timeout http_502 http_503 http_504" in config
+    assert "proxy_next_upstream_tries 4" in config
+    candidate = updater.index('start_app "$candidate_name" "$target_image"')
+    retire_old = updater.index('podman stop -t "$stop_timeout" --ignore s3-oci-app')
+    promote = updater.index('podman rename "$candidate_name" s3-oci-app')
+    assert candidate < retire_old < promote
     coredns = Path("docker/fujin-local.Corefile").read_text(encoding="utf-8")
     assert "forward . /etc/resolv.conf" in coredns
     assert "forward . 127.0.0.11" not in coredns
@@ -1266,6 +1286,58 @@ def test_oci_uploads_keep_only_evidence_and_reference_original_payload(tmp_path,
         session.close()
 
 
+def test_oci_list_paginates_and_head_returns_persisted_provenance(tmp_path, monkeypatch):
+    root = Path(tmp_path) / "payloads"; (root / "snap").mkdir(parents=True)
+    payload = b"pagination-provenance"; (root / "snap/object.bin").write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setenv("FUJIN_LOCAL_DATABASE_URL", f"sqlite+pysqlite:///{Path(tmp_path) / 'pagination.db'}")
+    monkeypatch.setenv("FUJIN_LOCAL_PAYLOAD_ROOT", str(root))
+    import app.fujin_local as module
+    module = importlib.reload(module); module.startup(); session = module.SessionLocal()
+    try:
+        request = _request("POST", "/api/local")
+        dataset = _create_ready_dataset(module, request, module.DatasetCreate(
+            name="pagination", snapshot_id="pagination-snapshot", repository_relative_path="snap",
+            quota_bytes=len(payload), manifest={"objects": [{"key": "object.bin",
+                "relative_path": "snap/object.bin", "size_bytes": len(payload),
+                "sha256": digest, "etag": digest}]},
+        ), session)
+        module.create_s3_bucket(request, module.S3BucketCreate(name="pagination-source", dataset_id=dataset["id"]), session)
+        module.create_oci_bucket(request, module.OciBucketCreate(namespace="local", name="pagination-target"), session)
+        metadata = [(b"opc-meta-s3-oci-source-etag", digest.encode()),
+                    (b"opc-meta-s3-oci-source-last-modified", b"2026-09-25T12:00:00+00:00")]
+        for key in ("a.bin", "b.bin", "c.bin"):
+            assert asyncio.run(module.oci_put_object("local", "pagination-target", key,
+                _request("PUT", "/", headers=metadata, body=payload), session)).status_code == 200
+        # Multipart records produced by older Fujin releases persisted the
+        # complete opc-meta-* key rather than only its suffix.
+        legacy = session.scalar(select(module.LocalOciObject).where(
+            module.LocalOciObject.object_key == "c.bin"))
+        legacy.metadata_json = json.dumps({
+            "opc-meta-s3-oci-source-etag": digest,
+            "opc-meta-s3-oci-source-last-modified": "2026-09-25T12:00:00+00:00",
+        })
+        session.commit()
+        first = module.oci_list_objects("local", "pagination-target",
+            _request("GET", "/", query=b"limit=2"), session)
+        assert [item["name"] for item in first["objects"]] == ["a.bin", "b.bin"]
+        assert first["nextStartWith"] == "b.bin"
+        second = module.oci_list_objects("local", "pagination-target",
+            _request("GET", "/", query=b"limit=2&start=b.bin"), session)
+        assert [item["name"] for item in second["objects"]] == ["c.bin"]
+        assert second["nextStartWith"] is None
+        head = module.oci_get_object("local", "pagination-target", "a.bin",
+            _request("HEAD", "/"), session)
+        assert head.headers["opc-meta-s3-oci-source-etag"] == digest
+        assert head.headers["opc-meta-s3-oci-source-last-modified"] == "2026-09-25T12:00:00+00:00"
+        legacy_head = module.oci_get_object("local", "pagination-target", "c.bin",
+            _request("HEAD", "/"), session)
+        assert legacy_head.headers["opc-meta-s3-oci-source-etag"] == digest
+        assert "opc-meta-opc-meta-s3-oci-source-etag" not in legacy_head.headers
+    finally:
+        session.close()
+
+
 def test_multipart_commit_rejects_evidence_that_differs_from_source(tmp_path, monkeypatch):
     root = Path(tmp_path) / "payloads"; payload = b"immutable-source"
     (root / "snap").mkdir(parents=True); (root / "snap/object.bin").write_bytes(payload)
@@ -1556,6 +1628,14 @@ def test_local_audit_is_searchable_by_request_bucket_object_and_period(tmp_path,
     import app.fujin_local as module
     module = importlib.reload(module); module.startup(); session = module.SessionLocal()
     try:
+        index_names = {
+            item["name"] for item in inspect(session.get_bind()).get_indexes("local_audit_events")
+        }
+        assert {
+            "ix_local_audit_bucket_created_id",
+            "ix_local_audit_object_created_id",
+            "ix_local_audit_created_id",
+        } <= index_names
         identifier = module.audit(session, "S3_GET_OBJECT", 200, "source", object_key="archive/object.bin", endpoint="s3.local/object")
         session.commit()
         rows = module.audit_events(_request("GET", "/api/local/audit"), request_id=identifier,

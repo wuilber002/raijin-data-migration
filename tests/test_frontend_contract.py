@@ -21,6 +21,22 @@ def test_raijin_uses_the_shared_operational_card_contract():
     assert 'data-card-kind="status"' in styles
 
 
+def test_project_closure_package_exposes_preview_gates_revisions_and_downloads():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'id="migration-project-closure"' in page
+    assert 'id="project-closure-modal"' in page
+    assert "openProjectClosureModal()" in page
+    assert "/closure-preview" in page and "/closure-preview.pdf" in page
+    assert "/closure-reports" in page
+    assert "accepted_exception_codes" not in page
+    assert "project-closure-warning" not in page
+    assert "Custo estimado" not in page[page.index("function closeProjectClosureModal"):page.index("// The project is the navigation context")]
+    assert "A auditoria profunda é opcional e não altera os gates" in page
+    assert "project-closure-content{flex:1 1 auto;min-height:0;overflow-y:auto" in page
+    assert "Motivo da nova revisão" in page
+    assert "Resultado final" in page and "documento oficial consolidado do projeto" in page
+
+
 def test_language_selector_is_available_only_in_interface_settings():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert page.count('id="language-selector"') == 1
@@ -148,7 +164,7 @@ def test_operational_configuration_numeric_controls_are_integer_only():
 
 def test_observability_cards_use_compact_values_and_fill_the_desktop_row():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    assert '#observability.observability-grid{grid-template-columns:repeat(7' in page
+    assert '#observability.observability-grid{grid-template-columns:repeat(8' in page
     assert 'data-card-kind="observability"' in page
     assert 'class="observability-number"' in page
     assert 'class="observability-unit"' in page
@@ -262,10 +278,16 @@ def test_wave_table_prioritizes_compact_operational_columns_without_copy_duratio
 def test_duration_displays_use_the_shared_calendar_clock_format():
     migration = (ROOT / "app/static/index.html").read_text()
     simulation = (ROOT / "app/static/simulation.html").read_text()
-    required = "if(year)units.push(`${year}y`);if(month)units.push(`${month}m`);if(day)units.push(`${day}d`);"
+    formatter = (ROOT / "app/static/duration-format.js").read_text()
     for page in (migration, simulation):
-        assert required in page
-        assert "return units.join(' ')" in page
+        assert 'src="/static/duration-format.js' in page
+        assert "window.RaijinDuration.format" in page
+    assert "global.RaijinDuration = Object.freeze({ format: formatDuration })" in formatter
+    assert "if (remaining === 0) return '0s'" in formatter
+    assert "remaining % HOUR === 0" in formatter
+    assert "return `${remaining / HOUR}h`" in formatter
+    assert "if (hours) return `${pad(hours)}:${pad(minutes)}:${pad(remainingSeconds)}`" in formatter
+    assert "if (minutes) return `${pad(minutes)}:${pad(remainingSeconds)}`" in formatter
     assert "function flightBoardDuration(seconds){return duration(seconds)}" in migration
     assert "function completionDuration(seconds){return seconds===null||seconds===undefined?'—':duration(Math.abs(Number(seconds)))}" in migration
     assert "Real elapsed<b>${duration(r.real_elapsed_seconds)}</b>" in simulation
@@ -489,6 +511,22 @@ def test_queue_project_selector_and_timeline_are_grouped_at_the_right():
     assert "margin-left:auto" in page
     assert "const timelineButton=$('#flight-board-button');if(timelineButton)filter.append(timelineButton)" in page
     assert page.index("filter.append(timelineButton)") > page.index("filter.innerHTML='<label>Projeto")
+
+
+def test_queue_reads_and_activity_are_scoped_by_the_selected_project():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    for path in (
+        "/api/operations", "/api/transfer-queue", "/api/deep-audits",
+        "/api/discovery-queue", "/api/tasks", "/api/events", "/api/readiness",
+    ):
+        assert f"'{path}'" in page.split("const projectScopedReadPaths=", 1)[1].split(";", 1)[0]
+    assert "function projectScopedPath(path,options={})" in page
+    assert "project_id=${encodeURIComponent(projectId)}" in page
+    assert "const requestPath=projectScopedPath(path,options),method=" in page
+    assert "apiReadCache.get(requestPath)" in page
+    assert "apiReadCache.set(requestPath" in page
+    assert "const loadHealthBeforeProjectFilter=loadHealth" not in page
+    assert "Promise.all([loadHealth(),loadDaily()])" in page
 
 
 def test_project_and_source_controls_share_one_card_without_redundant_source_list():
@@ -733,6 +771,21 @@ def test_running_tasks_are_not_rendered_as_alerts_but_stale_leases_are():
     assert "api('/api/observability')" in page
 
 
+def test_deep_audit_panel_keeps_terminal_results_visible():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "Nenhuma auditoria profunda registrada." in page
+    assert "SUCCEEDED:'Concluída'" in page
+    assert "a.elapsed_seconds" in page
+    assert "a.completed_at" in page
+    assert ".audit-progress.completed" in page
+    assert "deepAuditExpandedTasks" in page
+    assert "audit-progress-collapsible" in page
+    assert "audit-progress-active" in page
+    assert "a.task_state===" in page and "RUNNING" in page
+    assert "a.project_name||a.source_name" in page
+    assert "| #${a.wave_id}:" in page
+
+
 def test_cost_estimation_supports_public_aws_prices_and_per_connection_overrides():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="global-pricing-settings"' in page
@@ -941,22 +994,37 @@ def test_final_report_throughput_chart_resolves_its_id_as_a_css_selector():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
 
     assert "const target=$(`#${targetId}`);if(!target)return;" in page
-    assert "Carregar gráfico de taxa de transferência" in page
+    assert "Carregar gráfico de throughput e Raijus" in page
     assert "Velocidade do link" in page
+    assert "Raijus ativos" in page
     assert "throughput-footer" in page
     assert ">Throughput</strong>" in page
-    assert "<b>Util:</b> ${fmt(throughputUtilization)}%" in page
+    assert "<b>Util:</b> ${fmt(limit?averageRate*100/limit:0)}%" in page
     assert "A utilização é a média de throughput em relação ao limite configurado." not in page
     assert 'id="source-throughput-chart-action"' in page
-    assert "target.innerHTML='<p class=\"hint\">Carregando amostras de throughput…</p>'" in page
+    assert "target.innerHTML='<p class=\"hint\">Carregando throughput e Raijus ativos…</p>'" in page
     assert "target.innerHTML='<button id=\"source-throughput-chart-action\"" in page
     assert "action?.replaceWith(target)" not in page
     assert 'id="source-throughput-chart" class="source-throughput-chart" aria-live="polite"><button' in page
     assert "throughput-observed" in page
     assert "throughput-range" not in page
     assert ".throughput-chart text{fill:#dbeafe}" in page
-    assert "const plottedMinimum=Math.min(...points.map(point=>Number(point.average_mbps)||0));" in page
-    assert "const yMin=Math.max(0,plottedMinimum-plottedRange*.1);" in page
+    assert "const rateMaximum=Math.max(limit*1.1" in page
+    assert "point.average_active_raijus" in page
+    assert "point.provenance==='MEASURED'" in page
+
+
+def test_final_report_correlates_link_occupancy_with_active_raijus():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert "Desempenho, throughput e Raijus ativos" in page
+    assert "loadSourceRaijuCorrelationChart" not in page
+    assert "source-raiju-correlation-chart" not in page
+    assert "point.average_active_raijus" in page
+    assert "raiju-workers-observed" in page
+    assert "Tracejado: histórico reconstruído" in page
+    assert "Sólido: medido" in page
+    assert "<b>Raijus:</b> mín." in page
 
 
 def test_discovery_queue_renders_at_most_five_items():

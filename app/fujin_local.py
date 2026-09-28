@@ -1340,9 +1340,9 @@ function renderOverview(value){
   compactMetricGroup(document.querySelector('#overview .fujin-compact-metrics'));
 }
 const auditRows=new Map();let auditPage=Math.max(0,Number(initialUrlState.get('audit_page')||1)-1),auditQuery=(()=>{const query=new URLSearchParams();for(const name of auditFilterNames)if(initialUrlState.get(name))query.set(name,initialUrlState.get(name));return query.toString()})();
-function renderAudit(rows,total){const target=document.getElementById('audit');auditRows.clear();if(!Array.isArray(rows)||!rows.length){target.innerHTML='<div class="fujin-empty">Nenhuma evidência encontrada para os filtros informados.</div>';renderAuditPagination(total);return}for(const row of rows)auditRows.set(row.request_id,row);target.innerHTML=`<div class="fujin-table-wrap"><table class="fujin-table"><thead><tr><th>Data</th><th>Resultado</th><th>Operação</th><th>Recurso</th><th>Transferência</th><th>Latência</th><th>Detalhes</th></tr></thead><tbody>${rows.map(row=>{const failed=Number(row.status_code)>=400;return`<tr><td>${html(localDate(row.created_at))}</td><td><span class="fujin-status ${failed?'http-error':'http-ok'}">${failed?'ERRO':'OK'} ${html(row.status_code)}</span></td><td><b>${html(String(row.operation||'').replaceAll('_',' '))}</b>${row.error_code?`<small><br>${html(row.error_code)}</small>`:''}</td><td class="fujin-audit-resource">${row.bucket?`<b>${html(row.bucket)}</b>`:'—'}${row.object_key?`<small><br>${html(row.object_key)}</small>`:''}</td><td>${row.bytes_transferred==null?'—':html(localBytes(row.bytes_transferred))}</td><td>${row.latency_ms==null?'—':html(row.latency_ms)+' ms'}</td><td><button type="button" class="secondary audit-detail" data-request-id="${html(row.request_id)}">Abrir</button></td></tr>`}).join('')}</tbody></table></div>`;target.querySelectorAll('.audit-detail').forEach(button=>button.addEventListener('click',()=>renderAuditDetails(auditRows.get(button.dataset.requestId))));renderAuditPagination(total)}
-function renderAuditPagination(total){const totalPages=Math.max(1,Math.ceil(Number(total||0)/10)),target=document.getElementById('audit-pagination');target.innerHTML=`<button type="button" class="secondary" id="audit-previous" ${auditPage===0?'disabled':''}>Anterior</button><b>${auditPage+1}/${totalPages}</b><button type="button" class="secondary" id="audit-next" ${auditPage+1>=totalPages?'disabled':''}>Próxima</button>`;document.getElementById('audit-previous').onclick=()=>loadAuditPage(auditPage-1);document.getElementById('audit-next').onclick=()=>loadAuditPage(auditPage+1)}
-async function loadAuditPage(page){if(!auditQuery){document.getElementById('audit').innerHTML='<div class="fujin-empty">Informe ao menos um filtro para pesquisar a auditoria.</div>';document.getElementById('audit-pagination').replaceChildren();return}auditPage=Math.max(0,page);const filters=new URLSearchParams(auditQuery),query=new URLSearchParams(filters);query.set('limit','10');query.set('offset',String(auditPage*10));const [response,countResponse]=await Promise.all([fetch(base+'/api/local/audit?'+query,{headers:headers()}),fetch(base+'/api/local/audit/count?'+filters,{headers:headers()})]);if(!response.ok||!countResponse.ok){alert('Pesquisa de auditoria indisponível');return}const count=await countResponse.json(),total=Number(count.total||0),lastPage=Math.max(0,Math.ceil(total/10)-1);if(auditPage>lastPage)return loadAuditPage(lastPage);updateUrlState({audit_page:auditPage+1});renderAudit(await response.json(),total)}
+function renderAudit(rows,hasNext){const target=document.getElementById('audit');auditRows.clear();if(!Array.isArray(rows)||!rows.length){target.innerHTML='<div class="fujin-empty">Nenhuma evidência encontrada para os filtros informados.</div>';renderAuditPagination(false);return}for(const row of rows)auditRows.set(row.request_id,row);target.innerHTML=`<div class="fujin-table-wrap"><table class="fujin-table"><thead><tr><th>Data</th><th>Resultado</th><th>Operação</th><th>Recurso</th><th>Transferência</th><th>Latência</th><th>Detalhes</th></tr></thead><tbody>${rows.map(row=>{const failed=Number(row.status_code)>=400;return`<tr><td>${html(localDate(row.created_at))}</td><td><span class="fujin-status ${failed?'http-error':'http-ok'}">${failed?'ERRO':'OK'} ${html(row.status_code)}</span></td><td><b>${html(String(row.operation||'').replaceAll('_',' '))}</b>${row.error_code?`<small><br>${html(row.error_code)}</small>`:''}</td><td class="fujin-audit-resource">${row.bucket?`<b>${html(row.bucket)}</b>`:'—'}${row.object_key?`<small><br>${html(row.object_key)}</small>`:''}</td><td>${row.bytes_transferred==null?'—':html(localBytes(row.bytes_transferred))}</td><td>${row.latency_ms==null?'—':html(row.latency_ms)+' ms'}</td><td><button type="button" class="secondary audit-detail" data-request-id="${html(row.request_id)}">Abrir</button></td></tr>`}).join('')}</tbody></table></div>`;target.querySelectorAll('.audit-detail').forEach(button=>button.addEventListener('click',()=>renderAuditDetails(auditRows.get(button.dataset.requestId))));renderAuditPagination(hasNext)}
+function renderAuditPagination(hasNext){const target=document.getElementById('audit-pagination');target.innerHTML=`<button type="button" class="secondary" id="audit-previous" ${auditPage===0?'disabled':''}>Anterior</button><b>Página ${auditPage+1}</b><button type="button" class="secondary" id="audit-next" ${hasNext?'':'disabled'}>Próxima</button>`;document.getElementById('audit-previous').onclick=()=>loadAuditPage(auditPage-1);document.getElementById('audit-next').onclick=()=>loadAuditPage(auditPage+1)}
+async function loadAuditPage(page){if(!auditQuery){document.getElementById('audit').innerHTML='<div class="fujin-empty">Informe ao menos um filtro para pesquisar a auditoria.</div>';document.getElementById('audit-pagination').replaceChildren();return}auditPage=Math.max(0,page);const query=new URLSearchParams(auditQuery);query.set('limit','11');query.set('offset',String(auditPage*10));const response=await fetch(base+'/api/local/audit?'+query,{headers:headers()});if(!response.ok){alert('Pesquisa de auditoria indisponível');return}const rows=await response.json();if(auditPage>0&&!rows.length)return loadAuditPage(auditPage-1);updateUrlState({audit_page:auditPage+1});renderAudit(rows.slice(0,10),rows.length>10)}
 async function loadAuditBuckets(){const response=await fetch(base+'/api/local/audit/buckets',{headers:headers()});if(!response.ok)return;const select=document.getElementById('audit-bucket'),selected=select.value||initialUrlState.get('bucket')||'';select.innerHTML='<option value="">Todos os buckets</option>'+(await response.json()).map(bucket=>`<option value="${html(bucket)}">${html(bucket)}</option>`).join('');if([...select.options].some(option=>option.value===selected))select.value=selected}
 function renderAuditDetails(row){if(!row)return;selectUrlItem('audit',row.request_id);document.getElementById('audit-details-modal-title').textContent=`Auditoria — ${row.operation}`;const field=(label,value)=>`<div class="fujin-connection-field"><small>${label}</small><b>${html(value??'—')}</b></div>`;document.getElementById('audit-details-modal-content').innerHTML=`<section class="fujin-connection-panel"><div class="fujin-connection-grid">${field('Data',localDate(row.created_at))}${field('Resultado HTTP',row.status_code)}${field('Request ID',row.request_id)}${field('Operação',row.operation)}${field('Bucket',row.bucket)}${field('Chave do objeto',row.object_key)}${field('Endpoint',row.endpoint)}${field('Latência',row.latency_ms==null?'—':row.latency_ms+' ms')}${field('Bytes transferidos',row.bytes_transferred==null?'—':localBytes(row.bytes_transferred))}${field('Tentativas',row.retry_count)}${field('Identidade chamadora',row.caller_identity)}${field('Código de erro',row.error_code)}</div><div class="fujin-connection-field"><small>Descrição</small><b>${html(row.detail||'Sem informação adicional.')}</b></div></section>`;openFujinModal('audit-details-modal')}
 function datasetMessage(message,error=false){const target=document.getElementById('dataset-message');target.textContent=message||'';target.classList.toggle('error',error)}
@@ -2352,7 +2352,9 @@ def audit_events(request: Request, request_id: str | None = None,
              "endpoint": event.endpoint, "latency_ms": event.latency_ms, "bytes_transferred": event.bytes_transferred,
              "retry_count": event.retry_count, "caller_identity": event.caller_identity, "error_code": event.error_code,
              "created_at": event.created_at}
-            for event in session.scalars(statement.order_by(LocalAuditEvent.id.desc()).offset(offset).limit(limit))]
+            for event in session.scalars(statement.order_by(
+                LocalAuditEvent.created_at.desc(), LocalAuditEvent.id.desc()
+            ).offset(offset).limit(limit))]
 
 
 @app.get("/api/local/audit/count")
@@ -2563,11 +2565,13 @@ def oci_list_objects(namespace: str, bucket_name: str, request: Request, session
     start = request.query_params.get("start", "")
     limit = max(1, min(1000, int(request.query_params.get("limit", "1000"))))
     rows = list(session.scalars(select(LocalOciObject).where(LocalOciObject.bucket_id == bucket.id).order_by(LocalOciObject.object_key)))
-    rows = [row for row in rows if row.object_key.startswith(prefix) and row.object_key > start][:limit]
+    eligible = [row for row in rows if row.object_key.startswith(prefix) and row.object_key > start]
+    rows = eligible[:limit]
+    next_start_with = rows[-1].object_key if len(eligible) > limit and rows else None
     identifier = audit(session, "OCI_LIST_OBJECTS", 200, bucket.name, prefix); session.commit()
     return {"objects": [{"name": row.object_key, "size": row.size_bytes, "etag": row.etag,
              "timeCreated": as_utc(row.created_at).isoformat().replace("+00:00", "Z"), "storageTier": "Standard"} for row in rows],
-            "opc-request-id": identifier}
+            "nextStartWith": next_start_with, "opc-request-id": identifier}
 
 
 @app.post("/n/{namespace}/b/{bucket_name}/u")
@@ -2720,6 +2724,20 @@ def oci_get_object(namespace: str, bucket_name: str, object_key: str, request: R
     identifier = audit(session, "OCI_HEAD_OBJECT" if request.method == "HEAD" else "OCI_GET_OBJECT", 200, bucket.name, object_key)
     session.commit()
     headers = {"etag": item.etag, "content-length": str(item.size_bytes), "opc-request-id": identifier}
+    # OCI returns user metadata as opc-meta-* response headers. Historical
+    # single-part uploads persisted the suffix, while multipart uploads kept
+    # the complete SDK key. Normalize both representations so old payloads
+    # remain reconcilable without rewriting Fujin's evidence database.
+    try:
+        metadata = json.loads(item.metadata_json or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    for key, value in metadata.items():
+        normalized = str(key).lower()
+        if normalized.startswith("opc-meta-"):
+            normalized = normalized[9:]
+        if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", normalized):
+            headers[f"opc-meta-{normalized}"] = str(value)
     if request.method == "HEAD":
         return Response(status_code=200, headers=headers)
     return StreamingResponse(stream_physical_payload(path), media_type="application/octet-stream", headers=headers)

@@ -189,10 +189,23 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
 - A transferência inicia no piso de cinco **Raijus** e, após restart ou nova
   lane, limita o bootstrap ao menor coorte produtivo conhecido (oito por
   padrão). O autoscaler usa taxa **agregada** em janelas de 20 s: só testa mais
-  um Raiju depois de três amostras abaixo de 95% do limite, espera a acomodação
-  e aprova o crescimento apenas se houver ganho marginal robusto. Entre 95% e
-  97% a lane está no alvo; em 97% ou mais mantém os streams produtivos. Tetos
+  um Raiju depois de 12 amostras abaixo de 90% do alvo, espera um minuto de
+  acomodação e exige outras 12 janelas para validar ganho sustentado. O ruído
+  robusto é calculado dentro de cada coorte, sem confundir a mudança de nível
+  entre baseline e experimento com jitter. Em 90% ou mais a lane cumpre a meta
+  operacional: mantém os streams produtivos, mas não adiciona pressão apenas
+  para perseguir os últimos pontos percentuais do limite. Tetos
   de host, memória e pool PostgreSQL são limites de admissão, não metas.
+  Trocas parciais de objetos contam somente bytes do coorte comparável; uma
+  troca integral renova a baseline sem fabricar taxa. A UI distingue o horário
+  da última amostra real do horário da última atualização do controlador e
+  mostra separadamente o limite configurado e o teto efetivo P95 das seis
+  horas recentes. Esse teto só governa decisões após ao menos 180 medições e
+  quando já comprova 85% do contrato; uma lane degradada não pode redefinir
+  baixa utilização como sucesso. Uma experiência sem ganho volta ao último
+  coorte aprovado; depois de seis horas, 12 amostras novas ainda abaixo de 90% autorizam uma
+  única rechecagem serial, evitando tanto bloqueio eterno quanto crescimento
+  oscilante.
 - O reforecast das waves futuras usa a capacidade histórica da lane. Uma taxa
   degradada recente só substitui essa referência após confirmação em duas
   janelas independentes de bytes agregados. Valores repetidos apenas para
@@ -203,6 +216,15 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   para, no mínimo, a janela pública do tier somada à margem de segurança a
   partir da nova decisão; a submissão AWS continua sendo uma tarefa durável e
   separada, governada por slots e pelo estoque da lane.
+- O reforecast de calendário persiste somente deslocamentos de pelo menos 15
+  minutos ou 5% da duração prevista, o que for maior. Eventos repetidos são
+  coalescidos por uma hora; deadlines monotônicos, submissões AWS e evidências
+  observadas continuam imutáveis.
+- APIs, timeline e relatórios distinguem o tempo de serviço exclusivo previsto
+  para a wave (`predicted_transfer_service_seconds`) do tempo de calendário
+  observado enquanto ela compartilha a lane
+  (`transfer_calendar_elapsed_seconds`). A capacidade aprendida continua sendo
+  source-wide e usa a união de segmentos, sem somar trabalho paralelo.
 - Cada wave dinâmica também persiste o seu **último prazo seguro de submissão
   AWS**, calculado pela janela pública completa do tier mais a margem
   operacional. Esse prazo só pode avançar (nunca ser postergado por um
@@ -210,8 +232,10 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   lane abaixo do mínimo saudável, a liberação da wave prevalece sobre o teto
   heurístico de estoque; se todos os slots físicos estiverem ocupados, o
   Raikou registra explicitamente o risco de continuidade em vez de ocultar o
-  atraso. Essa regra usa somente o contrato AWS conhecido pelo Raijin, nunca
-  tempos internos do Fujin.
+  atraso. Cada violação gera uma evidência única e também aparece no card de
+  observabilidade, nos detalhes sob demanda e na métrica Prometheus
+  `raijin_restore_submission_deadline_missed_waves`. Essa regra usa somente o
+  contrato AWS conhecido pelo Raijin, nunca tempos internos do Fujin.
 - A tarefa durável da lane contínua pode manter uma wave como âncora histórica,
   mas é reancorada automaticamente para a próxima wave com backlog quando a
   anterior conclui. Assim a console não mostra trabalho vivo em uma wave
@@ -236,9 +260,22 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
 - Calcula SHA-256 durante a leitura da origem e valida a aceitação criptográfica
   pelo OCI durante o envio, sem uma segunda leitura integral do destino.
 - Executa reconciliação sob demanda do destino OCI por chave, tamanho e
-  proveniência gravada nos metadados.
+  proveniência gravada nos metadados. Na topologia LOCAL, a listagem pagina
+  todos os objetos e o HEAD aceita os formatos históricos de metadata de
+  uploads simples e multipart; a rota explícita possui janela HTTP própria de
+  dez minutos sem ampliar o timeout das demais APIs.
 - Executa auditoria profunda opcional SHA-256, que relê o destino; exige aviso e
-  confirmação explícita por ser lenta e custosa.
+  confirmação explícita por ser lenta e custosa. O Raikou renova o lease por
+  heartbeat durante toda a releitura, persiste progresso por objeto e mantém o
+  resultado concluído no painel de auditorias. Em shutdown controlado, para em
+  uma fronteira segura de leitura, devolve imediatamente a tarefa à fila sem
+  consumir uma tentativa e preserva os objetos já verificados; o objeto
+  interrompido é relido desde o início. Waves com auditoria aguardando
+  ou em execução preservam `VERIFICATION_QUEUED` na lista, sem serem rebaixadas
+  a `COMPLETED` pela reconciliação da transferência. Uma execução sem divergências
+  deixa a wave em `VERIFIED`; a reconciliação posterior da lane preserva esse
+  estado e o histórico impede que a mesma wave seja oferecida novamente como
+  se nunca tivesse sido auditada.
 - Ao encontrar divergência no destino, reabre somente os objetos e waves
   afetados para reprocessamento.
 - Ao encontrar arquivo modificado no S3 que já tenha histórico de migração,
@@ -290,6 +327,15 @@ ajuda descreve finalidade, impacto operacional e condição de uso, sem exigir
 que o operador saia da console. Exemplos: discovery,
 reconciliação OCI, restores dinâmicos, fila completa, inventário de bordo,
 recuperação de leases, Secrets, pré-check e tarifas públicas.
+
+Contadores de duração, estimativas e tempos decorridos usam um componente
+único nas consoles RAIJIN e FUJIN. A apresentação cresce de segundos para
+minutos, horas, dias, meses e anos, omitindo unidades superiores ainda vazias
+e sufixos compostos apenas por zeros. Assim, uma duração corrente pode aparecer
+como `12s`, `12:32` ou `12:32:12`, enquanto uma janela operacional exata é
+mantida de forma compacta, como `48h`, sem `0d` ou `00:00:00` artificiais.
+Meses e anos de duração são unidades fixas de 30 e 365 dias; datas e instantes
+de calendário continuam usando a representação local completa.
 
 ### Fluxo padrão por source
 
@@ -457,6 +503,10 @@ são pseudonimizados, para permitir correlação sem registrar o handle bruto.
 - O *governance worker* real executará o polling adaptativo. O FUJIN apenas
   responderá ao `Describe`, `List` ou `Head`; não alterará diretamente a wave,
   o objeto ou a task no banco do RAIJIN.
+- Antes da primeira disponibilidade, o Raijin pode usar sua própria previsão
+  histórica para espaçar consultas e inicia uma guarda conservadora antes do
+  horário previsto. Na ausência de histórico, usa somente a janela pública do
+  tier. Datas sorteadas internamente pelo Fujin nunca entram nesse cálculo.
 - Isso permitirá medir quantidade de consultas, atraso entre disponibilidade e
   detecção e comportamento das duas estratégias de liberação de arquivos.
 
@@ -512,7 +562,9 @@ são pseudonimizados, para permitir correlação sem registrar o handle bruto.
 - Objetos incompletos, divergentes, corrompidos ou com partes fora de ordem
   permanecerão identificados como falha e não serão promovidos silenciosamente.
 - `List`, `Head`, validação do destino e reconciliação consultarão o estado do
-  bucket virtual persistido.
+  bucket virtual persistido. `List` fornece cursor `nextStartWith` e `Head`
+  devolve os metadados `opc-meta-*` normalizados inclusive para objetos
+  multipart gravados por releases anteriores.
 - O cenário poderá representar objeto já existente, objeto ausente, tamanho ou
   metadata divergente, checksum inválido e indisponibilidade do bucket.
 - A validação deverá reabrir somente os objetos afetados, permitindo provar o
@@ -597,6 +649,40 @@ são pseudonimizados, para permitir correlação sem registrar o handle bruto.
   tarefa ou discovery executável. Voltar ao modo `REAL` restaura o banco e as
   configurações reais sem misturar registros entre os ambientes.
 
+## Pacote formal de encerramento do projeto
+
+- O projeto oferece um **Pacote de encerramento** destinado ao cliente, sem
+  exigir acesso ao Raijin. A prévia explicita todos os bloqueios; a emissão
+  final exige inventários concluídos, entrega e integridade de todos os objetos,
+  ausência de waves, tarefas e retries pendentes e reconciliação OCI posterior
+  ao último discovery e à última entrega. Sources desativadas continuam no
+  escopo e são identificadas como tal.
+- Cada emissão cria uma revisão imutável, com ID público, snapshot UTC, versão
+  do Raijin e hashes SHA-256. Reemissões preservam as revisões anteriores e
+  exigem motivo. O PDF executivo consolida escopo, entrega, integridade,
+  desempenho e declaração de encerramento. O ZIP
+  técnico contém o PDF, manifesto JSON, resumo JSON, CSVs de sources, waves,
+  inventário, reconciliação e exceções, além de `checksums.sha256`.
+  Células CSV potencialmente interpretáveis como fórmulas são neutralizadas.
+- A auditoria profunda é completamente opcional e sua ausência não interfere
+  em gate, aviso, status ou emissão. Tarifas e custos permanecem exclusivamente
+  na interface operacional e não entram nos artefatos do cliente. Falha de
+  entrega, divergência de destino ou evidência desatualizada continuam
+  bloqueando a emissão. O pacote usa apenas evidências persistidas pelo Raijin
+  e contratos públicos AWS/OCI, sem conhecimento de simuladores. O
+  **Resultado final** da source permanece diagnóstico operacional; somente o
+  pacote versionado do projeto é o documento formal de entrega.
+- Esse diagnóstico oferece, sob demanda, um gráfico histórico unificado de
+  throughput e Raijus ativos. O eixo direito apresenta Mbps, o esquerdo mostra
+  workers e uma referência tracejada marca o limite de rede congelado para a
+  execução. Medições independentes de progresso têm prioridade e aparecem em
+  linha sólida. O período anterior à introdução dessa telemetria é preservado
+  por reconstrução a partir de bytes e intervalos duráveis da lane, sempre em
+  linha tracejada e identificado como reconstruído. Essa reconstrução é
+  limitada pelo contrato de link congelado para não criar picos artificiais;
+  medições diretas continuam podendo comprovar picos reais. Tooltips e o rodapé
+  são calculados pela mesma série efetivamente desenhada.
+
 ## Capacidades em evolução
 
 Estas capacidades já têm base implementada, mas devem continuar sendo refinadas
@@ -638,9 +724,15 @@ com testes de escala e operação real:
 
 ## Referências relacionadas
 
+- A fila de Deep Audit prioriza visualmente a wave em processamento e mantém seus indicadores sempre abertos. As waves aguardando e os resultados concluídos permanecem compactos e expansíveis, ordenados respectivamente pela posição da fila e pela conclusão mais recente; cada linha identifica o projeto e a wave sem depender do nome da source.
+- O projeto selecionado também define o escopo de leitura da tela **Queue**: filas de restore/transferência, Deep Audit e discovery, além das tarefas e atividades recentes, exibem somente waves e sources pertencentes ao projeto. A seleção é um filtro operacional de leitura; a lane física e seus schedulers continuam globais.
+- O readiness usa o mesmo projeto selecionado e valida somente suas sources ativas, conexões AWS referenciadas e buckets OCI de destino. Sources desativadas ou pertencentes a outro projeto não geram falso alerta no contexto atual.
+- A auditoria Fujin continua estritamente sob demanda. A interface pagina com uma linha sentinela, sem executar `COUNT(*)` integral a cada página; índices compostos por bucket/objeto, data e id sustentam buscas temporais sobre históricos grandes.
+
 - [Arquitetura](architecture.md)
 - [Conexões AWS](aws-connections.md)
 - [Estimativas de custo](cost-estimates.md)
 - [Deploy e instalação](deployment.md)
+- [Pacote de encerramento](project-closure-package.md)
 - [Recuperação](recovery-runbook.md)
 - [Plano de validação](validation-test-plan.md)

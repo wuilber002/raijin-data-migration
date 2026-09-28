@@ -54,6 +54,7 @@ from app.backend_contracts import (
     ReadRangeRequest,
     SubmitRestoreBatchRequest,
 )
+from app.duration_format import format_duration
 from app.simulator_admin import SimulatorAdminClient, SimulatorAdminError
 from app.simulator_ports import SimulatedDestinationPort, SimulatedSourcePort, SimulatorTransportError
 from app.main import (
@@ -114,22 +115,34 @@ CONTINUOUS_SETTLEMENT_GRACE_SECONDS = 30
 # Critical streams keep the lane, while non-critical streams retain a small
 # progress floor so sockets and multipart transactions remain healthy.
 CONTINUOUS_NONCRITICAL_RATE_FLOOR_BYTES_PER_SECOND = 1024 * 1024
-# Both normal and deadline-priority operation scale up below 95%. Once the
-# lane is occupied, capacity is held: high utilization is proof of a useful
-# Raiju, never a reason to risk throughput by removing it proactively.
-CRITICAL_CONCURRENCY_SCALE_UP_UTILIZATION = .95
+# Both normal and deadline-priority operation open a capacity experiment only
+# after a robust window remains below the operational floor. At 90% or more
+# the lane is already healthy: keep the proven Raijus, but do not add pressure
+# merely to chase the last few percent of a noisy provider/network ceiling.
+# High utilization is never a reason to remove a productive Raiju.
+CRITICAL_CONCURRENCY_SCALE_UP_UTILIZATION = .90
 CRITICAL_CONCURRENCY_STABLE_SAMPLES = 3
 # The normal lane uses the aggregate, measured rate—not the per-object rate
 # after the configured bandwidth limiter has divided the link.  The gap
 # between scale-up and scale-down is intentional hysteresis: it lets a
 # recently changed concurrency settle before a new decision is made.
-LANE_CONCURRENCY_SCALE_UP_UTILIZATION = .95
-LANE_CONCURRENCY_STABLE_SAMPLES = 3
-LANE_CONCURRENCY_TARGET_UTILIZATION = .96
+LANE_CONCURRENCY_SCALE_UP_UTILIZATION = .90
+LANE_CONCURRENCY_STABLE_SAMPLES = 12
+LANE_EXPERIMENT_VALIDATION_SAMPLES = 12
+LANE_CONCURRENCY_TARGET_UTILIZATION = .90
 LANE_CONCURRENCY_SATURATED_UTILIZATION = .97
 LANE_RATE_SAMPLE_WINDOW_SECONDS = 20
 LANE_EXPERIMENT_SETTLE_SECONDS = 60
 LANE_EXPERIMENT_COOLDOWN_SECONDS = 60
+# A rejected extra Raiju is not retried on every object boundary, but neither
+# does one noisy cohort become a permanent capacity verdict. Six hours gives
+# the lane a materially different object mix before one controlled re-probe.
+LANE_GROWTH_REPROBE_SECONDS = 6 * 60 * 60
+# The observed ceiling is allowed to replace the configured target only after
+# one hour of independent windows and only when it is already close enough to
+# the configured link to prove that the lane was genuinely exercised.
+LANE_EFFECTIVE_CEILING_MIN_SAMPLES = 180
+LANE_EFFECTIVE_CEILING_MIN_CONFIGURED_RATIO = .85
 # Live progress remains responsive in the UI while avoiding a database commit
 # from every Raiju every two seconds. The autoscaler uses 20-second aggregate
 # windows, so a five-second checkpoint cadence preserves control fidelity.
@@ -220,6 +233,8 @@ class LaneConcurrencyController:
         self.approved_target = self.target
         self._samples: list[float] = []
         self._growth_baseline_mbps: float | None = None
+        self._growth_baseline_noise_mbps = 0.0
+        self.decision_ceiling_mbps = self.link_mbps
         self._post_growth_mbps: list[float] = []
         self._experiment_started_at: datetime | None = None
         self._cooldown_until: datetime | None = None
@@ -243,6 +258,10 @@ class LaneConcurrencyController:
         self.target = max(self.minimum_workers, int(state.target_workers or self.approved_target))
         self.last_marginal_gain_mbps = float(state.marginal_gain_mbps or 0)
         self._growth_baseline_mbps = float(state.baseline_mbps) if state.experiment_target else None
+        self._growth_baseline_noise_mbps = float(state.baseline_noise_mbps or 0)
+        self.decision_ceiling_mbps = max(
+            1.0, float(state.decision_ceiling_mbps or self.link_mbps)
+        )
         # SQLite intentionally returns ``DateTime(timezone=True)`` columns
         # without tzinfo.  The local Fujin acceptance path therefore needs
         # the same UTC normalization as PostgreSQL-backed production paths.
@@ -254,26 +273,44 @@ class LaneConcurrencyController:
             _utc_timestamp(state.cooldown_until) if state.cooldown_until else None
         )
         self._growth_blocked = bool(state.growth_blocked)
+        if self._growth_blocked and self._cooldown_until is None:
+            # Upgrade states written by releases where a rejected experiment
+            # meant "blocked until the lane drains". Anchor the new bounded
+            # cooldown to the last durable controller update; if that evidence
+            # is already old, fresh samples may begin immediately.
+            legacy_anchor = (
+                _utc_timestamp(state.updated_at) if state.updated_at else utcnow()
+            )
+            self._cooldown_until = legacy_anchor + timedelta(
+                seconds=LANE_GROWTH_REPROBE_SECONDS
+            )
         try:
             self._samples = [float(value) for value in json.loads(state.sample_history_json or "[]")][-LANE_CONCURRENCY_STABLE_SAMPLES:]
-            self._post_growth_mbps = [float(value) for value in json.loads(state.experiment_samples_json or "[]")][-LANE_CONCURRENCY_STABLE_SAMPLES:]
+            self._post_growth_mbps = [float(value) for value in json.loads(state.experiment_samples_json or "[]")][-LANE_EXPERIMENT_VALIDATION_SAMPLES:]
         except (TypeError, ValueError):
             self._samples, self._post_growth_mbps = [], []
 
     def persist(self, state: TransferAutoscaleState, *, active_workers: int,
-                effective_cap: int, observed_mbps: float, capacity_reason: str,
-                reason: str) -> None:
+                effective_cap: int, observed_mbps: float, sample_is_new: bool,
+                capacity_reason: str, reason: str) -> None:
         state.approved_workers = int(self.approved_target)
         state.target_workers = int(self.target)
         state.active_workers = int(active_workers)
         state.effective_worker_cap = int(effective_cap)
         state.observed_lane_mbps = float(observed_mbps)
-        state.observed_at = utcnow() if observed_mbps > 0 else state.observed_at
+        # ``updated_at`` describes controller activity; ``observed_at`` is
+        # evidence time and may advance only with a new aggregate-byte window.
+        # Refreshing it while merely carrying the last rate forward made a
+        # days-old sample look current in the API and UI.
+        if sample_is_new and observed_mbps > 0:
+            state.observed_at = utcnow()
         state.sample_history_json = json.dumps(self._samples[-LANE_CONCURRENCY_STABLE_SAMPLES:], separators=(",", ":"))
         state.baseline_mbps = float(self._growth_baseline_mbps or 0)
+        state.baseline_noise_mbps = float(self._growth_baseline_noise_mbps)
+        state.decision_ceiling_mbps = float(self.decision_ceiling_mbps)
         state.experiment_target = int(self.target) if self._growth_baseline_mbps is not None else None
         state.experiment_started_at = self._experiment_started_at if self._growth_baseline_mbps is not None else None
-        state.experiment_samples_json = json.dumps(self._post_growth_mbps[-LANE_CONCURRENCY_STABLE_SAMPLES:], separators=(",", ":"))
+        state.experiment_samples_json = json.dumps(self._post_growth_mbps[-LANE_EXPERIMENT_VALIDATION_SAMPLES:], separators=(",", ":"))
         state.cooldown_until = self._cooldown_until
         state.growth_blocked = bool(self._growth_blocked)
         state.marginal_gain_mbps = float(self.last_marginal_gain_mbps)
@@ -283,6 +320,7 @@ class LaneConcurrencyController:
     def desired_workers(self, available_objects: int, *, active_workers: int,
                         observed_mbps: float, sample_is_new: bool = True,
                         effective_cap: int | None = None,
+                        operational_ceiling_mbps: float | None = None,
                         now: datetime | None = None) -> tuple[int, str | None]:
         now = now or utcnow()
         available_objects = max(0, int(available_objects))
@@ -299,12 +337,28 @@ class LaneConcurrencyController:
         self.approved_target = min(ceiling, max(floor, self.approved_target or floor))
         active_workers = max(0, int(active_workers))
         observed_mbps = max(0.0, float(observed_mbps))
+        candidate_ceiling = max(1.0, float(operational_ceiling_mbps or self.link_mbps))
+        # Never let an empirical estimate exceed the configured contract or
+        # collapse into a self-fulfilling low target.
+        self.decision_ceiling_mbps = min(
+            self.link_mbps,
+            max(self.link_mbps * LANE_EFFECTIVE_CEILING_MIN_CONFIGURED_RATIO,
+                candidate_ceiling),
+        )
 
         # Never promote stale object rates to independent evidence. The real
         # caller supplies one measurement only after a new aggregate window;
         # the default keeps focused unit tests ergonomic.
         if not sample_is_new or observed_mbps <= 0:
             return self.target, None
+        if (self._growth_blocked and self._cooldown_until
+                and now >= self._cooldown_until):
+            # Evidence collected before the long cooldown is not independent
+            # enough to reopen capacity. Start a fresh three-window sequence;
+            # persisting ``cooldown_until=None`` also lets a restarted Raiju
+            # continue that sequence without reusing the rejected cohort.
+            self._samples = []
+            self._cooldown_until = None
         self._samples.append(observed_mbps)
         self._samples = self._samples[-LANE_CONCURRENCY_STABLE_SAMPLES:]
         if active_workers < self.target:
@@ -317,29 +371,35 @@ class LaneConcurrencyController:
             if self._experiment_started_at and (now - self._experiment_started_at).total_seconds() < LANE_EXPERIMENT_SETTLE_SECONDS:
                 return self.target, None
             self._post_growth_mbps.append(observed_mbps)
-            if len(self._post_growth_mbps) < LANE_CONCURRENCY_STABLE_SAMPLES:
+            if len(self._post_growth_mbps) < LANE_EXPERIMENT_VALIDATION_SAMPLES:
                 return self.target, None
             post = self._median(self._post_growth_mbps)
             self.last_marginal_gain_mbps = round(post - self._growth_baseline_mbps, 2)
             required_gain = max(
                 self.minimum_marginal_gain_mbps,
                 self.link_mbps * .015,
-                2 * self._noise(self._samples + self._post_growth_mbps),
+                2 * max(
+                    self._growth_baseline_noise_mbps,
+                    self._noise(self._post_growth_mbps),
+                ),
             )
             self._growth_baseline_mbps = None
+            self._growth_baseline_noise_mbps = 0.0
             self._post_growth_mbps = []
             self._experiment_started_at = None
             self._cooldown_until = now + timedelta(seconds=LANE_EXPERIMENT_COOLDOWN_SECONDS)
             if self.last_marginal_gain_mbps < required_gain:
                 self._growth_blocked = True
+                self._cooldown_until = now + timedelta(seconds=LANE_GROWTH_REPROBE_SECONDS)
                 # Do not kill a productive stream. Future admissions naturally
                 # return to the previously approved target at object boundaries.
-                if post / self.link_mbps < LANE_CONCURRENCY_SATURATED_UTILIZATION:
+                if post / self.decision_ceiling_mbps < LANE_CONCURRENCY_SATURATED_UTILIZATION:
                     self.target = min(self.target, self.approved_target)
                 return self.target, (
                     f"lane experiment rejected at {self.target}: marginal gain "
                     f"{self.last_marginal_gain_mbps:.2f} Mbps is below robust minimum "
-                    f"{required_gain:.2f} Mbps; growth is blocked pending a new lane epoch"
+                    f"{required_gain:.2f} Mbps; growth is blocked for a six-hour "
+                    "cooldown and three fresh under-target samples"
                 )
             self.approved_target = self.target
             return self.target, (
@@ -348,21 +408,31 @@ class LaneConcurrencyController:
             )
 
         if self._growth_blocked:
-            return self.target, None
+            if self._cooldown_until and now < self._cooldown_until:
+                return self.target, None
+            # Re-open exactly one serial experiment only when fresh evidence
+            # still says the configured link is under-filled. High utilization
+            # is never a reason to remove or needlessly probe Raijus.
+            if (len(self._samples) < LANE_CONCURRENCY_STABLE_SAMPLES
+                    or max(self._samples) >= self.decision_ceiling_mbps * LANE_CONCURRENCY_SCALE_UP_UTILIZATION):
+                return self.target, None
+            self._growth_blocked = False
+            self._cooldown_until = None
         if self._cooldown_until and now < self._cooldown_until:
             return self.target, None
         if len(self._samples) < LANE_CONCURRENCY_STABLE_SAMPLES:
             return self.target, None
         baseline = self._median(self._samples)
-        utilization = baseline / self.link_mbps
+        utilization = baseline / self.decision_ceiling_mbps
         # All windows must be below the lower boundary. A single low sample
         # after a saturated lane is ordinary transfer jitter, not capacity
         # evidence.
         if (utilization < LANE_CONCURRENCY_SCALE_UP_UTILIZATION
-                and max(self._samples) < self.link_mbps * LANE_CONCURRENCY_SCALE_UP_UTILIZATION
+                and max(self._samples) < self.decision_ceiling_mbps * LANE_CONCURRENCY_SCALE_UP_UTILIZATION
                 and self.target < ceiling):
             self.target += 1
             self._growth_baseline_mbps = baseline
+            self._growth_baseline_noise_mbps = self._noise(self._samples)
             self._post_growth_mbps = []
             self._experiment_started_at = now
             return self.target, (
@@ -477,7 +547,7 @@ class SimulatedNetworkRecoveryPending(RuntimeError):
         self.retry_after_virtual_seconds = max(1, int(retry_after_virtual_seconds))
         super().__init__(
             "Simulated network outage; advanced the isolated virtual clock "
-            f"by {self.retry_after_virtual_seconds}s to its recovery point"
+            f"by {format_duration(self.retry_after_virtual_seconds)} to its recovery point"
         )
 
 
@@ -830,7 +900,17 @@ def claim_task(session, lease_seconds: int, allowed_kinds: frozenset[str] | None
                              if candidate.wave.source_id == selected_item.source_id), None)
     if not task:
         return None
+    resumed_continuous = (
+        task.kind == "TRANSFER_CONTINUOUS"
+        and str(task.error or "").startswith("Raiju graceful shutdown")
+        and (task.state == TaskState.READY or task.worker_id == WORKER_ID)
+    )
     task.state, task.worker_id = TaskState.RUNNING, WORKER_ID
+    if resumed_continuous:
+        # The durable shutdown event remains the audit evidence. Once the
+        # dispatcher is actually reclaimed, presenting that recovered
+        # condition as its current error is misleading.
+        task.error = None
     task.attempts += 1
     task.lease_expires_at = now + timedelta(seconds=lease_seconds)
     event(session, "TASK_CLAIMED", f"Task {task.id} claimed by {WORKER_ROLE} worker", wave_id=task.wave_id)
@@ -1006,7 +1086,30 @@ def retry(session, task: Task, error: Exception | str, seconds: int | None = Non
         # obscured an otherwise healthy retry.
         if wave and wave.status == "TRANSFERRING":
             wave.status = "TRANSFERRING"
-    event(session, "TASK_RETRY_QUEUED", f"{task.kind} retry in {delay}s: {task.error}", wave_id=task.wave_id)
+    event(session, "TASK_RETRY_QUEUED", f"{task.kind} retry in {format_duration(delay)}: {task.error}", wave_id=task.wave_id)
+    session.commit()
+
+
+def release_task_for_graceful_shutdown(session, task: Task, message: str) -> None:
+    """Return cooperative work immediately without charging a failed attempt."""
+    now = utcnow()
+    task.state = TaskState.READY
+    task.worker_id = None
+    task.lease_expires_at = None
+    # Preserve the task's original FIFO position. Replacing ``available_at``
+    # with the shutdown instant moved a partially audited wave behind every
+    # later queued audit, so a deployment resumed a new wave instead of the
+    # one whose durable object checkpoints it had just released.
+    if task.available_at is None or _utc_timestamp(task.available_at) > now:
+        task.available_at = now
+    task.error = None
+    task.attempts = max(0, int(task.attempts or 0) - 1)
+    event(
+        session,
+        "TASK_RELEASED_FOR_GRACEFUL_SHUTDOWN",
+        message,
+        wave_id=task.wave_id,
+    )
     session.commit()
 
 
@@ -1169,7 +1272,7 @@ def advance_simulation_clock(session, source: Source, seconds: float, reason: st
     event(
         session,
         "SIMULATION_CLOCK_ADVANCED",
-        f"Virtual clock advanced {bounded:.0f}s for {reason}",
+        f"Virtual clock advanced {format_duration(bounded)} for {reason}",
         source_id=source.id,
         wave_id=wave.id if wave else None,
     )
@@ -1694,8 +1797,8 @@ def record_restore_forecast_delay(session, settings, wave: Wave, attempt: Restor
     event(
         session,
         "RESTORE_FORECAST_DELAYED",
-        f"No HeadObject restore availability after {elapsed_seconds}s versus expected "
-        f"{expected_seconds}s; {pending_objects} object(s) remain pending. "
+        f"No HeadObject restore availability after {format_duration(elapsed_seconds)} versus expected "
+        f"{format_duration(expected_seconds)}; {pending_objects} object(s) remain pending. "
         f"Reforecasted {replanned} mutable future wave(s); the AWS submission was not changed.",
         source_id=wave.source_id,
         wave_id=wave.id,
@@ -2170,6 +2273,7 @@ def poll_restore_simulated(
             partial_availability=bool(ready_for_transfer),
             transfer_strategy=wave.transfer_release_policy,
             pending_objects=pending,
+            predicted_first_seconds=wave.predicted_restore_first_seconds,
         )
         # The polling policy is expressed in operational (virtual) time. The
         # simulator clock is paused between durable decisions, so move it by
@@ -2219,7 +2323,7 @@ def poll_restore_simulated(
         # The next durable poll is intentionally soon in real time; virtual
         # time has already advanced by the controlled interval above.
         delay = 1
-        delay_label = f"{virtual_delay}s virtual" if virtual_delay < 60 else f"{math.ceil(virtual_delay / 60)} virtual minute(s)"
+        delay_label = f"{format_duration(virtual_delay)} virtual"
         retry(
             session,
             task,
@@ -2400,8 +2504,9 @@ def poll_restore(session, task: Task, settings) -> None:
             partial_availability=bool(ready_for_transfer),
             transfer_strategy=wave.transfer_release_policy,
             pending_objects=int(pending),
+            predicted_first_seconds=wave.predicted_restore_first_seconds,
         )
-        retry(session, task, f"{pending} object(s) still unavailable after restore; checked with {poll_method}; next availability poll in {delay // 60} minutes", delay)
+        retry(session, task, f"{pending} object(s) still unavailable after restore; checked with {poll_method}; next availability poll in {format_duration(delay)}", delay)
         return
     wave.status = "RESTORED"
     expiries = [obj.restore_expires_at for obj in objects if obj.restore_expires_at]
@@ -3210,7 +3315,7 @@ def _continuous_raiju_worker_count(session, source: Source, available_objects: i
     # batch target. Historical targets can be inflated by an older model or a
     # transient restart; treating them as capacity evidence would recreate 30+
     # Raijus before a single fresh aggregate measurement. The controller adds
-    # one cooperative slot only after three samples below 95%.
+    # one cooperative slot only after 12 samples below the 90% operational floor.
     bootstrap_target = min(previous_target, max(floor, RAIJU_BOOTSTRAP_WORKERS))
     chosen = min(RAIJU_MAX_WORKERS, available_objects, bootstrap_target, capacity.effective_cap)
     chosen = max(floor, chosen)
@@ -3318,7 +3423,13 @@ def _continuous_aggregate_rate_sample(session, state: TransferAutoscaleState,
     # high lane rate. It becomes eligible on the next independent window.
     delta = sum(max(0, value - previous[key]) for key, value in current.items() if key in previous)
     if delta <= 0:
-        # Keep the prior starting point to span a transient checkpoint gap.
+        # Roll the baseline even when no comparable object progressed.  In
+        # particular, a complete object-set rotation has no intersection with
+        # the former snapshot; keeping that snapshot forever prevents every
+        # later object from ever becoming measurable.  This refresh is not a
+        # throughput sample and therefore must not move ``observed_at``.
+        state.sample_at = now
+        state.sample_progress_json = json.dumps(current, separators=(",", ":"))
         return previous_rate, False
     rate = round((delta * 8) / elapsed / 1_000_000, 2)
     state.sample_at = now
@@ -3332,6 +3443,34 @@ def _continuous_aggregate_rate_sample(session, state: TransferAutoscaleState,
         active_workers=len(current),
     ))
     return rate, True
+
+
+def _continuous_operational_ceiling_mbps(session, source_id: int,
+                                         configured_mbps: float,
+                                         *, now: datetime) -> tuple[float, int]:
+    """Return a trustworthy recent P95, or the configured link contract.
+
+    A low-throughput epoch cannot redefine success downward. The empirical
+    ceiling is accepted only after at least one hour of independent 20-second
+    windows and when its P95 already proves at least 85% of the configured
+    link. This lets an efficient cohort satisfy the >=90% operational goal
+    without adding pressure or making a degraded lane look healthy.
+    """
+    configured = max(1.0, float(configured_mbps))
+    samples = list(session.scalars(select(
+        TransferLaneMeasurement.aggregate_mbps
+    ).where(
+        TransferLaneMeasurement.source_id == source_id,
+        TransferLaneMeasurement.observed_at >= now - timedelta(hours=6),
+        TransferLaneMeasurement.aggregate_mbps > 0,
+    ).order_by(TransferLaneMeasurement.observed_at.desc()).limit(1080)))
+    if len(samples) < LANE_EFFECTIVE_CEILING_MIN_SAMPLES:
+        return configured, len(samples)
+    ordered = sorted(float(value) for value in samples)
+    p95 = ordered[min(len(ordered) - 1, math.ceil(len(ordered) * .95) - 1)]
+    if p95 < configured * LANE_EFFECTIVE_CEILING_MIN_CONFIGURED_RATIO:
+        return configured, len(samples)
+    return min(configured, p95), len(samples)
 
 
 def _continuous_item_query(source_id: int, now: datetime,
@@ -3831,7 +3970,7 @@ def reconcile_completed_continuous_task_anchors(session, source: Source) -> int:
         .join(Wave)
         .where(
             Wave.source_id == source.id,
-            Wave.status == "COMPLETED",
+            Wave.status.in_(["COMPLETED", "VERIFIED", "VERIFICATION_QUEUED"]),
             Task.kind == "TRANSFER_CONTINUOUS",
             Task.state.in_([TaskState.READY, TaskState.RUNNING]),
         )
@@ -3896,17 +4035,34 @@ def reconcile_continuous_source_waves(session, source: Source) -> None:
             ObjectRecord.wave_id == wave.id,
             ObjectRecord.state.notin_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]),
         )) or 0
+        verification_pending = session.scalar(select(Task.id).where(
+            Task.wave_id == wave.id,
+            Task.kind == "VERIFY_WAVE",
+            Task.state.in_([TaskState.READY, TaskState.RUNNING]),
+        ).order_by(Task.id.desc()).limit(1))
         if reapproval:
             wave.status = "RESTORE_REAPPROVAL_REQUIRED"
+        elif verification_pending:
+            # Transfer completion and deep-audit lifecycle are independent.
+            # Once an audit is queued, ordinary lane reconciliation must not
+            # present the wave as merely completed while its VERIFY_WAVE task
+            # is waiting or already owned by Raikou.
+            wave.status = "VERIFICATION_QUEUED"
         elif not remaining:
+            unverified = session.scalar(select(func.count(ObjectRecord.id)).where(
+                ObjectRecord.wave_id == wave.id,
+                ObjectRecord.state != ObjectState.VERIFIED,
+            )) or 0
+            terminal_status = "VERIFIED" if not unverified else "COMPLETED"
             recovered_failures = int(session.scalar(select(func.count(Task.id)).where(
                 Task.wave_id == wave.id, Task.state == TaskState.FAILED,
             )) or 0)
-            if wave.status != "COMPLETED":
-                wave.status = "COMPLETED"
+            if wave.status != terminal_status:
+                wave.status = terminal_status
                 if runtime_context.is_simulation:
                     wave.transfer_completed_virtual_at = _continuous_source_now(source)
-                event(session, "CONTINUOUS_WAVE_COMPLETED", "All wave objects reached OCI through the continuous lane.", source_id=source.id, wave_id=wave.id)
+                if terminal_status == "COMPLETED":
+                    event(session, "CONTINUOUS_WAVE_COMPLETED", "All wave objects reached OCI through the continuous lane.", source_id=source.id, wave_id=wave.id)
             if recovered_failures and not session.scalar(select(Event.id).where(
                 Event.wave_id == wave.id, Event.kind == "TASK_FAILURE_RECOVERED",
             ).limit(1)):
@@ -4138,9 +4294,13 @@ def transfer_continuous(session, task: Task, settings) -> None:
             # implementation, the guard is an actual ceiling here.
             capacity = _raiju_host_capacity(int(settings.multipart_part_size_mib) * 1024 * 1024)
             effective_cap = min(available_objects, capacity.effective_cap)
+            operational_ceiling, ceiling_samples = _continuous_operational_ceiling_mbps(
+                session, source.id, float(settings.max_throughput_mbps), now=sample_now
+            )
             target, reason = normal_concurrency.desired_workers(
                 available_objects, active_workers=len(futures), observed_mbps=observed_mbps,
-                sample_is_new=sample_is_new, effective_cap=effective_cap, now=sample_now,
+                sample_is_new=sample_is_new, effective_cap=effective_cap,
+                operational_ceiling_mbps=operational_ceiling, now=sample_now,
             )
             policy_reason = reason or (
                 "awaiting an independent aggregate-byte sample"
@@ -4160,6 +4320,8 @@ def transfer_continuous(session, task: Task, settings) -> None:
                 "host_capacity_factor": capacity.factor,
                 "host_capacity_reason": capacity.reason,
                 "effective_worker_cap": effective_cap,
+                "decision_ceiling_mbps": operational_ceiling,
+                "decision_ceiling_samples": ceiling_samples,
                 "reason": policy_reason,
             }
             if reason:
@@ -4171,7 +4333,8 @@ def transfer_continuous(session, task: Task, settings) -> None:
                 )
             normal_concurrency.persist(
                 autoscale_state, active_workers=len(futures), effective_cap=effective_cap,
-                observed_mbps=observed_mbps, capacity_reason=capacity.reason,
+                observed_mbps=observed_mbps, sample_is_new=sample_is_new,
+                capacity_reason=capacity.reason,
                 reason=policy_reason,
             )
             return result
@@ -4312,7 +4475,7 @@ def transfer_continuous(session, task: Task, settings) -> None:
                 item.retry_at = utcnow() + timedelta(seconds=1)
                 item.decision_reason = (
                     "simulated network outage; awaiting durable virtual recovery "
-                    f"advance of {retry_after}s"
+                    f"advance of {format_duration(retry_after)}"
                 )
                 _remember_transfer_error(item, item.decision_reason)
                 if obj and obj.state == ObjectState.TRANSFERRING:
@@ -4480,7 +4643,7 @@ def transfer_continuous(session, task: Task, settings) -> None:
                             "CONTINUOUS_TRANSFER_PROCESS_RECYCLE_REQUIRED",
                             (
                                 "Raiju detected executor-owned transfer(s) without a durable "
-                                f"checkpoint for {TRANSFER_FUTURE_STALL_SECONDS}s: "
+                                f"checkpoint for {format_duration(TRANSFER_FUTURE_STALL_SECONDS)}: "
                                 + ", ".join(str(item_id) for item_id in stalled_item_ids)
                                 + ". The process will restart and recover their multipart checkpoints."
                             ),
@@ -4553,7 +4716,7 @@ def transfer_continuous(session, task: Task, settings) -> None:
                         "SIMULATED_NETWORK_RECOVERY_ADVANCED",
                         (
                             "Advanced the source virtual clock once by "
-                            f"{network_recovery_seconds}s after a deterministic network outage."
+                            f"{format_duration(network_recovery_seconds)} after a deterministic network outage."
                         ),
                         source_id=source.id,
                         wave_id=anchor.id,
@@ -4697,6 +4860,10 @@ def verify_wave(session, task: Task) -> None:
     ).order_by(ObjectRecord.id)))
     failed = 0
     for obj in objects:
+        if worker_shutdown_requested():
+            raise GracefulWorkerShutdown(
+                "Raikou shutdown requested before the next Deep Audit object"
+            )
         multipart_evidence = json.loads(obj.multipart_parts_json or "{}")
         has_multipart_evidence = obj.checksum_algorithm == "SHA256_MULTIPART_PARTS" and bool(multipart_evidence)
         if not obj.source_checksum and not has_multipart_evidence:
@@ -4721,6 +4888,10 @@ def verify_wave(session, task: Task) -> None:
                 digest = hashlib.sha256()
                 remaining = expected_part_size(obj.size_bytes, part_number, part_size) if has_multipart_evidence else obj.size_bytes
                 while remaining:
+                    if worker_shutdown_requested():
+                        raise GracefulWorkerShutdown(
+                            "Raikou shutdown requested at a Deep Audit read boundary"
+                        )
                     chunk = destination_body.read(min(COPY_CHUNK_SIZE, remaining))
                     if not chunk:
                         raise RuntimeError("OCI object ended early during audit")
@@ -4739,6 +4910,12 @@ def verify_wave(session, task: Task) -> None:
                 if has_multipart_evidence:
                     part_digests.append(digest.digest())
             obj.destination_checksum = destination_digest.hexdigest() if obj.source_checksum else base64.b64encode(hashlib.sha256(b"".join(part_digests)).digest()).decode("ascii")
+        except GracefulWorkerShutdown:
+            # The object remains TRANSFERRED and is safely reread from its
+            # beginning after restart; completed objects stay VERIFIED.
+            obj.audit_progress_at, obj.audit_rate_mbps = utcnow(), 0
+            session.commit()
+            raise
         except Exception as error:
             obj.integrity_error, obj.state = f"Unable to read OCI destination: {type(error).__name__}: {error}", ObjectState.FAILED
             obj.audit_progress_at, obj.audit_rate_mbps = utcnow(), 0
@@ -4781,12 +4958,20 @@ def verify_wave_simulated(session, task: Task, wave: Wave, source: Source) -> No
     )
     failed = 0
     for obj in objects:
+        if worker_shutdown_requested():
+            raise GracefulWorkerShutdown(
+                "Raikou shutdown requested before the next simulated Deep Audit object"
+            )
         obj.audit_started_at, obj.audit_progress_bytes = utcnow(), 0
         obj.audit_progress_at, obj.audit_rate_mbps = utcnow(), 0
         session.commit()
         source_digest, destination_digest = hashlib.sha256(), hashlib.sha256()
         try:
             for offset in range(0, obj.size_bytes, COPY_CHUNK_SIZE):
+                if worker_shutdown_requested():
+                    raise GracefulWorkerShutdown(
+                        "Raikou shutdown requested at a simulated Deep Audit read boundary"
+                    )
                 length = min(COPY_CHUNK_SIZE, obj.size_bytes - offset)
                 source_request = ReadRangeRequest(
                     context=context,
@@ -4829,6 +5014,10 @@ def verify_wave_simulated(session, task: Task, wave: Wave, source: Source) -> No
             obj.integrity_error = None
             obj.integrity_verified_at = utcnow()
             obj.state = ObjectState.VERIFIED
+        except GracefulWorkerShutdown:
+            obj.audit_progress_at, obj.audit_rate_mbps = utcnow(), 0
+            session.commit()
+            raise
         except Exception as error:
             obj.integrity_error = f"Simulated deep audit failed: {type(error).__name__}: {error}"
             obj.state = ObjectState.FAILED
@@ -5035,8 +5224,16 @@ def run_once(role: str = WORKER_ROLE) -> None:
             if task.kind == "SUBMIT_BATCH_RESTORE": submit_restore(session, task, settings)
             elif task.kind == "POLL_RESTORE": poll_restore(session, task, settings)
             elif task.kind == "TRANSFER_CONTINUOUS": transfer_continuous(session, task, settings)
-            elif task.kind == "VERIFY_WAVE": verify_wave(session, task)
+            elif task.kind == "VERIFY_WAVE":
+                # A full destination reread can run for many hours. Keep its
+                # durable ownership current just as restore polling does, so a
+                # healthy Raikou never looks abandoned or becomes eligible for
+                # a duplicate operator recovery while it is still auditing.
+                with task_lease_heartbeat(task.id, settings.task_lease_seconds):
+                    verify_wave(session, task)
             else: raise RuntimeError(f"Unsupported real worker task {task.kind}")
+        except GracefulWorkerShutdown as error:
+            release_task_for_graceful_shutdown(session, task, str(error))
         except Exception as error:
             disposition, summary = classify_task_error(error)
             if disposition == "retry":
