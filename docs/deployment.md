@@ -224,20 +224,25 @@ até a configuração OCI definitiva.
 
 O host deve conter o marcador
 `/etc/s3-oci-migration/temporary-local-secrets`. Quando o Vault estiver
-disponível, preencha o `oci-runtime.json` completo, mantenha o PostgreSQL em
-execução e converta o host sem expor valores de senha:
+disponível, substitua apenas a referência de `postgres_password` no
+`oci-runtime.json`: remova o respectivo `secret_file_paths` e informe o OCID
+em `secret_ocids`. Mantenha o PostgreSQL em execução e reinicie o serviço:
 
 ```bash
-sudo /opt/s3-oci-migration/release/scripts/adopt-vault-secrets.sh
 sudo systemctl restart s3-oci-migration.service
 sudo systemctl is-active s3-oci-migration.service
 ```
 
-No modo REAL, o script troca a senha da role principal no PostgreSQL em
-execução e então remove o marcador temporário. A Secret
+O bootstrap detecta o marcador e a mudança para Vault, troca a senha da role
+principal no PostgreSQL em execução e então remove o marcador temporário. A
+Secret
 `simulation_postgres_password` só é necessária em uma instalação que inicie
 explicitamente em `SIMULATION`. Não apague
 os arquivos locais nem sobrescreva uma senha antes dessa conversão.
+
+O utilitário `scripts/adopt-vault-secrets.sh` permanece disponível somente
+para diagnóstico ou uma adoção manual excepcional; não é necessário no fluxo
+normal.
 
 ### 5. Aceite funcional inicial
 
