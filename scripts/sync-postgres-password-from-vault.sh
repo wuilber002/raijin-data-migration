@@ -8,6 +8,7 @@ secret_root=/etc/s3-oci-migration/secrets
 runtime_config=/etc/s3-oci-migration/oci-runtime.json
 current_password_file="$secret_root/postgres_password"
 candidate_password_file="$secret_root/.postgres_password.vault"
+container_candidate_file=/tmp/.raijin-postgres-password.vault
 
 [[ -s "$current_password_file" ]] || {
   echo "Local PostgreSQL password file is missing; use bootstrap for first initialization." >&2
@@ -24,17 +25,32 @@ if cmp -s "$current_password_file" "$candidate_password_file"; then
   exit 0
 fi
 
-old_password="$(<"$current_password_file")"
-new_password="$(<"$candidate_password_file")"
-[[ "$new_password" =~ ^[A-Za-z0-9]+$ ]] || {
+cleanup_candidate() {
   rm -f "$candidate_password_file"
-  echo "Vault PostgreSQL password has unsupported characters for this automated rotation." >&2
-  exit 1
+  podman exec s3-oci-postgres rm -f "$container_candidate_file" >/dev/null 2>&1 || true
 }
+trap cleanup_candidate EXIT
 
-podman exec -e "PGPASSWORD=$old_password" s3-oci-postgres \
-  psql -v ON_ERROR_STOP=1 -U migration -d migration \
-  -c "ALTER ROLE migration PASSWORD '$new_password';" >/dev/null
+# Do not interpolate the password into an argument or environment variable.
+# PostgreSQL reads a short-lived, owner-only candidate inside its own
+# container, then quotes it server-side with format(%L). This supports normal
+# Vault-generated punctuation without logging or exposing the value to ps.
+podman cp "$candidate_password_file" "s3-oci-postgres:$container_candidate_file"
+podman exec s3-oci-postgres chown 70:70 "$container_candidate_file"
+podman exec s3-oci-postgres chmod 0600 "$container_candidate_file"
+podman exec -i s3-oci-postgres psql -v ON_ERROR_STOP=1 -U migration -d migration <<SQL >/dev/null
+DO \$block\$
+DECLARE
+  vault_password text := btrim(pg_read_file('$container_candidate_file'), E' \\n\\r\\t');
+BEGIN
+  IF vault_password = '' THEN
+    RAISE EXCEPTION 'Vault PostgreSQL password is empty';
+  END IF;
+  EXECUTE format('ALTER ROLE migration PASSWORD %L', vault_password);
+END
+\$block\$;
+SQL
 
 install -o root -g root -m 0600 "$candidate_password_file" "$current_password_file"
-rm -f "$candidate_password_file"
+cleanup_candidate
+trap - EXIT
