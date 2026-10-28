@@ -123,6 +123,27 @@ continua na porta interna `8080`; não a exponha diretamente. Um bind diferente
 de loopback exige controles externos equivalentes, como NSG, firewall e proxy
 reverso com autenticação.
 
+### Preparação da autenticação da console
+
+O bootstrap também cria `/etc/s3-oci-migration/web-auth.env`. Nesta release o
+valor padrão é compatível com instalações existentes e **não ativa** login:
+
+```ini
+RAIJIN_WEB_AUTH_MODE=disabled
+RAIJIN_WEB_EXTERNAL_HTTPS=false
+RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=
+RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=30
+RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=720
+```
+
+O futuro modo `local` exigirá credenciais individuais e somente poderá usar
+bind fora de loopback quando `RAIJIN_WEB_EXTERNAL_HTTPS=true` e os CIDRs do
+proxy reverso confiável forem informados. Nunca use `0.0.0.0` para expor a
+console diretamente. Nesta primeira release de compatibilidade, configurar
+`local` faz o serviço falhar de forma segura: ele só poderá iniciar após a
+entrega das fases de identidade, sessão e RBAC. A matriz de rotas prevista está em
+`docs/web-console-authentication-route-matrix.md`.
+
 ### 2. Criar a configuração de runtime OCI
 
 O arquivo contém referências de Secret (OCIDs ou caminhos locais protegidos) e

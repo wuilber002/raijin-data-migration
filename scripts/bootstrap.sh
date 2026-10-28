@@ -9,6 +9,7 @@ mode_control_root=/var/lib/s3-oci-migration/mode-control
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 deployment_profile_file=/etc/s3-oci-migration/deployment-profile
 web_bind_config=/etc/s3-oci-migration/web-bind.env
+web_auth_config=/etc/s3-oci-migration/web-auth.env
 temporary_local_secrets_marker=/etc/s3-oci-migration/temporary-local-secrets
 bootstrap_complete=false
 
@@ -73,6 +74,20 @@ WEB_BIND_HOST=127.0.0.1
 WEB_BIND_PORT=1604
 EOF
   chmod 0600 "$web_bind_config"
+fi
+if [[ ! -e "$web_auth_config" ]]; then
+  install -d -m 0755 "$(dirname "$web_auth_config")"
+  cat >"$web_auth_config" <<'EOF'
+# Web-console authentication remains opt-in during the compatibility release.
+# Do not use local mode with a public bind before configuring HTTPS and the
+# exact CIDR(s) of the trusted reverse proxy.
+RAIJIN_WEB_AUTH_MODE=disabled
+RAIJIN_WEB_EXTERNAL_HTTPS=false
+RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=
+RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=30
+RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=720
+EOF
+  chmod 0600 "$web_auth_config"
 fi
 local_runtime_complete=true
 for container in s3-oci-postgres s3-oci-app s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer s3-oci-fujin-local-dns s3-oci-local-ui-gateway; do

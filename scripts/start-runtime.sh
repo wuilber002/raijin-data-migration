@@ -16,6 +16,18 @@ network=s3-oci-migration
 # shellcheck source=web-bind.sh
 source "$install_root/scripts/web-bind.sh"
 raijin_load_web_bind
+# shellcheck source=web-auth.sh
+source "$install_root/scripts/web-auth.sh"
+raijin_load_web_auth
+
+web_auth_environment=(
+  -e "RAIJIN_WEB_BIND_HOST=$RAIJIN_WEB_BIND_HOST"
+  -e "RAIJIN_WEB_AUTH_MODE=$RAIJIN_WEB_AUTH_MODE"
+  -e "RAIJIN_WEB_EXTERNAL_HTTPS=$RAIJIN_WEB_EXTERNAL_HTTPS"
+  -e "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=$RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS"
+  -e "RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES"
+  -e "RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES"
+)
 
 case "$mode" in
   REAL)
@@ -24,6 +36,7 @@ case "$mode" in
       -e RAIJIN_OPERATION_MODE=REAL \
       -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
       -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
+      "${web_auth_environment[@]}" \
       -e OCI_RUNTIME_CONFIG_FILE=/run/oci-runtime/oci-runtime.json \
       -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
       -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
@@ -81,6 +94,7 @@ case "$mode" in
       -e RAIJIN_SIMULATOR_BASE_URL=http://simulator:8090 \
       -e DATABASE_URL=postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation \
       -e POSTGRES_PASSWORD_FILE=/run/secrets/simulation_postgres_password \
+      "${web_auth_environment[@]}" \
       -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
       -v "$runtime_root:/run/platform-status:ro,z" \
       -v "$mode_control_root:/run/mode-control:rw,z" \

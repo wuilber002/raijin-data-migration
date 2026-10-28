@@ -1,6 +1,8 @@
 # Plano de implementação — autenticação local da console web
 
-**Status:** planejamento. Nenhuma implementação de autenticação está autorizada por este documento.
+**Status:** em implementação controlada. A compatibilidade atual permanece em
+`auth_mode=disabled`; nenhuma VM de homologação deve ativar login antes dos
+gates e critérios de aceite correspondentes.
 
 **Objetivo:** proteger a console web do Raijin com contas locais individuais,
 sessões seguras e autorização por papel, permitindo publicação atrás de um
@@ -167,10 +169,10 @@ sequenceDiagram
 
 ### P0 — Baseline e decisões
 
-- [ ] Confirmar D1–D8.
-- [ ] Mapear todos os endpoints HTTP, páginas, formulários, chamadas de polling,
+- [x] Confirmar D1–D8.
+- [x] Mapear todos os endpoints HTTP, páginas, formulários, chamadas de polling,
   download/export, métricas e health checks.
-- [ ] Classificar cada rota: pública local, autenticada, `ADMIN`, `OPERATOR` ou
+- [x] Classificar cada rota: pública local, autenticada, `ADMIN`, `OPERATOR` ou
   `VIEWER`.
 - [ ] Registrar baseline de performance da UI e throughput antes de inserir
   middleware, para impedir regressão de polling ou transferência.
@@ -180,18 +182,20 @@ sequenceDiagram
 
 ### P1 — Fundamentos de segurança e configuração
 
-- [ ] Adicionar configuração `auth_mode` com valores explícitos `disabled` e
+- [x] Adicionar configuração `auth_mode` com valores explícitos `disabled` e
   `local`; rejeitar valores desconhecidos.
 - [ ] Definir arquivo/Secret de bootstrap por referência, seguindo o contrato
   atual `secret_ocids`/`secret_file_paths`; nunca guardar valor no JSON.
-- [ ] Criar validação de configuração, limites de sessão e detecção explícita
+- [x] Criar validação de configuração, limites de sessão e detecção explícita
   de proxy confiável.
-- [ ] Adicionar flag externa HTTPS e validação que recuse exposição não segura
+- [x] Adicionar flag externa HTTPS e validação que recuse exposição não segura
   quando `auth_mode=local` for usado fora de loopback sem proxy/TLS declarado.
-- [ ] Documentar variáveis, arquivos e procedimento de rollback.
+- [x] Documentar variáveis, arquivos e procedimento de rollback.
 
-**Critério de aceite:** configuração inválida falha antes de expor HTTP; modo
-`disabled` preserva integralmente o comportamento atual.
+**Evidência parcial:** `tests/test_web_auth_configuration.py`,
+`tests/test_web_auth_shell.py`, `tests/test_web_bind.py` e
+`tests/test_operational_contract.py` passaram em 28/10/2026. O modo `local`
+ainda falha fechado nesta release; o critério completo será revalidado após P3.
 
 ### P2 — Persistência, hash e bootstrap de administrador
 

@@ -45,6 +45,7 @@ from app.duration_format import format_duration
 from app.runtime_context import RAIJIN_BUILD_REVISION, RAIJIN_SERVICE_VERSION, SIMULATOR_SERVICE_VERSION, load_runtime_context
 from app.simulator_admin import SimulatorAdminClient, SimulatorAdminError
 from app.simulator_ports import SimulatedSourcePort, SimulatorTransportError
+from app.web_auth import load_web_auth_settings
 
 RAIJU_MIN_WORKERS = 5
 # The continuous lane must stay bounded even when a source contains millions
@@ -193,6 +194,15 @@ def read_secret(path: str) -> str:
 
 database_url = os.environ["DATABASE_URL"]
 runtime_context = load_runtime_context()
+web_auth_settings = load_web_auth_settings()
+if web_auth_settings.enabled:
+    # P1 installs and validates the policy contract, but no request is allowed
+    # to claim authentication is active until P2/P3 have the durable identity,
+    # session and authorization layers.  Failing closed prevents an operator
+    # from mistaking a configuration-only release for a protected console.
+    raise RuntimeError(
+        "RAIJIN_WEB_AUTH_MODE=local is not available until the web authentication release is installed"
+    )
 cloud_backend = backend_for(runtime_context)
 password = read_secret(os.environ["POSTGRES_PASSWORD_FILE"])
 parsed_database_url = make_url(database_url)
