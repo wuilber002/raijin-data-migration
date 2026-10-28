@@ -98,8 +98,9 @@ sshd -t && systemctl reload sshd
 if [[ ! -f "$oci_runtime_config" ]]; then
   printf '{"secret_ocids":{}}\n' >"$oci_runtime_config"
 fi
-# The OCI runtime config contains OCIDs, not secret values. The application
-# container must read it; Vault still protects every credential value.
+# The runtime config contains only secret references (Vault OCIDs or protected
+# local file paths), never secret values. The application container reads it
+# only when it needs OCI metadata.
 chmod 644 "$oci_runtime_config"
 
 mode_file=/etc/s3-oci-migration/operation-mode

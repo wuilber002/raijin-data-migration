@@ -109,8 +109,8 @@ somente em `127.0.0.1:8080` e será acessada pelo túnel SSH.
 
 ### 2. Criar a configuração de runtime OCI
 
-O arquivo contém somente OCIDs e metadados; nunca valores de senha, access key
-ou outro conteúdo de Secret:
+O arquivo contém referências de Secret (OCIDs ou caminhos locais protegidos) e
+metadados; nunca valores de senha, access key ou outro conteúdo de Secret:
 
 ```bash
 sudo install -d -m 0755 /etc/s3-oci-migration
@@ -130,6 +130,7 @@ Substitua todos os valores entre `<...>` e proteja o arquivo:
   "secret_ocids": {
     "postgres_password": "<POSTGRES_SECRET_OCID>"
   },
+  "secret_file_paths": {},
   "secrets_compartment_ocid": "<SECRETS_COMPARTMENT_OCID>",
   "secret_compartment_ocids": ["<SECRETS_COMPARTMENT_OCID>"]
 }
@@ -142,6 +143,22 @@ sudo chmod 0600 /etc/s3-oci-migration/oci-runtime.json
 Deixe endpoint e CA vazios para OCI público. Em OCI privado, informe a URL
 HTTPS e o bundle da CA interna. Para Secrets em compartments adicionais,
 inclua cada OCID em `secret_compartment_ocids` e confirme as policies OCI.
+
+Para cada Secret, configure exatamente uma origem: `secret_ocids` (OCI Vault)
+ou `secret_file_paths` (fallback local). O fallback local é indicado apenas
+antes da liberação do Vault: use um caminho absoluto para arquivo regular do
+host, pertencente a `root`, com modo `0600` ou mais restritivo. Exemplo:
+
+```json
+"secret_ocids": {},
+"secret_file_paths": {
+  "postgres_password": "/etc/s3-oci-migration/bootstrap/postgres_password"
+}
+```
+
+O valor do arquivo nunca é mostrado pela console, API ou logs. Quando Vault
+estiver disponível, substitua o caminho pelo OCID e execute o procedimento de
+adoção de Secrets abaixo.
 
 ### 3. Materializar uma release imutável
 
