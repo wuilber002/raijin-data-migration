@@ -46,7 +46,7 @@ fi
 
 target_database=migration
 target_owner=migration
-writers=(s3-oci-app s3-oci-governance-worker s3-oci-transfer-worker)
+writers=(s3-oci-app s3-oci-governance-worker s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker)
 if [[ "$(basename "$backup_file_real")" == migration-simulation-* ]]; then
   target_database=migration_simulation
   target_owner=migration_simulation

@@ -216,6 +216,10 @@ class LocalOciObject(LocalBase):
 
 class LocalMultipartUpload(LocalBase):
     __tablename__ = "local_multipart_uploads"
+    # Multipart abort/commit can race with an idempotent client retry.  The
+    # application already treats an absent upload as terminal success, so an
+    # ORM row-count warning adds noise without identifying a data loss risk.
+    __mapper_args__ = {"confirm_deleted_rows": False}
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     bucket_id: Mapped[str] = mapped_column(ForeignKey("local_oci_buckets.id"), index=True)
@@ -234,6 +238,7 @@ class LocalMultipartUpload(LocalBase):
 
 class LocalMultipartPart(LocalBase):
     __tablename__ = "local_multipart_parts"
+    __mapper_args__ = {"confirm_deleted_rows": False}
 
     upload_id: Mapped[str] = mapped_column(ForeignKey("local_multipart_uploads.id"), primary_key=True)
     part_number: Mapped[int] = mapped_column(Integer, primary_key=True)

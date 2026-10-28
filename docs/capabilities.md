@@ -107,6 +107,11 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   de destino, falha, integridade pendente ou auditoria profunda em fila deixam
   o projeto como `COMPLETED_WITH_ATTENTION`, com os bloqueios discriminados por
   source.
+  Um projeto cujas sources ainda estão apenas cadastradas permanece em
+  `CONFIGURED`: a ausência esperada de inventário antes do primeiro discovery
+  não é tratada como conclusão com ressalvas. `COMPLETED_WITH_ATTENTION` fica
+  reservado para pendências de uma execução que já cruzou a fronteira
+  operacional.
 - Descobre objetos por API S3 paginada, com checkpoint, retomada, limitação de
   requisições por conexão e acompanhamento em fila durável.
 - Importa CSV/GZIP ou `manifest.json` do S3 Inventory para evitar chamadas de
@@ -240,9 +245,14 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
   mas é reancorada automaticamente para a próxima wave com backlog quando a
   anterior conclui. Assim a console não mostra trabalho vivo em uma wave
   concluída e a cópia de outra wave da mesma source nunca é interrompida.
-- O **Raikou** é o worker de governança: executa discovery, planejamento, S3
-  Batch Operations, polling de restore, reconciliação e auditorias. O **Raiju**
-  é o worker operacional de transferência e retomada multipart.
+- O **Raikō** é dividido em quatro processos duráveis e independentes:
+  **Raikō::Shin** (Controller) serializa planejamento, liberação e
+  reconciliação global; **Raikō::Sei** (Restore) submete Batch Operations e
+  executa polling; **Raikō::Kō** (Discovery) executa descobertas com checkpoint;
+  e **Raikō::Kai** (Audit) executa auditorias profundas. Eles compartilham a
+  fila PostgreSQL, mas cada papel só assume sua responsabilidade. Portanto uma
+  auditoria longa não bloqueia submissão nem polling de restore. O **Raiju** é
+  o worker operacional de transferência e retomada multipart.
 - Copia S3 para OCI preservando chave, tamanho, metadados compatíveis e tags
   registradas localmente.
 - Retoma uploads multipart interrompidos usando checkpoints persistidos de
@@ -307,7 +317,7 @@ no modo isolado, delega as integrações simuladas ao FUJIN.
 
 | Área | Finalidade |
 | --- | --- |
-| **Status** | Saúde global: serviços da VM, prontidão de credenciais, capacidade local, alertas e indicadores operacionais. |
+| **Status** | Saúde global: serviços da VM, prontidão de credenciais, capacidade local, alertas, indicadores operacionais e consoles anônimas ativas. |
 | **Queue** | Console de acompanhamento: atividade de migração, fila de transferência, fila de discovery, auditorias profundas e inventário de bordo do pipeline dinâmico. |
 | **Migrations** | Cadastro e seleção de sources, discovery, inventário, re-discovery, validação OCI, criação e administração de waves. |
 | **Configurações** | Parâmetros operacionais, estratégia de transferência, conexões AWS, Secrets, buckets OCI, tarifas e pré-checks. |
@@ -320,6 +330,13 @@ O contador global de falhas considera somente a tarefa mais recente de cada
 wave pertencente a uma source ativa. Falhas de sources desativadas permanecem
 no histórico auditável, mas deixam de representar uma pendência operacional
 atual.
+
+A console mede presença operacional anônima por heartbeat: cada navegador
+mantém apenas um UUID aleatório local e é considerado ativo por dois minutos
+após seu último heartbeat. A métrica mostra consoles, não pessoas; não registra
+nome, login, IP, dispositivo, localização, conteúdo ou histórico de navegação.
+O contador aparece na Saúde da plataforma e sua definição fica explícita em
+**Sobre**.
 
 Na interface web, os controles que iniciam ou alteram processos de maior
 impacto exibem o ícone circular `i` dentro do próprio controle. O balão de
@@ -500,7 +517,7 @@ são pseudonimizados, para permitir correlação sem registrar o handle bruto.
   primeiro arquivo, variação inicial e faixa de liberação gradual. A alteração
   vale somente para solicitações novas; restores já solicitados preservam os
   horários sorteados no momento da submissão.
-- O *governance worker* real executará o polling adaptativo. O FUJIN apenas
+- O **Raikō::Sei** real executará o polling adaptativo. O FUJIN apenas
   responderá ao `Describe`, `List` ou `Head`; não alterará diretamente a wave,
   o objeto ou a task no banco do RAIJIN.
 - Antes da primeira disponibilidade, o Raijin pode usar sua própria previsão
@@ -704,7 +721,10 @@ com testes de escala e operação real:
 - A validação técnica multi-source inclui rotas com a mesma key original,
   reutilização de conexão entre regiões, teto global de restores, vencedor
   único da lane, fairness durável e recuperação do lifecycle após reabertura
-  do banco. Os validadores exercitam ainda os 11 templates Simulation e
+  do banco. A rota OCI imutável é resolvida antes da persistência em todos os
+  produtores iniciais de inventário: listagem remota, manifesto S3, importação
+  API e upload CSV/CSV.GZ; inserções em lote não dependem de default do ORM.
+  Os validadores exercitam ainda os 11 templates Simulation e
   catálogos lógicos de 640.000 objetos / 100 TB. A recuperação da topologia
   LOCAL após reboot real foi comprovada na release `d32c3a1`; resta o ensaio
   integrado publicado com duas sources concorrendo pela lane antes da
@@ -712,8 +732,10 @@ com testes de escala e operação real:
 - A topologia Fujin LOCAL pode atualizar apenas o plano de controle Raijin. O
   procedimento protegido mantém banco e serviços Fujin online, recusa rollout
   com transferência/lease ativo, valida o novo schema antes dos workers e
-  restaura automaticamente app, Raikou e Raiju pela imagem anterior se o
-  health check falhar.
+  inicia Shin, Sei, Kō, Kai e Raiju com a imagem alvo. Esta instalação única
+  não mantém rollback automático: qualquer falha posterior ao handoff encerra
+  o plano de controle para investigação explícita, sem reintroduzir uma versão
+  anterior.
 - A escolha de implantação Fujin LOCAL é persistida separadamente do modo de
   operação do Raijin. O bootstrap reconstrói a topologia privada completa após
   reboot, mantendo o Raijin em `REAL`; perfis inválidos falham de forma segura

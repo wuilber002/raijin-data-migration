@@ -478,7 +478,7 @@ def test_local_compose_isolates_the_fujin_materializer_from_the_read_only_provid
 def test_local_compose_exposes_only_the_loopback_ui_gateway():
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
     fujin = compose.split("  fujin-local:\n", 1)[1].split("  fujin-local-dns:\n", 1)[0]
-    local_app = compose.split("  local-app:\n", 1)[1].split("  local-governance-worker:\n", 1)[0]
+    local_app = compose.split("  local-app:\n", 1)[1].split("  local-ui-gateway:\n", 1)[0]
     gateway = compose.split("  local-ui-gateway:\n", 1)[1].split("  simulator:\n", 1)[0]
     assert "ports:" not in fujin and "ports:" not in local_app
     assert 'ports: ["127.0.0.1:8080:8080"]' in gateway
@@ -555,7 +555,8 @@ def test_oracle_linux_podman_launcher_keeps_raijin_real_and_the_data_plane_priva
     assert 'podman exec s3-oci-local-ui-gateway nginx -s reload' in updater
     assert "validate_release_images" in updater
     assert '[[ "$actual" == "$image" ]]' in updater
-    assert "Candidate failed before handoff" in updater
+    assert "no automatic rollback is configured" in updater
+    assert "abort_update()" in updater
     assert "active transfer/lease record(s) remain" in updater
     config = Path("docker/nginx-local-ui.conf").read_text(encoding="utf-8")
     assert "proxy_next_upstream error timeout http_502 http_503 http_504" in config

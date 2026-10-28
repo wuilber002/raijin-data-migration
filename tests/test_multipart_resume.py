@@ -191,6 +191,15 @@ def test_aws_task_errors_retry_only_for_transient_service_pressure():
     assert classify_task_error(SimulatorAdminError("bad clock operation", status_code=400))[0] == "failed"
 
 
+def test_fujin_catalogue_parser_error_retries_instead_of_failing_the_lane():
+    unavailable = type(
+        "ResponseParserError", (Exception,), {}
+    )('{"detail":"Fujin LOCAL control catalogue is briefly unavailable; retry the request"}')
+    malformed = type("ResponseParserError", (Exception,), {})("invalid XML from an unknown endpoint")
+    assert classify_task_error(unavailable)[0] == "retry"
+    assert classify_task_error(malformed)[0] == "failed"
+
+
 def test_unknown_worker_errors_fail_instead_of_looping_indefinitely():
     disposition, summary = classify_task_error(ValueError("bad local configuration"))
     assert disposition == "failed"

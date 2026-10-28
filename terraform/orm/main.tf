@@ -56,6 +56,10 @@ data "oci_objectstorage_namespace" "migration" {
   compartment_id = var.compartment_ocid
 }
 
+data "oci_core_subnet" "migration" {
+  subnet_id = var.subnet_ocid
+}
+
 # Resolve names while the Resource Manager stack runs. The VM receives only a
 # local OCID-to-name map, so the dynamic group needs no Identity permission
 # just to render the destination-bucket selector.
@@ -242,6 +246,10 @@ resource "oci_core_instance" "migration" {
     # never replace a persistent migration VM.
     ignore_changes = [metadata["user_data"]]
     precondition {
+      condition     = data.oci_core_subnet.migration.vcn_id == var.vcn_ocid
+      error_message = "The selected subnet must belong to the selected VCN."
+    }
+    precondition {
       condition     = var.create_vault_key || (trimspace(var.existing_vault_ocid) != "" && trimspace(var.existing_vault_key_ocid) != "")
       error_message = "Provide existing_vault_ocid and existing_vault_key_ocid when create_vault_key is false."
     }
@@ -258,27 +266,6 @@ resource "oci_core_instance" "migration" {
       error_message = "Provide initial_aws_connection_secret_name when creating the initial AWS connection Secret."
     }
   }
-}
-
-# Fujin's generated physical samples must never compete with PostgreSQL, logs,
-# backups or releases on the boot volume. The fixed paravirtualized device is
-# formatted only when blank by the idempotent bootstrap mount script.
-resource "oci_core_volume" "fujin_payloads" {
-  availability_domain = var.availability_domain
-  compartment_id      = var.compartment_ocid
-  display_name        = "${var.resource_name_prefix}-fujin-payloads"
-  size_in_gbs         = var.fujin_payload_volume_size_in_gbs
-}
-
-resource "oci_core_volume_attachment" "fujin_payloads" {
-  attachment_type = "paravirtualized"
-  instance_id     = oci_core_instance.migration.id
-  volume_id       = oci_core_volume.fujin_payloads.id
-  device          = "/dev/oracleoci/oraclevdb"
-  # This existing E5 VM does not support PV encryption in transit. OCI Block
-  # Volume encryption at rest remains enabled by the platform; transport is
-  # restricted to the VM-local paravirtualized attachment.
-  is_pv_encryption_in_transit_enabled = false
 }
 
 resource "oci_identity_dynamic_group" "migration_vm" {

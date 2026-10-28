@@ -134,7 +134,7 @@ def test_real_workers_complete_simulated_discovery_restore_and_transfer(tmp_path
         session.commit()
         source_id = source.id
 
-    real_worker.run_once("governance")
+    real_worker.run_once("raikou-ko")
 
     with sessions() as session:
         source = session.get(main.Source, source_id)
@@ -164,8 +164,9 @@ def test_real_workers_complete_simulated_discovery_restore_and_transfer(tmp_path
         session.commit()
         wave_id = wave.id
 
-    real_worker.run_once("governance")
-    real_worker.run_once("governance")
+    real_worker.run_once("raikou-sei")
+    real_worker.run_once("raikou-shin")
+    real_worker.run_once("raikou-sei")
     # The continuous lane deliberately yields after a bounded simulated
     # dispatch cycle.  Drive the durable follow-up tasks until every object
     # has settled instead of assuming that one Raiju cycle owns a full wave.

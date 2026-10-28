@@ -28,10 +28,12 @@ case "$mode" in
       [[ "$attempt" -lt 30 ]] || { echo "REAL API did not become healthy" >&2; exit 1; }
       sleep 2
     done
-    for role in governance transfer; do
-      podman run -d --name "s3-oci-${role}-worker" --replace --restart unless-stopped \
+    for worker_role in raikou-shin raikou-sei raikou-ko raikou-kai raiju; do
+      container="s3-oci-${worker_role}"
+      [[ "$worker_role" == raiju ]] && container=s3-oci-transfer-worker
+      podman run -d --name "$container" --replace --restart unless-stopped \
         --network "$network" \
-        -e "RAIJIN_WORKER_ID=raijin-${role}-worker-vm" -e "RAIJIN_WORKER_ROLE=$role" \
+        -e "RAIJIN_WORKER_ID=${worker_role}-vm" -e "RAIJIN_WORKER_ROLE=$worker_role" \
         -e RAIJIN_OPERATION_MODE=REAL \
         -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
         -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
@@ -81,10 +83,12 @@ case "$mode" in
       [[ "$attempt" -lt 30 ]] || { echo "SIMULATION API did not become healthy" >&2; exit 1; }
       sleep 2
     done
-    for role in governance transfer; do
-      podman run -d --name "s3-oci-${role}-worker" --replace --restart unless-stopped \
+    for worker_role in raikou-shin raikou-sei raikou-ko raikou-kai raiju; do
+      container="s3-oci-${worker_role}"
+      [[ "$worker_role" == raiju ]] && container=s3-oci-transfer-worker
+      podman run -d --name "$container" --replace --restart unless-stopped \
         --network "$network" \
-        -e "RAIJIN_WORKER_ID=simulation-${role}-worker" -e "RAIJIN_WORKER_ROLE=$role" \
+        -e "RAIJIN_WORKER_ID=${worker_role}-simulation" -e "RAIJIN_WORKER_ROLE=$worker_role" \
         -e RAIJIN_OPERATION_MODE=SIMULATION \
         -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
         -e RAIJIN_SIMULATOR_BASE_URL=http://simulator:8090 \

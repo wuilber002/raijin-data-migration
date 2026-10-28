@@ -7,12 +7,11 @@ outro host. Para recuperar uma instalação existente, consulte o
 [runbook de recuperação](recovery-runbook.md).
 
 Em uma topologia Fujin LOCAL já saudável, prefira a atualização mínima do
-plano de controle. Depois do backup lógico, build e tag de rollback, execute:
+plano de controle. Depois do backup lógico e build da imagem alvo, execute:
 
 ```bash
 sudo /opt/s3-oci-migration/release/scripts/update-fujin-local-raijin-runtime.sh \
-  localhost/s3-oci-migration:<nova-release> \
-  localhost/s3-oci-migration:<rollback>
+  localhost/s3-oci-migration:<nova-release>
 ```
 
 O atualizador recusa a troca se houver dispatcher de transferência em execução
@@ -21,14 +20,17 @@ gateway online; inicia uma aplicação candidata ao lado da atual, valida health
 schema e revisão Git, e somente então faz o handoff do alias privado e inicia
 Raikou/Raiju. O gateway repete falhas transitórias durante essa troca e recarrega
 seu DNS depois da retirada do app antigo. Ao fim, o script exige que app,
-Raikou e Raiju usem exatamente a imagem alvo e registra se o Fujin permanece em
-outra release — ele não substitui Fujin implicitamente. Se a candidata falhar
-antes do handoff, o runtime antigo permanece online; se houver falha posterior,
-os três containers são restaurados pela imagem de rollback. Polling
+Raikō::Shin, Raikō::Sei, Raikō::Kō, Raikō::Kai e Raiju usem exatamente a imagem
+alvo e registra se o Fujin permanece em outra release — ele não substitui
+Fujin implicitamente. Se a candidata falhar antes do handoff, o runtime antigo
+permanece online. Esta instalação única não executa rollback automático após o
+handoff: a falha encerra o plano de controle para investigação explícita.
+Polling
 de restore em estado `READY` pode aguardar essa curta janela sem nova submissão
 AWS/Fujin; stream ou multipart já admitido nunca deve ser interrompido.
 
-O deploy padrão inicia PostgreSQL, API, Raikou e Raiju em `REAL`. Fujin LOCAL é
+O deploy padrão inicia PostgreSQL, API, Raikō::Shin, Raikō::Sei, Raikō::Kō,
+Raikō::Kai e Raiju em `REAL`. Fujin LOCAL é
 uma topologia opcional de pré-produção e só é ativada depois do aceite do
 runtime normal.
 
@@ -41,8 +43,18 @@ runtime normal.
 
 ## OCI Resource Manager
 
+> **Migração de stack existente:** a versão atual da stack não gerencia mais o
+> Block Volume `*-fujin-payloads`. Antes de aplicar esta alteração em uma stack
+> criada por versão anterior, confirme no plano Terraform a destruição do
+> volume e preserve/mova qualquer payload Fujin que ainda precise ser mantido.
+> Em uma instalação nova, nenhum recurso Fujin é criado.
+
 1. Crie um Stack a partir de `terraform/orm` neste repositório.
-2. Preencha o formulário. Use 8 OCPUs, 32 GB e boot volume de 500 GB como ponto de partida. O stack também cria o Block Volume dedicado do Fujin com 15.360 GB (15 TB), separado do boot volume.
+   O formulário usa seletores OCI para compartment, availability domain,
+   VCN, subnet, imagem, shape, chave SSH, Vault, Key, Secrets e policy de
+   backup. Selecione primeiro o compartment e a VCN: a lista de subnets é
+   filtrada pela VCN escolhida e o Terraform valida essa associação no plano.
+2. Preencha o formulário. Use 8 OCPUs, 32 GB e boot volume de 500 GB como ponto de partida. A stack cria somente os recursos necessários ao Raijin; ela não cria, anexa ou formata volumes de payload do Fujin.
    A VM aceita administração SSH exclusivamente por chave pública/privada: senha, teclado interativo e login direto de root são desabilitados pelo cloud-init e reforçados pelo bootstrap. A porta 8080 nunca deve ser liberada; ela é publicada apenas em `127.0.0.1` na VM. O cliente pode manter a regra de SSH sem restrição de CIDR conforme sua política, desde que preserve a proteção da chave privada.
 3. Escolha criar Vault/Key ou informar os OCIDs de recursos existentes. O stack pode criar os Secrets de plataforma e um template JSON inicial de conexão AWS; quando esses recursos são externos, o cliente deve fornecer o Secret de senha PostgreSQL e as policies correspondentes.
 4. Se criar policy, informe os buckets OCI de destino em `destination_buckets_json`. Agrupe buckets no mesmo compartment sempre que possível.
@@ -162,7 +174,8 @@ sudo systemctl list-timers 's3-oci-*' --all
 ```
 
 O bootstrap lê os Secrets pelo Instance Principal, prepara PostgreSQL
-persistente, rede Podman, API, Raikou, Raiju, launchers e timers. Em falha,
+persistente, rede Podman, API, os quatro papéis Raikō, Raiju, launchers e
+timers. Em falha,
 registre logs sem expor Secrets:
 
 ```bash
@@ -189,7 +202,8 @@ arquivo `oci-runtime.json`.
 ### 6. Fujin LOCAL opcional
 
 Fujin LOCAL mantém o Raijin em `REAL` e fornece endpoints privados compatíveis
-com AWS/OCI. Antes de ativá-lo, provisione e monte o volume em
+com AWS/OCI. Ele é uma instalação separada e não é provisionado pela stack
+`terraform/orm`. Antes de ativá-lo, provisione e monte externamente o volume em
 `/var/lib/s3-oci-migration/fujin-payloads`, gere `oci-runtime-local.json` e
 execute o [runbook de aceite Fujin LOCAL](../operacional/runbook-fujin-local-acceptance.md).
 
@@ -230,9 +244,9 @@ bootstrap converge o conjunto inteiro para a revisão aprovada.
 
 Atualização não é instalação nova. Em janela operacional, preserve PostgreSQL
 e `/var/lib/s3-oci-migration`, prepare a release em diretório separado, valide
-a imagem, mantenha a release anterior para rollback e faça drain antes da
-ativação. Não use `s3-oci-stop-runtime` durante cópias: ele remove a topologia
-ativa. Em caso de falha ou restauração de backup, siga o
+a imagem e faça drain antes da ativação. Esta instalação única não mantém
+rollback automático. Não use `s3-oci-stop-runtime` durante cópias: ele remove
+a topologia ativa. Em caso de falha ou restauração de backup, siga o
 [runbook de recuperação](recovery-runbook.md).
 
 ## Acesso local à interface
@@ -263,7 +277,7 @@ Os formulários e indicadores principais possuem ícones `i` de ajuda contextual
 
 A navegação separa claramente os dois contextos: **Status** contém apenas saúde global, observabilidade e prontidão de integrações; **Queue** é a console de acompanhamento da migração, com atividade, fila durável de transferência, workers e auditorias profundas. A atualização automática configurável atua na tela Queue.
 
-Os parâmetros operacionais são persistidos no PostgreSQL. Dois containers ficam separados da API: o **worker de governança** assume discovery, restores Batch, polling, agendamento e auditorias; o **worker de transferência** assume somente cópia e retomada multipart. Ambos usam leases na mesma fila PostgreSQL. Em `REAL`, só operam após habilitação explícita. Em `SIMULATION`, os mesmos workers usam exclusivamente os contratos HTTP do backend simulado; não existe mais um worker artificial que avança estados.
+Os parâmetros operacionais são persistidos no PostgreSQL. Cinco containers ficam separados da API: **Raikō::Shin** assume planejamento e reconciliação global; **Raikō::Sei**, restores Batch e polling; **Raikō::Kō**, discovery; **Raikō::Kai**, auditorias; e o **Raiju**, somente cópia e retomada multipart. Todos usam leases na mesma fila PostgreSQL, com responsabilidades de tarefa disjuntas. Em `REAL`, só operam após habilitação explícita. Em `SIMULATION`, os mesmos workers usam exclusivamente os contratos HTTP do backend simulado; não existe mais um worker artificial que avança estados.
 
 ### Execução local por Compose
 
@@ -280,7 +294,7 @@ The About page reports the semantic release and the exact build revision. CI
 or a manual release should inject the Git commit while building, for example:
 
 ```bash
-RAIJIN_SERVICE_VERSION=0.8.9 RAIJIN_BUILD_REVISION="$(git rev-parse --short HEAD)" docker compose build
+RAIJIN_SERVICE_VERSION=0.8.11 RAIJIN_BUILD_REVISION="$(git rev-parse --short HEAD)" docker compose build
 ```
 
 Without build metadata the revision is shown as `development`, so an operator
@@ -398,9 +412,7 @@ curl -fsS http://127.0.0.1:8080/raijin/api/platform/status
 O timer deve estar ativo e possuir uma próxima execução; a API deve retornar
 `available: true`, `stale: false` e `age_seconds` inferior a 180.
 
-O stack anexa o Block Volume `*-fujin-payloads` de 15 TB como `/dev/oracleoci/oraclevdb`. O bootstrap o formata como XFS apenas se estiver vazio e o monta em `/var/lib/s3-oci-migration/fujin-payloads` com permissões `0700`. Esse diretório é bind-mounted somente no container Fujin da topologia **LOCAL**; PostgreSQL, API e workers Raijin nunca o recebem. Em operação REAL normal, nenhum container o monta. LOCAL mantém RAIJIN em REAL, mas direciona seus SDKs aos endpoints privados do Fujin. Ao aplicar a alteração em uma VM já existente, execute uma vez `sudo /opt/s3-oci-migration/release/scripts/bootstrap.sh` após a attachment ficar `ATTACHED`.
-
-Embora o boot volume seja provisionado com 500 GB, a imagem OCI pode iniciar com a partição LVM ainda no tamanho original. No primeiro boot, o cloud-init expande a partição e o PV e aloca todos os extents livres do volume group ao filesystem raiz. Assim, o Raijin — instalado no boot volume — utiliza praticamente toda a capacidade disponível, sem competir com o volume dedicado de 15 TB do Fujin. A rotina é idempotente e não reduz nem altera o filesystem em execuções posteriores.
+Embora o boot volume seja provisionado com 500 GB, a imagem OCI pode iniciar com a partição LVM ainda no tamanho original. No primeiro boot, o cloud-init expande a partição e o PV e aloca todos os extents livres do volume group ao filesystem raiz. Assim, o Raijin instalado no boot volume utiliza praticamente toda a capacidade disponível. A rotina é idempotente e não reduz nem altera o filesystem em execuções posteriores.
 
 O bloco **Observabilidade operacional** acompanha, sem chamar AWS ou OCI: tarefas falhas e em retry, leases vencidos, checkpoints multipart pendentes de retomada, transferências sem progresso há mais de dez minutos, falhas persistidas nas últimas 24 horas, risco previsto de expiração de cópias restauradas e espaço livre do volume persistente. Para um coletor local compatível, `http://127.0.0.1:8080/metrics` expõe essas métricas no formato Prometheus (`raijin_failed_tasks`, `raijin_retrying_tasks`, `raijin_stale_task_leases`, `raijin_active_multipart_checkpoints`, `raijin_stalled_transfers`, `raijin_failures_last_24h`, `raijin_restore_expiry_risk_waves` e `raijin_disk_free_bytes`); mantenha-o atrás do mesmo túnel SSH ou de um agente local, nunca em uma porta pública.
 

@@ -1,161 +1,31 @@
 (() => {
   const STORAGE_KEY = 'raijin-ui-language';
-  const ptToEn = {
-    'Console operacional local. A tela não chama AWS nem OCI diretamente; workers controlados executam as integrações posteriormente.': 'Local operations console. This screen does not call AWS or OCI directly; controlled workers perform integrations afterwards.',
-    'Saúde da plataforma': 'Platform health',
-    'Carregando…': 'Loading…',
-    'Carregando transferências ativas…': 'Loading active transfers…',
-    'Carregando estado dos serviços…': 'Loading service status…',
-    'Atividade de migração': 'Migration activity',
-    'Atualizar agora': 'Refresh now',
-    'Atualização automática': 'Auto refresh',
-    'Intervalo': 'Interval',
-    '5 segundos': '5 seconds', '10 segundos': '10 seconds', '15 segundos': '15 seconds', '30 segundos': '30 seconds', '1 minuto': '1 minute', '5 minutos': '5 minutes',
-    'Fila de transferência': 'Transfer queue',
-    'Carregando fila de transferência…': 'Loading transfer queue…',
-    'Auditorias profundas': 'Deep audits',
-    'Nenhuma auditoria profunda em execução.': 'No deep audit is running.',
-    'Credenciais e integrações': 'Credentials and integrations',
-    'Validar agora': 'Validate now',
-    'Ainda não validado nesta sessão.': 'Not validated in this session yet.',
-    'Fila e atividades recentes': 'Queue and recent activity',
-    'Abrir Migrações': 'Open Migrations',
-    'Plataforma de migração de dados': 'Data migration platform',
-    'Versão': 'Version',
-    'Princípios da plataforma': 'Platform principles',
-    'Controle': 'Control', 'Ondas persistentes': 'Persistent waves',
-    'Planejamento, fila, retomada e histórico sobrevivem a reinicializações da VM.': 'Planning, queueing, resuming, and history survive VM restarts.',
-    'Eficiência': 'Efficiency', 'Chamadas minimizadas': 'Minimized calls',
-    'Discovery e restores são orquestrados para reduzir operações cobradas na AWS.': 'Discovery and restores are orchestrated to reduce billable AWS operations.',
-    'Confiança': 'Trust', 'Integridade comprovada': 'Proven integrity',
-    'A cópia registra evidências SHA-256; auditoria profunda fica disponível sob demanda.': 'Transfers record SHA-256 evidence; deep audit is available on demand.',
-    'Configuração operacional': 'Operational configuration',
-    'Interface': 'Interface', 'Idioma da interface': 'Interface language',
-    'Parte do upload': 'Multipart upload', 'multipart (MiB)': 'part (MiB)',
-    'Workers de': 'Workers', 'transferência': 'transfer',
-    'Limite de throughput': 'Throughput limit', 'Tamanho padrão da': 'Default wave', 'onda (TB)': 'size (TB)',
-    'Retenção padrão': 'Default retention', 'do restore (dias)': 'for restore (days)',
-    'Tier padrão de': 'Default',
-    'Lease da tarefa': 'Task lease', '(segundos)': '(seconds)',
-    'Worker de': 'Simulation', 'simulação': 'worker', 'Habilitar': 'Enable',
-    'Salvar parâmetros': 'Save operational', 'operacionais': 'parameters', 'Salvar configuração': 'Save configuration',
-    'Configuração AWS': 'AWS configuration',
-    'ARN da role AWS de migração': 'AWS migration role ARN',
-    'ARN da role AWS Batch Operations': 'AWS Batch Operations role ARN',
-    'Bucket AWS de controle': 'AWS control bucket', 'Prefixo no bucket de controle': 'Control bucket prefix',
-    'Preservar tags S3': 'Preserve S3 tags', 'Worker AWS/OCI real': 'Real AWS/OCI worker',
-    'Inventário de buckets OCI': 'OCI bucket inventory', 'Atualizar buckets OCI': 'Refresh OCI buckets',
-    'Prontidão das integrações': 'Integration readiness', 'Executar pré-check': 'Run pre-check',
-    'Pré-check ainda não executado.': 'Pre-check has not run yet.',
-    'Nova origem': 'New source', 'Criar nova origem': 'Create new source', 'Nome da origem': 'Source name', 'Bucket S3': 'S3 bucket', 'Prefixo S3 (opcional)': 'S3 prefix (optional)',
-    'Região AWS': 'AWS region', 'Bucket OCI de destino': 'Destination OCI bucket', 'Cadastrar origem': 'Create source', 'Salvar origem': 'Save source', 'Fechar': 'Close',
-    'Fontes e inventário': 'Sources and inventory', 'Executar discovery': 'Run discovery', 'Validar destino OCI': 'Validate OCI destination',
-    'Editar origem': 'Edit source', 'Excluir': 'Delete', 'Arquivar': 'Archive', 'Atualizar': 'Refresh',
-    'Cadastre ou selecione uma origem.': 'Create or select a source.', 'Objetos descobertos': 'Discovered objects', 'Objetos encontrados no discovery': 'Objects found during discovery',
-    'Exibir por página': 'Show per page', 'Buscar chave S3': 'Search S3 key', 'Buscar': 'Search',
-    'Criar ondas': 'Create waves', 'Criar onda': 'Create wave',
-    'Criar uma onda manualmente': 'Create one wave manually', 'Criar todas automaticamente': 'Create all automatically', 'Criar automaticamente por prefixo': 'Create automatically by prefix',
-    'Onda manual': 'Manual wave', 'Nome da onda': 'Wave name', 'Quantidade de dados': 'Data amount', 'Unidade de medida': 'Unit of measure',
-    'Retenção do restore (dias)': 'Restore retention (days)', 'Tier de restore': 'Restore tier', 'Criar onda manual': 'Create manual wave',
-    'Tamanho alvo por onda': 'Target size per wave', 'Unidade': 'Unit', 'Criar todas as ondas': 'Create all waves',
-    'Ondas por prefixo S3': 'Waves by S3 prefix', 'Prefixo de objetos': 'Object prefix', 'Criar ondas do prefixo': 'Create prefix waves',
-    'Ondas': 'Waves', 'Colocar todas na fila': 'Queue all', 'Relatório da onda selecionada': 'Selected wave report',
-    'Selecione “Relatório” em uma onda.': 'Select “Report” on a wave.', 'Detalhe do objeto': 'Object detail', 'Selecione uma chave no inventário.': 'Select a key in the inventory.',
-    'Fila durável': 'Durable queue', 'Todos os estados': 'All states', 'Recuperar tarefas com lease expirado': 'Recover tasks with expired lease',
-    'Exportar CSV': 'Export CSV', 'Histórico operacional': 'Operational history', 'Atualizar histórico': 'Refresh history', 'Exportar CSV completo': 'Export full CSV',
-    'Barra de status operacional': 'Operational status bar', 'Nenhum alerta operacional ativo.': 'No active operational alert.',
-    'Tarefas persistentes do Raijin, incluindo estado, lease, tentativas e último erro. Esses registros permitem retomar o processamento após interrupções da VM ou dos workers.': 'Persistent Raijin tasks, including state, lease, attempts, and latest error. These records allow processing to resume after VM or worker interruptions.',
-    'Linha cronológica auditável das ações, decisões dos workers e mudanças de estado. Quando uma source está selecionada, o conteúdo é filtrado automaticamente para ela.': 'Auditable chronological record of actions, worker decisions, and state changes. When a source is selected, the content is automatically filtered to it.',
-    'Auditoria profunda SHA-256': 'Deep SHA-256 audit', 'Cancelar': 'Cancel', 'Iniciar auditoria': 'Start audit',
-    '🛡️ Auditoria SHA-256': '🛡️ SHA-256 audit',
-    'Calculando estimativa…': 'Calculating estimate…',
-    'Aguarde enquanto consolidamos os custos das waves.': 'Please wait while wave costs are consolidated.',
-    'Status': 'Status', 'Migrações': 'Migrations', 'Configurações': 'Settings', 'Sobre o RAIJIN': 'About RAIJIN',
-    'Arquivos': 'Files', 'Dados': 'Data', 'Taxa': 'Rate', 'Tempo de cópia': 'Copy time', 'Divergências': 'Mismatches',
-    'Fonte / onda': 'Source / wave', 'Fonte': 'Source', 'Onda': 'Wave', 'Objetos': 'Objects', 'Tamanho': 'Size', 'Ações': 'Actions',
-    'Relatório': 'Report', 'Manifesto CSV': 'Manifest CSV', 'Pausar': 'Pause', 'Retomar': 'Resume', 'Reprocessar': 'Reprocess',
-    'Verificar integridade': 'Verify integrity', 'Auditoria profunda': 'Deep audit',
-    'Nenhuma onda criada.': 'No wave created.', 'Selecione uma origem.': 'Select a source.',
-    'Nenhuma onda aguardando processamento.': 'No wave is waiting for processing.', 'Transferências ativas': 'Active transfers',
-    'Nenhuma onda com transferência ativa.': 'No wave has an active transfer.', 'Ocioso': 'Idle', 'Em execução': 'Running', 'Aguardando': 'Waiting',
-    'Arquivos transferidos': 'Transferred files', 'Transferência concluída': 'Completed transfer', 'Taxa atual': 'Current rate',
-    'Memória da VM': 'VM memory', 'CPU da VM': 'VM CPU', 'Restores': 'Restores',
-    'disponíveis': 'available', 'solicitados': 'requested', 'concluídos': 'completed', 'em cópia': 'copying',
-    'Idioma': 'Language', 'Português': 'Portuguese',
-    'Fontes': 'Sources', 'Inventário': 'Inventory', 'Fila pronta': 'Ready queue', 'Fila em execução': 'Running queue', 'Espaço livre': 'Free space',
-    'Serviços da VM': 'VM services', 'Serviço da plataforma': 'Platform service', 'Aplicação web': 'Web application',
-    'Fujin — simulação': 'Fujin — simulation',
-    'Timer de backup PostgreSQL': 'PostgreSQL backup timer', 'Timer de estado': 'Status timer',
-    'Nenhuma auditoria profunda aguardando ou em execução.': 'No deep audit is queued or running.',
-    'Valida as Secrets OCI e os ARNs configurados localmente. Quando preenchidos, testa a credencial AWS e a role de migração sem listar ou restaurar objetos.': 'Validates locally configured OCI Secrets and ARNs. When supplied, it tests the AWS credential and migration role without listing or restoring objects.',
-    'Selecione uma origem': 'Select a source', 'Nome completo ou trecho do caminho': 'Full name or path fragment',
-    'Atualize e selecione um bucket OCI': 'Refresh and select an OCI bucket',
-    'Ex.: arquivo-legado': 'Ex.: legacy-archive', 'Ex.: meu-bucket-origem': 'Ex.: my-source-bucket', 'Ex.: dados/2024/': 'Ex.: data/2024/',
-    'Selecione a próxima sequência de objetos descobertos da origem até o limite. Ela gera uma tarefa persistente; o restore só será submetido pelo worker AWS após sua configuração.': 'Selects the next sequence of discovered source objects up to the limit. It creates a persistent task; restore is submitted by the AWS worker only after configuration.',
-    'Último backup lógico:': 'Latest logical backup:', 'Nenhum backup lógico encontrado ainda.': 'No logical backup found yet.',
-    'Estado gerado em': 'Status generated at', 'Estado dos serviços da VM indisponível.': 'VM service status unavailable.',
-    'Aguardando primeira atualização': 'Waiting for first refresh', 'Estado dos serviços indisponível:': 'Service status unavailable:',
-    'Nenhuma origem com transferência ativa.': 'No source has an active transfer.',
-    'Não foi possível carregar atividade de migração.': 'Could not load migration activity.',
-    'Os ARNs identificam as roles IAM utilizadas pela plataforma. Eles não são credenciais e ficam persistidos localmente no PostgreSQL da VM.': 'The ARNs identify the IAM roles used by the platform. They are not credentials and are stored locally in the VM PostgreSQL database.',
-    'Consulta manualmente o OCI Resource Search no tenancy inteiro e guarda a lista localmente. A consulta não concede acesso a objetos; a policy da VM continua determinando quais buckets podem ser usados como destino.': 'Manually queries OCI Resource Search across the tenancy and stores the list locally. The query does not grant object access; the VM policy still determines which buckets can be used as destinations.',
-    'Usa a identidade dinâmica da VM para OCI e, quando configurada, valida AWS por STS/AssumeRole. Não revela Secrets, lista objetos nem grava no bucket.': 'Uses the VM dynamic identity for OCI and, when configured, validates AWS through STS/AssumeRole. It does not reveal Secrets, list objects, or write to a bucket.',
-    'RAIJIN conduz migrações controladas de AWS S3 para OCI Object Storage, com inventário persistente, ondas operacionais, retomada segura, rastreabilidade e verificação criptográfica de integridade.': 'RAIJIN performs controlled migrations from AWS S3 to OCI Object Storage with persistent inventory, operational waves, safe resumption, traceability, and cryptographic integrity verification.',
-    'Inspirado em Raijin, a divindade japonesa do trovão, o emblema representa força, movimento e condução precisa: cada objeto sai da origem com evidências de transferência e chega ao destino preservando sua integridade operacional.': 'Inspired by Raijin, the Japanese deity of thunder, the emblem represents strength, movement, and precise guidance: every object leaves the source with transfer evidence and reaches the destination while preserving its operational integrity.',
-    'Ver projeto no GitHub ↗': 'View project on GitHub ↗',
-    'Tamanho base de cada parte enviada ao OCI para arquivos grandes. 64 MiB reduz memória e custo de reenvio após falha; 128 MiB reduz chamadas. A plataforma aumenta automaticamente o valor quando necessário para respeitar o máximo OCI de 10.000 partes. A alteração vale para novos uploads; um upload já iniciado preserva seu tamanho para poder retomar com segurança.': 'Base size of each part uploaded to OCI for large files. 64 MiB reduces memory use and retry cost after failure; 128 MiB reduces calls. The platform automatically increases it when needed to respect OCI’s 10,000-part maximum. The change applies to new uploads; an upload already started keeps its size so it can resume safely.',
-    'Define o idioma da interface neste navegador. A escolha é armazenada localmente e não altera a configuração operacional da plataforma.': 'Sets the interface language in this browser. The choice is stored locally and does not alter the platform operational configuration.'
-    ,'Conexões AWS': 'AWS connections', 'Atualizar Secrets OCI': 'Refresh OCI Secrets', 'Secret OCI compatível': 'Compatible OCI Secret', 'Label imutável da conexão': 'Immutable connection label', 'Cadastrar conexão AWS': 'Register AWS connection', 'Nenhuma conexão AWS cadastrada.': 'No AWS connection registered.', 'Modelo JSON do Secret AWS': 'AWS Secret JSON template'
-    ,'Conexão AWS': 'AWS connection', 'Selecione uma conexão AWS': 'Select an AWS connection', 'Nenhuma conexão AWS cadastrada': 'No AWS connection registered', 'Atualize e selecione um Secret': 'Refresh and select a Secret', 'Nenhum Secret compatível disponível para cadastro': 'No compatible Secret available for registration', 'Secret já cadastrado na conexão': 'Secret already registered by connection', 'Pré-check': 'Pre-check', 'Arquivada': 'Archived', 'Bucket de controle': 'Control bucket', 'Conta AWS': 'AWS account', 'Copiar': 'Copy', 'Copie o modelo e substitua todos os valores de exemplo antes de criar uma nova versão do Secret.': 'Copy the template and replace every example value before creating a new Secret version.'
-  };
-  const phraseToEn = {
-    'objetos': 'objects', 'objeto(s)': 'object(s)', 'sem objetos': 'no objects',
-    'em cópia': 'copying', 'concluídos': 'completed', 'disponíveis': 'available', 'solicitados': 'requested',
-    'Origem salva.': 'Source saved.', 'Configuração operacional salva.': 'Operational configuration saved.',
-    'Selecione uma origem antes de validar o destino OCI.': 'Select a source before validating the OCI destination.',
-    'Validando destino OCI…': 'Validating OCI destination…',
-    'Destino OCI validado: todos os objetos existem, têm o tamanho esperado e preservam a proveniência.': 'OCI destination validated: all objects exist, have the expected size, and preserve provenance.',
-    'Destino OCI divergente:': 'OCI destination diverges:', 'ausente(s)': 'missing', 'com tamanho diferente': 'with a different size',
-    'com metadado divergente.': 'with mismatched metadata.', 'Exemplo ausente:': 'Missing example:',
-    'Destino OCI:': 'OCI destination:', 'validado': 'validated', 'divergente': 'divergent',
-    'tamanho divergente': 'size mismatch', 'proveniência divergente': 'provenance mismatch', 'extra(s)': 'extra(s)',
-    'Configuração:': 'Configuration:', 'Saúde:': 'Health:', 'Buckets OCI:': 'OCI buckets:',
-    'Nenhum bucket em cache. Atualize a lista antes de cadastrar uma origem.': 'No cached buckets. Refresh the list before creating a source.',
-    'Inventário OCI indisponível.': 'OCI inventory unavailable.', 'Consultando OCI Resource Search…': 'Querying OCI Resource Search…',
-    'Pré-check concluído.': 'Pre-check completed.', 'Há pendências antes da operação.': 'There are pending requirements before operation.',
-    'Falha no pré-check.': 'Pre-check failed.', 'Executando pré-check OCI e AWS…': 'Running OCI and AWS pre-check…',
-    'Nenhum objeto. O discovery AWS ainda não foi executado.': 'No objects. AWS discovery has not run yet.',
-    'Nenhum objeto encontrado para a busca.': 'No objects found for the search.', 'Anterior': 'Previous', 'Próxima': 'Next',
-    'Descoberta': 'Discovery', 'Discovery:': 'Discovery:', 'em execução.': 'running.', 'tempo de execução': 'execution time', 'em execução há': 'running for', 'página(s)': 'page(s)', 'checkpoint salvo': 'checkpoint saved', 'tarefa(s) falha(s). Abra Migrações para investigar.': 'failed task(s). Open Migrations to investigate.',
-    'Espaço livre abaixo de 10 GB:': 'Free space below 10 GB:', 'Serviço(s) inativo(s):': 'Inactive service(s):'
-    ,'Observabilidade operacional': 'Operational observability', 'Carregando indicadores operacionais…': 'Loading operational indicators…'
-    ,'Batch Job:': 'Batch job:', 'Status AWS:': 'AWS status:', 'Último poll:': 'Last poll:', 'Próxima tentativa:': 'Next attempt:', 'Tempo aguardando:': 'Waiting time:', 'Último retorno:': 'Last result:'
-    ,'Onda em transferência': 'Wave in transfer', 'Próxima onda da fila': 'Next queued wave', 'Solicitar restore': 'Request restore', 'Aguardar restore': 'Wait for restore', 'Transferir arquivos': 'Transfer files'
-    ,'Tempo acumulado de cópia': 'Accumulated copy time', 'Status da tarefa': 'Task status', 'Workers de transferência': 'Transfer workers', 'Estado': 'State', 'Arquivo': 'File', 'Progresso': 'Progress', 'Demais ondas na fila': 'Other queued waves', 'Etapa': 'Step', 'Tempo acumulado': 'Accumulated time'
-    ,'Não foi possível carregar a fila de transferência.': 'Could not load the transfer queue.', 'Fila de transferência:': 'Transfer queue:'
-    ,'Fila de discovery': 'Discovery queue', 'Carregando fila de discovery…': 'Loading discovery queue…', 'Auditorias profundas': 'Deep audits', 'Nenhuma auditoria profunda em execução.': 'No deep audit is running.'
-    ,'Acompanhamento do restore': 'Restore tracking', 'Ver acompanhamento do restore': 'View restore tracking', 'Disponibilidade': 'Availability', 'Aguardando confirmação': 'Waiting for confirmation', 'Restore solicitado:': 'Restore requested:', 'Último polling:': 'Last polling:', 'Quantidade de polls:': 'Poll count:', 'Primeiro objeto disponível:': 'First object available:', 'Todos os objetos disponíveis:': 'All objects available:', 'Tempo de restore:': 'Restore time:', 'Expiração temporária mais próxima:': 'Earliest temporary expiry:', 'Tentativas de restore': 'Restore attempts', 'Execução Batch:': 'Batch execution:', 'submissão AWS:': 'AWS submission:', 'aceitos': 'accepted', 'falhos': 'failed', 'Nenhuma tentativa Batch registrada.': 'No Batch attempt recorded.'
-    ,'RESTORE 100% DISPONÍVEL': 'RESTORE 100% AVAILABLE', 'RESTORE PARCIAL:': 'PARTIAL RESTORE:', 'DISPONÍVEIS': 'AVAILABLE'
-    ,'Estratégia de transferência': 'Transfer strategy', 'Após todos os arquivos estarem disponíveis': 'After all files are available', 'Liberar arquivos assim que disponíveis': 'Release files as they become available', 'Salvar estratégia': 'Save strategy', 'A liberação antecipada será ativada com o worker de governança.': 'Early release will be enabled with the governance worker.'
-    ,'Resumo operacional': 'Operational summary', 'Tempo total de transferência': 'Total transfer time', 'Arquivos transferidos': 'Transferred files', 'Dados transferidos': 'Transferred data', 'Falhas/erros registrados': 'Recorded failures/errors', 'Tempo total de restore': 'Total restore time', 'Média entre disponibilizações': 'Average availability interval', 'objetos': 'objects', 'tarefas': 'tasks'
-    ,'Processamento do restore': 'Restore processing', 'Resultado efetivo:': 'Effective result:', 'Ação recomendada:': 'Recommended action:', 'Status:': 'Status:', 'aceitos ou já em restore': 'accepted or already being restored', 'falhas que exigem ação': 'failures requiring action', 'sem evidência.': 'without evidence.'
-    ,'Status geral:': 'Overall status:', 'Solicitação do restore AWS': 'AWS restore request', 'Polling de disponibilidade': 'Availability polling', 'Transferência S3 para OCI': 'S3 to OCI transfer', 'Verificação de integridade': 'Integrity verification', 'Nenhuma falha ativa identificada.': 'No active failure identified.', 'Processamento concluído com sucesso.': 'Processing completed successfully.', 'Processamento pausado pelo operador.': 'Processing paused by the operator.', 'Polling de disponibilidade em andamento.': 'Availability polling in progress.', 'Transferência S3 para OCI em andamento.': 'S3 to OCI transfer in progress.', 'Processamento em andamento ou aguardando a próxima etapa.': 'Processing is active or waiting for the next step.', 'A wave exige intervenção; consulte os detalhes abaixo.': 'The wave requires intervention; review the details below.', 'Tentativa de restore': 'Restore attempt'
-    ,'Estimativa de custo — source': 'Cost estimate — source', 'Sem conexão AWS': 'No AWS connection', 'waves planejadas.': 'planned waves.', 'Custo único das waves': 'Wave one-time cost', 'Armazenamento OCI mensal': 'OCI monthly storage', 'Auditoria profunda opcional': 'Optional deep audit', 'Nenhuma wave criada.': 'No wave created.', 'Completa': 'Complete', 'Parcial': 'Partial', 'Temporário restaurado observado': 'Observed temporary restored data', 'ainda não pertencem a uma wave e não entram no total.': 'do not yet belong to a wave and are excluded from the total.', 'Auditoria profunda da source:': 'Source deep audit:', 'wave(s) enfileirada(s) para auditoria SHA-256 sequencial.': 'wave(s) queued for sequential SHA-256 audit.'
-    ,'ATENÇÃO: auditoria profunda de toda a source': 'CAUTION: deep audit for the entire source', 'Serão relidos': 'It will reread', 'objeto(s), totalizando': 'object(s), totaling', 'As waves serão auditadas sequencialmente pelo Raikou, em ordem de criação.': 'Waves will be audited sequentially by Raikou, in creation order.', 'Impacto: haverá leituras no OCI.': 'Impact: OCI reads will be performed.', 'o tempo mínimo teórico é': 'the theoretical minimum time is', 'o tempo real pode ser maior.': 'actual time may be longer.', 'A verificação padrão de integridade já ocorreu durante a transferência.': 'Standard integrity verification already occurred during transfer.', 'Use esta ação apenas para auditoria excepcional ou exigência específica.': 'Use this action only for exceptional audit or a specific requirement.', 'Iniciar auditoria sequencial': 'Start sequential audit'
-  };
+  const localeFor = value => value === 'en' ? 'en-US' : 'pt-BR';
   let language = localStorage.getItem(STORAGE_KEY) === 'en' ? 'en' : 'pt';
+  window.raijinI18nReady = window.i18next.use(window.i18nextHttpBackend).init({
+    lng: localeFor(language), fallbackLng: 'pt-BR',
+    // The catalog is regional (en-US/pt-BR).  Do not also request the
+    // non-existent parent catalog (en), which adds failed requests during
+    // every page initialization.
+    load: 'currentOnly',
+    backend: {loadPath: '/static/locales/{{lng}}.json'},
+    interpolation: {escapeValue: false}, returnNull: false,
+    keySeparator: false, nsSeparator: false
+  }).then(result => { if (language === 'en') applyLanguage(); return result; });
   let translating = false;
   const textSources = new WeakMap();
   const attributeSources = new WeakMap();
+  const pendingElements = new Set();
+  let localizationScheduled = false;
 
   const translate = value => {
     if (!value || !value.trim() || language !== 'en') return value;
     const prefix = value.match(/^\s*/)?.[0] || '';
     const suffix = value.match(/\s*$/)?.[0] || '';
     const core = value.slice(prefix.length, value.length - suffix.length);
-    if (ptToEn[core]) return `${prefix}${ptToEn[core]}${suffix}`;
-    const translated = Object.entries(phraseToEn).sort(([a], [b]) => b.length - a.length)
-      .reduce((result, [pt, en]) => result.replaceAll(pt, en), core);
+    const catalog = window.i18next?.getResourceBundle(localeFor(language), 'translation') || {};
+    const translated = Object.hasOwn(catalog, core)
+      ? window.i18next.t(core, {defaultValue: core}) : core;
     return `${prefix}${translated}${suffix}`;
   };
   const localizeElement = (element) => {
@@ -174,26 +44,64 @@
       });
     });
   };
+  const syncLanguagePicker = () => {
+    const trigger = document.querySelector('#language-trigger');
+    if (!trigger) return;
+    const english = language === 'en';
+    trigger.innerHTML = `<span class="country-flag ${english ? 'us' : 'br'}" aria-hidden="true"></span>`;
+    trigger.title = english ? 'English (US)' : 'Português (Brasil)';
+    trigger.setAttribute('aria-label', english ? 'Interface language: English (US)' : 'Idioma da interface: Português (Brasil)');
+    document.querySelectorAll('#language-menu-options [data-language]').forEach(option => option.setAttribute('aria-checked', String(option.dataset.language === language)));
+  };
   const applyLanguage = () => {
     translating = true;
     document.documentElement.lang = language === 'en' ? 'en-US' : 'pt-BR';
-    document.querySelectorAll('body > :not(script), .modal').forEach(localizeElement);
-    const selector = document.querySelector('#language-selector'); if (selector) selector.value = language;
+    // Each modal is already a direct child of body. Translating it again via
+    // the former second selector multiplied the work during a page refresh.
+    document.querySelectorAll('body > :not(script)').forEach(localizeElement);
+    syncLanguagePicker();
     translating = false;
   };
-  window.raijinLocale = () => language === 'en' ? 'en-US' : 'pt-BR';
+  const scheduleLocalization = elements => {
+    if (language !== 'en') return;
+    elements.forEach(element => {
+      if (element?.nodeType === Node.ELEMENT_NODE) pendingElements.add(element);
+    });
+    if (localizationScheduled || !pendingElements.size) return;
+    localizationScheduled = true;
+    requestAnimationFrame(() => {
+      localizationScheduled = false;
+      // Keep a rendering frame available even when a table inserts many rows.
+      // Nested entries are covered by their ancestor and never translated twice.
+      const pending = [...pendingElements], batch = [];
+      for (const element of pending) {
+        if (batch.length >= 12) break;
+        if (!batch.some(ancestor => ancestor.contains(element))) batch.push(element);
+      }
+      // Descendants are covered by their selected ancestor in this frame.
+      pending.filter(element => batch.some(ancestor => ancestor.contains(element)))
+        .forEach(element => pendingElements.delete(element));
+      translating = true;
+      batch.forEach(localizeElement);
+      translating = false;
+      if (pendingElements.size) scheduleLocalization([]);
+    });
+  };
+  window.raijinLocale = () => localeFor(language);
+  window.t = (key, values) => window.i18next?.t(key, values) || key;
   window.uiText = text => language === 'en' ? translate(text) : text;
-  window.setLanguage = value => { language = value === 'en' ? 'en' : 'pt'; localStorage.setItem(STORAGE_KEY, language); applyLanguage(); document.dispatchEvent(new CustomEvent('raijin:language-changed')); };
+  window.setLanguage = async value => { language = value === 'en' ? 'en' : 'pt'; localStorage.setItem(STORAGE_KEY, language); await window.raijinI18nReady; await window.i18next.changeLanguage(localeFor(language)); applyLanguage(); document.querySelector('#language-menu-options')?.classList.add('hidden'); document.querySelector('#language-trigger')?.setAttribute('aria-expanded', 'false'); document.dispatchEvent(new CustomEvent('raijin:language-changed')); };
+  window.toggleLanguageMenu = event => { event?.stopPropagation(); const menu = document.querySelector('#language-menu-options'), trigger = document.querySelector('#language-trigger'); if (!menu || !trigger) return; const open = menu.classList.toggle('hidden'); trigger.setAttribute('aria-expanded', String(!open)); };
   window.addEventListener('DOMContentLoaded', () => {
     applyLanguage();
-    new MutationObserver(records => { if (!translating) records.forEach(record => record.addedNodes.forEach(node => {
-      if (node.nodeType === Node.ELEMENT_NODE) localizeElement(node);
-      // Dynamic cards frequently insert a bare text node by innerHTML.  The
-      // previous observer skipped those nodes, leaving mixed PT/EN screens.
-      if (node.nodeType === Node.TEXT_NODE) {
-        if (!textSources.has(node)) textSources.set(node, node.nodeValue);
-        node.nodeValue = translate(textSources.get(node));
-      }
-    })); }).observe(document.body, {childList: true, subtree: true});
+    document.addEventListener('click', event => { if (!event.target.closest('.language-menu')) { document.querySelector('#language-menu-options')?.classList.add('hidden'); document.querySelector('#language-trigger')?.setAttribute('aria-expanded', 'false'); } });
+    new MutationObserver(records => { if (!translating) {
+      const roots = [];
+      records.forEach(record => record.addedNodes.forEach(node => {
+        if (node.nodeType === Node.ELEMENT_NODE) roots.push(node);
+        if (node.nodeType === Node.TEXT_NODE && node.parentElement) roots.push(node.parentElement);
+      }));
+      scheduleLocalization(roots);
+    }}).observe(document.body, {childList: true, subtree: true});
   });
 })();

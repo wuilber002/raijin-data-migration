@@ -23,6 +23,11 @@ variable "subnet_ocid" {
   type        = string
 }
 
+variable "vcn_ocid" {
+  description = "Existing VCN that contains the selected subnet. Used to filter the Resource Manager subnet selector and validate the network placement."
+  type        = string
+}
+
 variable "image_ocid" {
   description = "Linux image OCID for the migration VM."
   type        = string
@@ -64,17 +69,6 @@ variable "boot_volume_size_in_gbs" {
   validation {
     condition     = var.boot_volume_size_in_gbs >= 200
     error_message = "Use at least 200 GB for the boot volume; 500 GB is recommended."
-  }
-}
-
-variable "fujin_payload_volume_size_in_gbs" {
-  description = "Dedicated OCI Block Volume capacity for Fujin-managed physical source payloads. 15360 GB is the required 15 TB allocation and is separate from boot, database, logs and releases."
-  type        = number
-  default     = 15360
-
-  validation {
-    condition     = var.fujin_payload_volume_size_in_gbs >= 15360
-    error_message = "Fujin physical payload storage requires at least 15360 GB (15 TB)."
   }
 }
 

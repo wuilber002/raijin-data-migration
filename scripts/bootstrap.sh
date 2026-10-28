@@ -32,6 +32,10 @@ cleanup_failed_bootstrap() {
   if command -v podman >/dev/null 2>&1; then
     local containers=(
       s3-oci-governance-worker
+      s3-oci-raikou-shin
+      s3-oci-raikou-sei
+      s3-oci-raikou-ko
+      s3-oci-raikou-kai
       s3-oci-transfer-worker
       s3-oci-app
       s3-oci-simulator
@@ -58,14 +62,14 @@ trap cleanup_failed_bootstrap EXIT
 # publish a second process on 8080 would incorrectly mark the platform service
 # failed even though every required container is running.
 local_runtime_complete=true
-for container in s3-oci-postgres s3-oci-app s3-oci-governance-worker s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer s3-oci-fujin-local-dns s3-oci-local-ui-gateway; do
+for container in s3-oci-postgres s3-oci-app s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer s3-oci-fujin-local-dns s3-oci-local-ui-gateway; do
   if [[ "$(podman inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]]; then
     local_runtime_complete=false
     break
   fi
 done
 if [[ "$local_runtime_complete" == true ]]; then
-  for container in s3-oci-app s3-oci-governance-worker s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer; do
+  for container in s3-oci-app s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer; do
     if [[ "$(podman inspect --format '{{.ImageName}}' "$container" 2>/dev/null || true)" != "$release_image" ]]; then
       local_runtime_complete=false
       break
@@ -119,7 +123,7 @@ chown 70:70 "$secret_root/simulation_postgres_password"
 chmod 0400 "$secret_root/simulation_postgres_password"
 
 podman network exists s3-oci-migration 2>/dev/null || podman network create s3-oci-migration
-podman rm -f s3-oci-app s3-oci-postgres s3-oci-governance-worker s3-oci-transfer-worker s3-oci-real-worker s3-oci-simulator 2>/dev/null || true
+podman rm -f s3-oci-app s3-oci-postgres s3-oci-governance-worker s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-real-worker s3-oci-simulator 2>/dev/null || true
 
 podman run -d --name s3-oci-postgres --replace --restart unless-stopped \
   --shm-size=512m \

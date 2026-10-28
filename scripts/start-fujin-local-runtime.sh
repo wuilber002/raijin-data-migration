@@ -26,7 +26,7 @@ mountpoint -q "$data_root/fujin-payloads" || {
 
 # This is a deployment transition, not an activation.  It refuses to replace
 # an active migration runtime: drain it first, then start the LOCAL deployment.
-for name in s3-oci-app s3-oci-governance-worker s3-oci-transfer-worker s3-oci-simulator; do
+for name in s3-oci-app s3-oci-governance-worker s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-simulator; do
   if podman container exists "$name"; then
     echo "Container $name is active; drain and stop the current runtime before deploying LOCAL." >&2
     exit 3
@@ -118,13 +118,17 @@ podman network connect "$data_network" s3-oci-app
 # This is a control-plane-only attachment: it lets the UI gateway resolve the
 # Raijin app without giving the gateway access to the data network.
 podman network connect --alias local-app "$ui_network" s3-oci-app
-for role in governance transfer; do
-  worker_role=raikou
-  [[ "$role" == transfer ]] && worker_role=raiju
-  podman run -d --name "s3-oci-${role}-worker" --replace --restart unless-stopped "${common[@]}" \
-    -e RAIJIN_WORKER_ID="${worker_role}-local" -e RAIJIN_WORKER_ROLE="$worker_role" \
+for worker in \
+  's3-oci-raikou-shin:raikou-shin-local:raikou-shin' \
+  's3-oci-raikou-sei:raikou-sei-local:raikou-sei' \
+  's3-oci-raikou-ko:raikou-ko-local:raikou-ko' \
+  's3-oci-raikou-kai:raikou-kai-local:raikou-kai' \
+  's3-oci-transfer-worker:raiju-local:raiju'; do
+  IFS=: read -r container worker_id worker_role <<<"$worker"
+  podman run -d --name "$container" --replace --restart unless-stopped "${common[@]}" \
+    -e RAIJIN_WORKER_ID="$worker_id" -e RAIJIN_WORKER_ROLE="$worker_role" \
     "$image" python3 -m app.real_worker
-  podman network connect "$data_network" "s3-oci-${role}-worker"
+  podman network connect "$data_network" "$container"
 done
 
 # Netavark rewrites a container's resolv.conf when a second network is
@@ -142,7 +146,10 @@ configure_private_dns() {
   printf 'nameserver %s\noptions ndots:1\n' "$resolver_ip" > "$resolv_conf"
 }
 configure_private_dns s3-oci-app
-configure_private_dns s3-oci-governance-worker
+configure_private_dns s3-oci-raikou-shin
+configure_private_dns s3-oci-raikou-sei
+configure_private_dns s3-oci-raikou-ko
+configure_private_dns s3-oci-raikou-kai
 configure_private_dns s3-oci-transfer-worker
 
 ui_resolver_ip="$(podman inspect --format "{{(index .NetworkSettings.Networks \"$main_network\").Gateway}}" s3-oci-fujin-local)"

@@ -1,7 +1,7 @@
 x-raijin-build: &raijin-build
   context: .
   args:
-    RAIJIN_SERVICE_VERSION: ${RAIJIN_SERVICE_VERSION:-0.8.9}
+    RAIJIN_SERVICE_VERSION: ${RAIJIN_SERVICE_VERSION:-0.8.11}
     RAIJIN_BUILD_REVISION: ${RAIJIN_BUILD_REVISION:-development}
 
 services:
@@ -68,7 +68,7 @@ services:
       - /var/lib/s3-oci-migration/fujin-local/tls:/etc/fujin-local-ca:ro
       - /etc/s3-oci-migration/oci-runtime-local.json:/run/oci-runtime/oci-runtime.json:ro
 
-  local-governance-worker:
+  local-raikou-shin: &local-raikou-worker
     build: *raijin-build
     profiles: ["local"]
     restart: unless-stopped
@@ -82,10 +82,10 @@ services:
         condition: service_started
       fujin-local:
         condition: service_healthy
-    environment:
+    environment: &local-raikou-worker-environment
       RAIJIN_OPERATION_MODE: REAL
-      RAIJIN_WORKER_ROLE: raikou
-      RAIJIN_WORKER_ID: raikou-local
+      RAIJIN_WORKER_ROLE: raikou-shin
+      RAIJIN_WORKER_ID: raikou-shin-local
       DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       OCI_RUNTIME_CONFIG_FILE: /run/oci-runtime/oci-runtime.json
@@ -96,6 +96,27 @@ services:
     volumes:
       - /var/lib/s3-oci-migration/fujin-local/tls:/etc/fujin-local-ca:ro
       - /etc/s3-oci-migration/oci-runtime-local.json:/run/oci-runtime/oci-runtime.json:ro
+
+  local-raikou-sei:
+    <<: *local-raikou-worker
+    environment:
+      <<: *local-raikou-worker-environment
+      RAIJIN_WORKER_ROLE: raikou-sei
+      RAIJIN_WORKER_ID: raikou-sei-local
+
+  local-raikou-ko:
+    <<: *local-raikou-worker
+    environment:
+      <<: *local-raikou-worker-environment
+      RAIJIN_WORKER_ROLE: raikou-ko
+      RAIJIN_WORKER_ID: raikou-ko-local
+
+  local-raikou-kai:
+    <<: *local-raikou-worker
+    environment:
+      <<: *local-raikou-worker-environment
+      RAIJIN_WORKER_ROLE: raikou-kai
+      RAIJIN_WORKER_ID: raikou-kai-local
 
   local-transfer-worker:
     build: *raijin-build
@@ -270,7 +291,7 @@ services:
     secrets:
       - simulation_postgres_password
 
-  simulation-governance-worker:
+  simulation-raikou-shin: &simulation-raikou-worker
     build: *raijin-build
     profiles: ["simulation"]
     restart: unless-stopped
@@ -281,16 +302,37 @@ services:
         condition: service_healthy
       simulation-app:
         condition: service_healthy
-    environment:
+    environment: &simulation-raikou-worker-environment
       RAIJIN_OPERATION_MODE: SIMULATION
       RAIJIN_SIMULATOR_BASE_URL: http://simulator:8090
-      RAIJIN_WORKER_ROLE: raikou
-      RAIJIN_WORKER_ID: raikou-governance
+      RAIJIN_WORKER_ROLE: raikou-shin
+      RAIJIN_WORKER_ID: raikou-shin-simulation
       DATABASE_URL: postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation
       POSTGRES_PASSWORD_FILE: /run/secrets/simulation_postgres_password
     command: ["python3", "-m", "app.real_worker"]
     secrets:
       - simulation_postgres_password
+
+  simulation-raikou-sei:
+    <<: *simulation-raikou-worker
+    environment:
+      <<: *simulation-raikou-worker-environment
+      RAIJIN_WORKER_ROLE: raikou-sei
+      RAIJIN_WORKER_ID: raikou-sei-simulation
+
+  simulation-raikou-ko:
+    <<: *simulation-raikou-worker
+    environment:
+      <<: *simulation-raikou-worker-environment
+      RAIJIN_WORKER_ROLE: raikou-ko
+      RAIJIN_WORKER_ID: raikou-ko-simulation
+
+  simulation-raikou-kai:
+    <<: *simulation-raikou-worker
+    environment:
+      <<: *simulation-raikou-worker-environment
+      RAIJIN_WORKER_ROLE: raikou-kai
+      RAIJIN_WORKER_ID: raikou-kai-simulation
 
   simulation-transfer-worker:
     build: *raijin-build

@@ -21,6 +21,14 @@ def test_raijin_uses_the_shared_operational_card_contract():
     assert 'data-card-kind="status"' in styles
 
 
+def test_flight_board_clips_each_phase_to_the_visible_timeline_window():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "visibleStart=Math.max(start,phaseStart)" in page
+    assert "visibleEnd=Math.min(end,phaseEnd)" in page
+    assert "if(visibleEnd<=visibleStart)return ''" in page
+    assert "((visibleEnd-visibleStart)/range)*100" in page
+
+
 def test_project_closure_package_exposes_preview_gates_revisions_and_downloads():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="migration-project-closure"' in page
@@ -37,10 +45,10 @@ def test_project_closure_package_exposes_preview_gates_revisions_and_downloads()
     assert "Resultado final" in page and "documento oficial consolidado do projeto" in page
 
 
-def test_language_selector_is_available_only_in_interface_settings():
+def test_language_selector_is_available_in_the_top_banner():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    assert page.count('id="language-selector"') == 1
-    assert page.index('id="view-settings"') < page.index('id="language-selector"')
+    assert 'id="language-selector"' not in page
+    assert page.index('id="language-trigger"') < page.index('id="view-dashboard"')
     assert 'id="set-multipart-part-size"' in page
     assert 'id="aws-connection"' in page
     assert 'id="aws-connection-secret"' in page
@@ -54,10 +62,56 @@ def test_dynamic_restore_slot_ceiling_is_visible_and_persisted_from_settings():
 
 
 def test_translation_catalog_covers_multipart_dynamic_feedback_and_restore_queue():
-    catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
+    catalog = (ROOT / "app/static/locales/en-US.json").read_text(encoding="utf-8")
     for phrase in ("Multipart upload", "OCI destination validated", "Missing example:", "Interface language", "Batch job:", "Next attempt:"):
         assert phrase in catalog
-    assert "node.nodeType === Node.TEXT_NODE" in catalog
+    assert "node.nodeType === Node.TEXT_NODE" in (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
+
+
+def test_language_picker_lives_in_the_banner_and_shows_the_selected_flag_only():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
+    assert 'id="language-trigger"' in page
+    assert 'id="language-menu-options"' in page
+    assert 'country-flag br' in page
+    assert 'country-flag us' in page
+    assert 'id="language-selector"' not in page
+    assert "const syncLanguagePicker" in catalog
+    assert "window.toggleLanguageMenu" in catalog
+    assert ".language-menu-options.hidden{display:none}" in page
+
+
+def test_i18next_uses_versioned_local_catalogs_with_a_portuguese_fallback():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
+    assert 'src="/static/vendor/i18next-26.0.0.min.js"' in page
+    assert 'src="/static/vendor/i18next-http-backend-3.0.2.min.js"' in page
+    assert "window.i18next.use(window.i18nextHttpBackend).init" in catalog
+    assert "loadPath: '/static/locales/{{lng}}.json'" in catalog
+    assert "fallbackLng: 'pt-BR'" in catalog
+    assert "keySeparator: false, nsSeparator: false" in catalog
+    assert "window.t = (key, values)" in catalog
+    assert (ROOT / "app/static/locales/pt-BR.json").exists()
+    assert (ROOT / "app/static/locales/en-US.json").exists()
+
+
+def test_i18next_catalogs_have_portuguese_fallbacks_for_every_english_message():
+    import json
+
+    en_catalog = json.loads((ROOT / "app/static/locales/en-US.json").read_text(encoding="utf-8"))
+    pt_catalog = json.loads((ROOT / "app/static/locales/pt-BR.json").read_text(encoding="utf-8"))
+    english_message_keys = {key for key, value in en_catalog.items() if isinstance(value, str)}
+    assert english_message_keys <= set(pt_catalog)
+    assert all(isinstance(pt_catalog[key], str) and pt_catalog[key] for key in english_message_keys)
+
+
+def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():
+    catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "ptToEn" not in catalog
+    assert "phraseToEn" not in catalog
+    assert "getResourceBundle(localeFor(language), 'translation')" in catalog
+    assert "toLocaleString('pt-BR')" not in page
 
 
 def test_aws_connection_interface_never_places_secret_content_in_javascript():
@@ -119,11 +173,14 @@ def test_platform_status_cards_use_compact_metric_and_worker_layouts():
     assert 'class="platform-health-unit"' in page
     assert "renderPlatformHealthMetrics(operations)" in page
     assert "splitPlatformMeasure(bytes(operations.bytes))" in page
+    assert "binaryUnit={KB:'KiB',MB:'MiB',GB:'GiB',TB:'TiB',PB:'PiB'}" in page
+    assert "card=(title,value,unit,help,secondary='')" in page
+    assert "${secondary?escape(secondary):''}" in page
     assert 'data-card-kind="worker"' in page
     assert 'class="worker-primary-value"' in page
     assert "renderCompactWorkerStatus(operations,platform)" in page
     assert ".service-grid .service{min-height:76px" in page
-    assert "#health.platform-health-grid{grid-template-columns:repeat(6" in page
+    assert "#health.platform-health-grid{grid-template-columns:repeat(7" in page
 
 
 def test_retired_restore_forecasts_are_not_exposed_as_operational_settings():
@@ -194,6 +251,22 @@ def test_source_summary_identifies_its_aws_connection_with_an_orange_tag():
     assert "AWS Connections:" in page
     assert "#fb923c" in page
 
+
+def test_restore_by_wave_uses_combined_progress_and_status_history_tooltip():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    queue_renderer = page[page.index('// Day-to-day operations are two independent flows.'):]
+    assert '<th>Totais</th><th>Progresso</th><th>Expiração</th>' in queue_renderer
+    assert '<th>Arquivos</th><th>Restore</th>' not in queue_renderer
+    assert 'const fixedBytes=' in queue_renderer
+    assert 'minimumFractionDigits:2,maximumFractionDigits:2' in queue_renderer
+    assert "const displayPercent=" in queue_renderer
+    assert "value>=99.95?'100%'" in queue_renderer
+    assert 'Arquivos (${displayPercent(transferredFiles,totalFiles)})' in queue_renderer
+    assert 'Tamanho (${displayPercent(transferredBytes,totalBytes)})' in queue_renderer
+    assert 'stateTagLabel=label' in queue_renderer
+    assert "<br>${escape(words.join(' '))}" in queue_renderer
+    assert 'state-history-trigger' in queue_renderer
+    assert 'state-history-trigger[data-rich-help]' in page
 
 def test_transfer_queue_uses_compact_style_for_batch_job_id():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
@@ -323,7 +396,26 @@ def test_restore_queue_state_help_lists_all_operational_states_with_colored_tags
     assert "RESTORE + TRANSFER" in page
     assert "RESTORE REAPPROVAL REQUIRED" in page
     assert "restore-state-tooltip-grid" in page
-    assert "stateHelp.dataset.richHelp=restoreStateTooltip()" in page
+    assert "stateHelp.dataset.richHelp=simplifiedRestoreStateTooltip()" in page
+    assert "const restoreStatePresentation=state=>" in page
+    assert "queue-state status-${tone}" in page
+    assert "const restoreStateCell=wave=>" in page
+    assert "duration(elapsed)" in page
+    assert ".queue-state-elapsed" in page
+    assert "const expiryCountdown=expiry=>" in page
+    assert "queue-restore-countdown" in page
+    assert "target._restoreCountdownTimer=setInterval" in page
+    assert "<strong>#${fmt(wave.wave_id)}</strong>: ${escape(wave.source_name)}" in page
+    assert "queue-wave-name" in page
+    assert "const restoreMoment=value=>" in page
+    assert "const restoreRow=wave=>" in page
+    assert "const totalCell=wave=>" in page
+    assert "const waveProgressCell=wave=>" in page
+    assert "<th>Totais</th>" in page
+    assert "<th>Expiração</th>" in page
+    assert ".restore-operation th,.restore-operation td{min-width:0;padding-inline:.42rem;text-align:center" in page
+    assert ".restore-operation th:first-child,.restore-operation td:first-child{width:auto;min-width:0;text-align:left" in page
+    assert ".restore-operation .queue-cell-line{text-align:center}" in page
 
 
 def test_simulation_help_uses_the_shared_rich_tooltip_pattern():
@@ -513,6 +605,14 @@ def test_queue_project_selector_and_timeline_are_grouped_at_the_right():
     assert page.index("filter.append(timelineButton)") > page.index("filter.innerHTML='<label>Projeto")
 
 
+def test_deep_audit_queue_has_pause_resume_controls():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'id="deep-audit-controls"' in page
+    assert "function toggleDeepAuditQueue(pause)" in page
+    assert "/api/deep-audits/${pause?'pause':'resume'}" in page
+    assert "deep-audit-queue-toggle" in page
+
+
 def test_queue_reads_and_activity_are_scoped_by_the_selected_project():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     for path in (
@@ -632,8 +732,7 @@ def test_project_summary_hides_duplicate_discovery_total_and_shows_delivery_perc
     assert "function enhanceProjectDelivery()" in page
     assert "migration-project-delivery-percent" in page
     assert "done*100/total" in page
-    assert "part.prepend(label)" in page
-    assert "part.querySelector('b')?.after(label)" not in page
+    assert "part.querySelector('b')?.after(label)" in page
     assert "minimumFractionDigits:2,maximumFractionDigits:2" in page
 
 
@@ -677,10 +776,29 @@ def test_continuous_lane_queue_exposes_priority_and_idle_diagnosis():
     assert "Prioridades:" in page
 
 
+def test_reprocess_uses_compact_preview_instead_of_loading_the_wave_report():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    handler = page[page.index("async function waveAction"):page.index("async function loadTasks", page.index("async function waveAction"))]
+    assert "/api/waves/${id}/reprocess-preview" in handler
+    assert "/api/waves/${id}/report" not in handler
+    assert "closeWaveReportModal()" in handler
+
+
 def test_queue_restore_panel_hides_completed_waves_but_migrations_keeps_history():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "w.status!=='COMPLETED'&&(restoreStates.has(w.status)||w.restore?.requested_at)" in page
     assert "async function loadWaves" in page
+
+
+def test_restore_queue_uses_availability_as_progress_without_redundant_labels():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    restore_renderer = page.split("// Day-to-day operations are two independent flows.", 1)[1].split("// Make virtual-time semantics explicit", 1)[0]
+
+    assert "restoreBadge" not in restore_renderer
+    assert "wave.task_kind" not in restore_renderer
+    assert "PARTIAL RESTORE" not in restore_renderer
+    assert "const simplifiedRestoreStateTooltip" in page
+    assert "stateHelp.dataset.richHelp=simplifiedRestoreStateTooltip()" in page
 
 
 def test_restore_and_continuous_lane_panels_share_the_top_row_and_details_span_below():
@@ -1060,6 +1178,13 @@ def test_operational_top_alerts_are_dismissible_without_removing_the_footer_cond
     assert "renderTopAlerts(alerts)" in page
 
 
+def test_missing_backup_alert_requires_two_consecutive_status_snapshots():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "consecutiveMissingBackupSnapshots" in page
+    assert "consecutiveMissingBackupSnapshots<2" in page
+    assert "key==='missing-backup'" in page
+
+
 def test_simulation_admin_page_keeps_the_persistent_operational_footer():
     simulation = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
 
@@ -1130,10 +1255,14 @@ def test_aws_connection_actions_are_compact_and_region_never_wraps():
 
 def test_flight_board_supports_manual_refresh_and_bounded_loading():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    english = (ROOT / "app/static/locales/en-US.json").read_text(encoding="utf-8")
 
     assert 'id="flight-board-refresh"' in page
     assert 'onclick="refreshFlightBoard()"' in page
     assert "const flightBoardTimeoutMs=45000" in page
+    assert "window.uiText?.(text)||text" in page
+    for message in ("Montando a timeline…", "Consolidando as janelas persistidas de restore e da lane contínua.", "Atualizando…", "Não foi possível atualizar a timeline.", "Tentar novamente", "Timeline global"):
+        assert message in english
     assert "flightBoardRequestController?.abort()" in page
     assert "RESTORE_SAVING:['restore-saving','Tempo economizado no restore']" in page
     assert ".flight-board-phase.restore-saving" in page
@@ -1143,11 +1272,11 @@ def test_flight_board_supports_manual_refresh_and_bounded_loading():
     assert "continues-from-restore" in page
     assert ".flight-board-restore-row .flight-board-phase.restore-saving{top:5px;height:18px}" in page
     assert ".flight-board-restore-row .flight-board-phase{top:5px;height:18px}" in page
-    assert "flight-board-progress-label" in page
-    assert ".flight-board-wave-progress-label{position:absolute" in page
-    assert "phase.kind==='RESTORE'&&!phase.planned&&phase.wave_progress?.label" in page
-    assert "function flightBoardWaveProgressLabel(phases,start,end)" in page
-    assert "['RESTORE','RESTORE_SAVING'].includes(next.kind)" in page
+    assert "Entrega preservada da tentativa anterior:" in page
+    assert "Não representa o andamento deste restore." in page
+    assert "function flightBoardWaveProgressLabel" in page
+    assert "progress.phase==='Entrega preservada'" in page
+    assert "${flightBoardWaveProgressLabel(w,start,end)}" in page
     assert "const wave=phase.wave_tooltip;" in page
     assert "Tier de restore:" in page
     assert "Tempo economizado confirmado:" in page

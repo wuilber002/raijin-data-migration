@@ -63,7 +63,7 @@ memory_used_kb=$((memory_total_kb - memory_available_kb))
 memory_percent=$(awk -v total="$memory_total_kb" -v used="$memory_used_kb" 'BEGIN { printf "%.2f", used*100/total }')
 
 temporary_file=$(mktemp "$runtime_root/status.XXXXXX")
-printf '{"available":true,"generated_at":"%s","resources":{"cpu_percent":%s,"cpu_count":%s,"memory_total_bytes":%s,"memory_used_bytes":%s,"memory_percent":%s},"services":{"migration_systemd":"%s","postgres_container":"%s","app_container":"%s","governance_worker":"%s","transfer_worker":"%s","simulator_container":"%s","postgres_backup_timer":"%s","platform_status_timer":"%s"},"last_postgres_backups":{"REAL":%s,"SIMULATION":%s}}\n' \
+printf '{"available":true,"generated_at":"%s","resources":{"cpu_percent":%s,"cpu_count":%s,"memory_total_bytes":%s,"memory_used_bytes":%s,"memory_percent":%s},"services":{"migration_systemd":"%s","postgres_container":"%s","app_container":"%s","raikou_shin_worker":"%s","raikou_sei_worker":"%s","raikou_ko_worker":"%s","raikou_kai_worker":"%s","transfer_worker":"%s","simulator_container":"%s","postgres_backup_timer":"%s","platform_status_timer":"%s"},"last_postgres_backups":{"REAL":%s,"SIMULATION":%s}}\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   "$cpu_percent" \
   "$cpu_count" \
@@ -73,7 +73,10 @@ printf '{"available":true,"generated_at":"%s","resources":{"cpu_percent":%s,"cpu
   "$(unit_state s3-oci-migration.service)" \
   "$(container_state s3-oci-postgres)" \
   "$(container_state s3-oci-app)" \
-  "$(container_state s3-oci-governance-worker)" \
+  "$(container_state s3-oci-raikou-shin)" \
+  "$(container_state s3-oci-raikou-sei)" \
+  "$(container_state s3-oci-raikou-ko)" \
+  "$(container_state s3-oci-raikou-kai)" \
   "$(container_state s3-oci-transfer-worker)" \
   "$(container_state s3-oci-simulator)" \
   "$(unit_state s3-oci-backup-postgres.timer)" \

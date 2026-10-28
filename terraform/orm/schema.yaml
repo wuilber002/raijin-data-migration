@@ -8,13 +8,13 @@ groupings:
     variables:
       - compartment_ocid
       - availability_domain
+      - vcn_ocid
       - subnet_ocid
       - image_ocid
       - instance_shape
       - ocpus
       - memory_in_gbs
       - boot_volume_size_in_gbs
-      - fujin_payload_volume_size_in_gbs
       - ssh_public_key
       - assign_public_ip
       - resource_name_prefix
@@ -59,22 +59,33 @@ variables:
     dependsOn:
       compartmentId: ${compartment_ocid}
     required: true
+  vcn_ocid:
+    title: Virtual cloud network (VCN)
+    type: oci:core:vcn:id
+    dependsOn:
+      compartmentId: ${compartment_ocid}
+    required: true
   subnet_ocid:
     title: Existing subnet
     type: oci:core:subnet:id
     dependsOn:
       compartmentId: ${compartment_ocid}
+      vcnId: ${vcn_ocid}
     required: true
     description: The customer is responsible for HTTPS egress to AWS S3, AWS STS, OCI Vault, OCI Object Storage, and GitHub Releases.
   image_ocid:
     title: Linux image OCID
-    type: string
+    type: oci:core:image:id
+    dependsOn:
+      compartmentId: ${compartment_ocid}
     required: true
   instance_shape:
     title: VM shape
-    type: string
+    type: oci:core:instanceshape:name
     default: VM.Standard.E5.Flex
     required: true
+    dependsOn:
+      compartmentId: ${compartment_ocid}
   ocpus:
     title: OCPUs
     type: number
@@ -90,15 +101,9 @@ variables:
     type: number
     default: 500
     required: true
-  fujin_payload_volume_size_in_gbs:
-    title: Fujin physical-payload volume (GB)
-    type: number
-    default: 15360
-    required: true
-    description: Dedicated 15 TB Block Volume used only by the Fujin simulator to generate physical source samples. It is separate from boot, PostgreSQL, logs and releases and is never mounted in REAL mode.
   ssh_public_key:
     title: SSH public key
-    type: string
+    type: oci:core:ssh:publickey
     required: true
   assign_public_ip:
     title: Assign public IP to VM
@@ -123,11 +128,9 @@ variables:
   vault_compartment_ocid:
     title: Vault compartment
     type: oci:identity:compartment:id
-    visible: ${create_vault_key}
   key_compartment_ocid:
     title: Key compartment
     type: oci:identity:compartment:id
-    visible: ${create_vault_key}
   secrets_compartment_ocid:
     title: Secrets compartment
     type: oci:identity:compartment:id
@@ -140,14 +143,19 @@ variables:
     description: When disabled, provide existing Vault and Key OCIDs. Terraform can still create platform Secrets in that Vault.
   existing_vault_ocid:
     title: Existing Vault OCID
-    type: string
+    type: oci:kms:vault:id
     required: true
     visible: ${create_vault_key == false}
+    dependsOn:
+      compartmentId: ${vault_compartment_ocid}
   existing_vault_key_ocid:
     title: Existing Vault Key OCID
-    type: string
+    type: oci:kms:key:id
     required: true
     visible: ${create_vault_key == false}
+    dependsOn:
+      compartmentId: ${key_compartment_ocid}
+      vaultId: ${existing_vault_ocid}
   secret_compartment_ocids_json:
     title: AWS Secret discovery compartments JSON
     type: string
@@ -161,14 +169,18 @@ variables:
     description: Creates separate PostgreSQL password Secrets for real and simulation databases. Disable only when the customer supplies both and manages Secret access outside this stack.
   external_postgres_password_secret_ocid:
     title: Existing PostgreSQL password Secret OCID
-    type: string
+    type: oci:kms:secret:id
     required: true
     visible: ${create_platform_secrets == false}
+    dependsOn:
+      compartmentId: ${secrets_compartment_ocid}
   external_simulation_postgres_password_secret_ocid:
     title: Existing simulation PostgreSQL password Secret OCID
-    type: string
+    type: oci:kms:secret:id
     required: true
     visible: ${create_platform_secrets == false}
+    dependsOn:
+      compartmentId: ${secrets_compartment_ocid}
   create_initial_aws_connection_secret:
     title: Create initial AWS connection JSON Secret
     type: boolean
@@ -225,8 +237,10 @@ variables:
     description: Creates two least-privilege statements in each configured Secret compartment: inspect Secret metadata and read Secret bundles. Disable only when the customer creates these policies independently.
   backup_policy_id:
     title: Existing boot-volume backup policy OCID (optional)
-    type: string
+    type: oci:blockstorage:policies:id
     visible: ${create_boot_volume_backup_policy == false}
+    dependsOn:
+      compartmentId: ${compartment_ocid}
     description: Assign an existing automatic backup policy when Terraform should not create one.
   create_boot_volume_backup_policy:
     title: Create automatic boot-volume backup policy

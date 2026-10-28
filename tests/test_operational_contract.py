@@ -24,9 +24,10 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 
 from datetime import datetime, timedelta, timezone
 
-from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MigrationProject, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, ProjectClosureIssueRequest, ProjectClosureReport, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, deep_audits, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, issue_project_closure_report, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, project_closure_readiness, project_closure_snapshot, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, repair_completed_deep_audit_statuses, replan_dynamic_pipeline, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, transfer_queue, wave_cost_estimate
+from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MigrationProject, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, ProjectClosureIssueRequest, ProjectClosureReport, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, deep_audits, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, issue_project_closure_report, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, project_closure_readiness, project_closure_snapshot, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, repair_completed_deep_audit_statuses, replan_dynamic_pipeline, reprocess_preview, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, pause_deep_audit_queue, resume_deep_audit_queue, transfer_queue, wave_cost_estimate
+from app.main import ConsolePresence, ConsolePresenceHeartbeat, console_presence_heartbeat
 from app.closure_report import build_artifacts, canonical_json, safe_csv_cell, sha256
-from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, GOVERNANCE_TASK_KINDS, TRANSFER_TASK_KINDS, SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, simulated_network_retry_after, simulation_restore_poll_clock_leader, simulation_source_lane_has_committed_work, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
+from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, RAIKOU_AUDIT_TASK_KINDS, RAIKOU_RESTORE_TASK_KINDS, RAIKOU_TASK_KINDS, TRANSFER_TASK_KINDS, SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, simulated_network_retry_after, simulation_restore_poll_clock_leader, simulation_source_lane_has_committed_work, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
 from app.simulator_ports import SimulatorTransportError
 from app import real_worker
 from app.runtime_context import OperationMode, RuntimeContext
@@ -35,6 +36,41 @@ from app.runtime_context import OperationMode, RuntimeContext
 def test_object_model_contains_durable_multipart_checkpoint_fields():
     columns = ObjectRecord.__table__.columns
     assert {"multipart_upload_id", "multipart_part_size", "multipart_parts_json", "multipart_updated_at"} <= set(columns.keys())
+
+
+def test_anonymous_console_presence_counts_sessions_and_expires_stale_heartbeats():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as session:
+        stale_session_id = "00000000-0000-4000-8000-000000000000"
+        stale = ConsolePresence(
+            session_id=stale_session_id,
+            first_seen_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            last_seen_at=datetime.now(timezone.utc) - timedelta(minutes=3),
+        )
+        session.add(stale)
+        session.commit()
+        heartbeat = ConsolePresenceHeartbeat(session_id="11111111-1111-4111-8111-111111111111")
+        first = console_presence_heartbeat(heartbeat, session)
+        second = console_presence_heartbeat(heartbeat, session)
+        assert first == {"active_consoles": 1, "window_seconds": 120}
+        assert second == first
+        assert session.get(ConsolePresence, stale_session_id) is None
+        row = session.get(ConsolePresence, heartbeat.session_id)
+        assert row is not None
+        assert {"session_id", "first_seen_at", "last_seen_at"} <= set(ConsolePresence.__table__.columns.keys())
+
+
+def test_anonymous_presence_contract_never_uses_personal_identifiers():
+    page = Path("app/static/index.html").read_text(encoding="utf-8")
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    assert "/api/console-presence/heartbeat" in page
+    assert "anonymous-console-session" in page
+    assert "Consoles ativas" in page
+    assert "Presença anônima na console" in page
+    assert "heartbeat: últimos 2 min" in page
+    assert "CONSOLE_PRESENCE_WINDOW_SECONDS = 120" in source
+    assert "client_ip" not in source[source.index("class ConsolePresence"):source.index("class Event")]
 
 
 def _completed_closure_project(session):
@@ -240,7 +276,10 @@ def test_platform_status_exposes_only_the_active_runtime_domain(
             "migration_systemd": "inactive",
             "postgres_container": "running",
             "app_container": "running",
-            "governance_worker": "running",
+            "raikou_shin_worker": "running",
+            "raikou_sei_worker": "running",
+            "raikou_ko_worker": "running",
+            "raikou_kai_worker": "running",
             "transfer_worker": "running",
             "simulator_container": "running",
             "postgres_backup_timer": "active",
@@ -460,6 +499,39 @@ def test_observability_exposes_overdue_unsubmitted_restore_deadlines():
     assert details["rows"][0]["state"] == "ACTION_REQUIRED"
 
 
+def test_global_lane_forecast_serializes_expiry_work_across_sources():
+    """Expiry ETA must use one physical lane, never one lane per source."""
+    import app.main as main
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc)
+    with Session() as session:
+        first_source = Source(name="forecast-one", s3_bucket="one", aws_region="us-east-1",
+                              destination_bucket="destination-one")
+        second_source = Source(name="forecast-two", s3_bucket="two", aws_region="us-east-1",
+                               destination_bucket="destination-two")
+        first = Wave(source=first_source, name="first", max_bytes=10, restore_days=1,
+                     restore_tier="BULK", status="RESTORED")
+        second = Wave(source=second_source, name="second", max_bytes=10, restore_days=1,
+                      restore_tier="BULK", status="RESTORED")
+        session.add_all([first_source, second_source, first, second]); session.flush()
+        session.add_all([
+            ObjectRecord(source_id=first_source.id, wave_id=first.id, object_key="first.bin",
+                         size_bytes=110_000_000_000, state=ObjectState.RESTORED,
+                         restore_expires_at=now + timedelta(hours=3)),
+            ObjectRecord(source_id=second_source.id, wave_id=second.id, object_key="second.bin",
+                         size_bytes=110_000_000_000, state=ObjectState.RESTORED,
+                         restore_expires_at=now + timedelta(hours=4)),
+        ])
+        session.commit()
+        forecast = main.global_continuous_lane_forecast(session, now=now)
+
+    assert forecast["basis"] == "CONFIGURED_LINK_LIMIT"
+    assert [row["wave_name"] for row in forecast["waves"]] == ["first", "second"]
+    assert forecast["waves"][1]["predicted_remaining_seconds"] == 2 * forecast["waves"][0]["predicted_remaining_seconds"]
+
+
 def test_completed_wave_retires_its_latest_failed_task_from_actionable_observability():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -640,6 +712,38 @@ def test_deep_audit_queue_orders_running_waiting_then_completed():
             "running", "waiting", "completed",
         ]
         assert {item["project_name"] for item in result["audits"]} == {"Audit project"}
+
+
+def test_deep_audit_queue_pause_and_resume_preserves_fifo_work():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="audit-control", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        first = Wave(source=source, name="first", max_bytes=1, restore_days=1,
+                     restore_tier="BULK", status="VERIFICATION_QUEUED")
+        second = Wave(source=source, name="second", max_bytes=1, restore_days=1,
+                      restore_tier="BULK", status="VERIFICATION_QUEUED")
+        session.add_all([source, first, second]); session.flush()
+        session.add_all([
+            Task(wave_id=first.id, kind="VERIFY_WAVE", state=TaskState.RUNNING,
+                 worker_id="raikou-kai", lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+            Task(wave_id=second.id, kind="VERIFY_WAVE", state=TaskState.READY),
+        ])
+        session.commit()
+
+        paused = pause_deep_audit_queue(session)
+        assert paused == {"queue_paused": True, "paused": 2}
+        assert {task.state for task in session.scalars(select(Task).where(Task.kind == "VERIFY_WAVE"))} == {TaskState.PAUSED}
+        assert deep_audits(session=session)["queue_paused"] is True
+
+        resumed = resume_deep_audit_queue(session)
+        assert resumed == {"queue_paused": False, "resumed": 2}
+        tasks = list(session.scalars(select(Task).where(Task.kind == "VERIFY_WAVE").order_by(Task.id)))
+        assert [task.state for task in tasks] == [TaskState.READY, TaskState.READY]
+        assert [task.worker_id for task in tasks] == [None, None]
+        assert deep_audits(session=session)["queue_paused"] is False
 
 
 def test_verify_wave_execution_renews_its_task_lease():
@@ -1119,7 +1223,14 @@ def test_operations_overview_reports_raiju_and_raikou_occupancy():
         workers = operations_overview(session)["workers"]
 
         assert workers["raiju"] == {"active": 1, "busy": 1, "idle": 0}
-        assert workers["raikou"] == {"busy": 1}
+        assert workers["raikou"] == {
+            "busy": 1,
+            "roles": {
+                "restore": {"busy": 1},
+                "discovery": {"busy": 0},
+                "audit": {"busy": 0},
+            },
+        }
 
 
 def test_active_sources_cannot_silently_share_an_s3_prefix_scope():
@@ -1154,15 +1265,23 @@ def test_transfer_release_policy_is_captured_by_a_wave_not_the_source():
         assert wave.transfer_release_policy == "AS_OBJECTS_AVAILABLE"
 
 
-def test_governance_and_transfer_workers_claim_disjoint_durable_responsibilities():
-    assert GOVERNANCE_TASK_KINDS == {"SUBMIT_BATCH_RESTORE", "POLL_RESTORE", "VERIFY_WAVE"}
+def test_raikou_roles_and_raiju_claim_disjoint_durable_responsibilities():
+    assert RAIKOU_RESTORE_TASK_KINDS == {"SUBMIT_BATCH_RESTORE", "POLL_RESTORE"}
+    assert RAIKOU_AUDIT_TASK_KINDS == {"VERIFY_WAVE"}
+    assert RAIKOU_TASK_KINDS == RAIKOU_RESTORE_TASK_KINDS | RAIKOU_AUDIT_TASK_KINDS
     assert TRANSFER_TASK_KINDS == {"TRANSFER_CONTINUOUS"}
-    assert GOVERNANCE_TASK_KINDS.isdisjoint(TRANSFER_TASK_KINDS)
-    assert task_kinds_for_role("governance") == GOVERNANCE_TASK_KINDS
-    assert task_kinds_for_role("raikou") == GOVERNANCE_TASK_KINDS
+    assert RAIKOU_TASK_KINDS.isdisjoint(TRANSFER_TASK_KINDS)
+    assert task_kinds_for_role("raikou-shin") == frozenset()
+    assert task_kinds_for_role("raikou-sei") == RAIKOU_RESTORE_TASK_KINDS
+    assert task_kinds_for_role("raikou-ko") == frozenset()
+    assert task_kinds_for_role("raikou-kai") == RAIKOU_AUDIT_TASK_KINDS
     assert task_kinds_for_role("transfer") == TRANSFER_TASK_KINDS
     assert task_kinds_for_role("raiju") == TRANSFER_TASK_KINDS
     assert task_kinds_for_role("all") is None
+    with pytest.raises(RuntimeError, match="raikou-shin"):
+        task_kinds_for_role("raikou")
+    with pytest.raises(RuntimeError, match="raikou-shin"):
+        task_kinds_for_role("governance")
     worker = Path("app/real_worker.py").read_text(encoding="utf-8")
     assert "def ensure_transfer_task" in worker
     assert "TransferQueueItem" in worker
@@ -1192,6 +1311,12 @@ def test_continuous_lane_dispatch_batches_and_cooperative_preemption_are_durable
     assert "CONTINUOUS_TRANSFER_COOPERATIVE_PREEMPTION_RESERVED" in worker
     assert "CONTINUOUS_TRANSFER_COOPERATIVE_PREEMPTION_EXECUTED" in worker
     assert "never an admission threshold" in worker
+
+
+def test_continuous_lane_counts_the_initial_lease_for_single_object_admission():
+    """A just-claimed sole item must still start at least one Raiju."""
+    worker = Path("app/real_worker.py").read_text(encoding="utf-8")
+    assert "live_leases + len(initial) + global_ready_after_initial_claim" in worker
 
 
 def test_simulation_lane_advances_only_after_a_bounded_raiju_fill():
@@ -1375,6 +1500,35 @@ def test_normal_lane_stops_expanding_when_the_last_raiju_has_no_marginal_gain():
     assert target == 8
 
 
+def test_underfilled_lane_discards_a_rejected_cohort_before_next_growth_decision():
+    from app.real_worker import (
+        LaneConcurrencyController,
+        LANE_CONCURRENCY_STABLE_SAMPLES,
+        LANE_EXPERIMENT_VALIDATION_SAMPLES,
+    )
+
+    controller = LaneConcurrencyController(
+        initial_workers=5, minimum_workers=5, link_mbps=1100,
+        minimum_marginal_gain_mbps=15,
+    )
+    now = datetime(2026, 9, 30, tzinfo=timezone.utc)
+    for offset in range(LANE_CONCURRENCY_STABLE_SAMPLES):
+        controller.desired_workers(50, active_workers=5, observed_mbps=850,
+                                   now=now + timedelta(seconds=20 * offset))
+    assert controller.target == 6
+    for offset in range(LANE_EXPERIMENT_VALIDATION_SAMPLES):
+        controller.desired_workers(50, active_workers=6, observed_mbps=854,
+                                   now=now + timedelta(seconds=300 + 20 * offset))
+    assert controller._growth_blocked
+    target, reason = controller.desired_workers(
+        50, active_workers=1, observed_mbps=380,
+        now=now + timedelta(minutes=20),
+    )
+    assert target == 5
+    assert not controller._growth_blocked
+    assert "underfilled" in (reason or "")
+
+
 def test_normal_lane_uses_a_proven_operational_ceiling_without_lowering_the_contract():
     from app.real_worker import LaneConcurrencyController, LANE_CONCURRENCY_STABLE_SAMPLES
 
@@ -1504,6 +1658,21 @@ def test_rejected_growth_restart_migrates_a_legacy_permanent_block_to_timed_repr
         if offset < LANE_CONCURRENCY_STABLE_SAMPLES - 1:
             assert target == 8
     assert target == 9
+
+
+def test_underfilled_recovery_does_not_retain_a_rejected_growth_cooldown():
+    from app.main import TransferAutoscaleState
+    from app.real_worker import LaneConcurrencyController
+
+    anchor = datetime(2026, 9, 30, tzinfo=timezone.utc)
+    state = TransferAutoscaleState(
+        source_id=1, approved_workers=5, target_workers=5,
+        growth_blocked=False, marginal_gain_mbps=-14.89,
+        cooldown_until=anchor + timedelta(hours=6), updated_at=anchor,
+    )
+    controller = LaneConcurrencyController(initial_workers=5, minimum_workers=5, link_mbps=1100)
+    controller.restore(state)
+    assert controller._cooldown_until is None
 
 
 def test_aggregate_lane_rate_uses_progress_delta_once_per_window():
@@ -1876,7 +2045,7 @@ def test_cooperative_preemption_targets_lowest_remaining_raiju_and_honors_cooldo
 
 def test_remote_discovery_has_a_durable_observable_queue_and_adaptive_throttle():
     columns = DiscoveryJob.__table__.columns
-    assert {"source_id", "state", "available_at", "lease_expires_at", "attempts", "error", "completed_at"} <= set(columns.keys())
+    assert {"source_id", "state", "available_at", "lease_expires_at", "attempts", "error", "completed_at", "checkpoint_pages_completed", "checkpoint_objects_observed", "checkpoint_recorded_at"} <= set(columns.keys())
     worker = Path("app/real_worker.py").read_text(encoding="utf-8")
     assert "def claim_discovery_job" in worker
     assert "DISCOVERY_REQUEST_INTERVAL_SECONDS = 0.1" in worker
@@ -1887,6 +2056,9 @@ def test_remote_discovery_has_a_durable_observable_queue_and_adaptive_throttle()
     assert "def discovery_queue(limit: int = 5" in app_source
     assert "limit = min(max(limit, 1), 5)" in app_source
     assert "Remote discovery cannot replace or merge an existing inventory" in app_source
+    assert '"objects_observed": job.checkpoint_objects_observed' in app_source
+    assert '"pages_completed": job.checkpoint_pages_completed' in app_source
+    assert '"checkpoint_recorded_at": job.checkpoint_recorded_at' in app_source
 
 
 def test_rediscovery_preserves_migration_evidence_and_requires_a_justification():
@@ -2025,9 +2197,24 @@ def test_s3_inventory_manifest_is_streamed_by_a_durable_discovery_job():
     assert "def import_s3_inventory_manifest" in worker
     assert "S3 Inventory shard" in worker
     assert "job.inventory_rows_completed = row_number" in worker
+    assert "job.checkpoint_objects_observed += len(pending)" in worker
+    assert "job.checkpoint_pages_completed += 1" in worker
+    assert "job.checkpoint_recorded_at = utcnow()" in worker
     assert 'elif discovery_job.mode == "S3_INVENTORY_MANIFEST"' in worker
     app_source = Path("app/main.py").read_text(encoding="utf-8")
     assert '@app.post("/api/sources/{source_id}/inventory/manifest")' in app_source
+
+
+def test_discovery_queue_renders_execution_checkpoint_and_expandable_errors():
+    page = Path("app/static/index.html").read_text(encoding="utf-8")
+    assert "function discoveryCheckpoint(j)" in page
+    assert "j.objects_observed" in page
+    assert 'class="discovery-checkpoint-pages"' in page
+    assert 'class="discovery-checkpoint-objects"' in page
+    assert "Sem checkpoint individual" in page
+    assert 'class="discovery-error"' in page
+    assert "Clique para exibir a mensagem completa" in page
+    assert "maximum=110" in page
 
 
 def test_inventory_file_import_is_batched_and_never_calls_aws_discovery():
@@ -2036,10 +2223,26 @@ def test_inventory_file_import_is_batched_and_never_calls_aws_discovery():
     end = source.index("\n\n@app.post(\"/api/sources/{source_id}/discovery\")", start)
     handler = source[start:end]
     assert "bulk_insert_mappings(ObjectRecord, pending)" in handler
+    assert '"destination_object_key": resolve_destination_object_key(source, key)' in handler
     assert "gzip.GzipFile" in handler
     assert "object_key/Key and size_bytes/Size" in handler
     assert '"INVENTORY_FILE_IMPORTED"' in handler
     assert "without AWS discovery" in handler
+
+
+def test_every_bulk_discovery_path_freezes_the_destination_route_before_insert():
+    """Bulk mappings bypass ORM defaults, so every producer must route rows explicitly."""
+    worker = Path("app/real_worker.py").read_text(encoding="utf-8")
+    manifest_start = worker.index("def import_s3_inventory_manifest")
+    remote_start = worker.index("def remote_discover", manifest_start)
+    manifest = worker[manifest_start:remote_start]
+    remote_end = worker.index("\n\ndef ", remote_start)
+    remote = worker[remote_start:remote_end]
+    route_expression = '"destination_object_key": resolve_destination_object_key(source,'
+    assert route_expression in manifest
+    assert route_expression in remote
+    assert "session.bulk_insert_mappings(ObjectRecord, pending)" in manifest
+    assert "session.bulk_insert_mappings(ObjectRecord, pending_rows)" in remote
 
 
 def test_discovery_worker_recovers_an_interrupted_checkpoint_without_counting_downtime():
@@ -2749,7 +2952,7 @@ def test_flight_board_does_not_mark_partial_restore_as_complete_or_time_saved():
         assert not [phase for phase in result["phases"] if phase["kind"] == "RESTORE_SAVING"]
 
 
-def test_flight_board_combines_restore_and_transfer_progress_in_observed_restore_bar():
+def test_flight_board_exposes_restore_and_transfer_progress_without_overloading_timeline_bar():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
@@ -2775,12 +2978,11 @@ def test_flight_board_combines_restore_and_transfer_progress_in_observed_restore
         session.add_all(objects); session.commit()
 
         active = flight_board(source_id=source.id, run_id=None, session=session)["waves"][0]
-        active_restore = next(phase for phase in active["phases"] if phase["kind"] == "RESTORE")
         assert active["work_progress"] == {
             "percent": 75, "phase": "Transferindo", "label": "75% Transferindo",
             "restored_objects": 4, "transferred_objects": 2, "total_objects": 4,
         }
-        assert active_restore["wave_progress"] == active["work_progress"]
+        assert "wave_progress" not in next(phase for phase in active["phases"] if phase["kind"] == "RESTORE")
 
         for item in objects[2:]:
             item.state = ObjectState.TRANSFERRED
@@ -2790,9 +2992,8 @@ def test_flight_board_combines_restore_and_transfer_progress_in_observed_restore
         session.commit()
 
         completed = flight_board(source_id=source.id, run_id=None, session=session)["waves"][0]
-        completed_restore = next(phase for phase in completed["phases"] if phase["kind"] == "RESTORE")
         assert completed["work_progress"]["label"] == "100% Concluído"
-        assert completed_restore["wave_progress"]["label"] == "100% Concluído"
+        assert "wave_progress" not in next(phase for phase in completed["phases"] if phase["kind"] == "RESTORE")
 
 
 def test_flight_board_materializes_overdue_unsubmitted_restore_as_projection():
@@ -4137,11 +4338,20 @@ def test_selective_reapproval_preserves_completed_objects_and_multipart_checkpoi
     with Session() as session:
         source = Source(name="selective-reapproval", s3_bucket="source", aws_region="us-east-1",
                         destination_bucket="destination")
-        session.add(source); session.flush()
+        settings = RuntimeSettings(id=1, max_throughput_mbps=1100,
+                                   dynamic_restore_max_slots=2)
+        session.add_all([source, settings]); session.flush()
+        run = DynamicPipelineRun(source_id=source.id, status="SCHEDULED",
+                                 scheduled_restores=True, restore_horizon_waves=3,
+                                 restore_days=3, restore_tier="BULK")
+        session.add(run); session.flush()
         wave = Wave(source_id=source.id, name="wave", max_bytes=200, restore_days=3,
                     restore_tier="BULK", status="RESTORE_REAPPROVAL_REQUIRED",
                     restore_reapproval_required=True,
-                    restore_reapproval_reason="expired", restore_reapproval_detected_at=now)
+                    restore_reapproval_reason="expired", restore_reapproval_detected_at=now,
+                    pipeline_run_id=run.id, planned_restore_at=now,
+                    predicted_restore_first_seconds=48 * 3600,
+                    predicted_transfer_seconds=3600)
         session.add(wave); session.flush()
         done = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="done.bin",
                             size_bytes=100, state=ObjectState.TRANSFERRED, transferred_at=now)
@@ -4158,7 +4368,10 @@ def test_selective_reapproval_preserves_completed_objects_and_multipart_checkpoi
         affected_item = TransferQueueItem(source_id=source.id, wave_id=wave.id,
                                           object_id=affected.id, size_bytes=100,
                                           state=TransferQueueState.REAPPROVAL_REQUIRED)
-        session.add_all([done_item, affected_item, MultipartCheckpointPart(
+        stale_dispatch = Task(wave_id=wave.id, kind="TRANSFER_CONTINUOUS")
+        historic_submission = Task(wave_id=wave.id, kind="SUBMIT_BATCH_RESTORE",
+                                   state=TaskState.SUCCEEDED)
+        session.add_all([done_item, affected_item, stale_dispatch, historic_submission, MultipartCheckpointPart(
             object_id=affected.id, part_number=1, etag="etag", size_bytes=64,
             checksum_sha256="sha",
         )]); session.commit()
@@ -4170,7 +4383,7 @@ def test_selective_reapproval_preserves_completed_objects_and_multipart_checkpoi
         )
 
         session.refresh(done); session.refresh(affected)
-        session.refresh(done_item); session.refresh(affected_item); session.refresh(wave)
+        session.refresh(done_item); session.refresh(affected_item); session.refresh(stale_dispatch); session.refresh(wave)
         assert result["affected_objects"] == 1
         assert done.state == ObjectState.TRANSFERRED
         assert done_item.state == TransferQueueState.TRANSFERRED
@@ -4178,24 +4391,36 @@ def test_selective_reapproval_preserves_completed_objects_and_multipart_checkpoi
         assert affected.multipart_upload_id == "upload-1"
         assert affected.transfer_progress_bytes == 64
         assert affected_item.state == TransferQueueState.CANCELLED
-        assert wave.status == "READY_FOR_RESTORE"
+        assert stale_dispatch.state == TaskState.CANCELLED
+        assert wave.status == "RESTORE_SCHEDULED"
         assert session.scalar(select(func.count(Task.id)).where(
-            Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE"
-        )) == 1
+            Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE",
+            Task.state.in_([TaskState.READY, TaskState.RUNNING]),
+        )) == 0
         assert session.scalar(select(func.count(ObjectRecord.id)).where(
             ObjectRecord.wave_id == wave.id,
             ObjectRecord.state == ObjectState.WAVE_ASSIGNED,
         )) == 1
 
-        # A repeated operator request cannot create a second paid submission.
-        with pytest.raises(HTTPException, match="already has a queued or running task"):
+        # A repeated operator request cannot create a second approved retry.
+        with pytest.raises(HTTPException, match="No unfinished object requires restore reprocessing"):
             reprocess_wave(
                 wave.id,
                 WaveReprocessRequest(approve_new_restore=True),
                 session,
             )
         assert session.scalar(select(func.count(Task.id)).where(
-            Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE"
+            Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE",
+            Task.state.in_([TaskState.READY, TaskState.RUNNING]),
+        )) == 0
+
+        # The dynamic scheduler, rather than the approval endpoint, owns the
+        # actual paid submission.
+        # SQLite returns persisted timestamps without timezone information.
+        assert release_dynamic_restore_horizon(session, settings, now=now.replace(tzinfo=None)) == 1
+        assert session.scalar(select(func.count(Task.id)).where(
+            Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE",
+            Task.state.in_([TaskState.READY, TaskState.RUNNING]),
         )) == 1
 
         # Once HeadObject makes the selectively restored object available,
@@ -4208,6 +4433,36 @@ def test_selective_reapproval_preserves_completed_objects_and_multipart_checkpoi
         assert affected_item.id == session.scalar(select(TransferQueueItem.id).where(
             TransferQueueItem.object_id == affected.id
         ))
+
+
+def test_reprocess_preview_returns_only_the_paid_restore_scope():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="reprocess-preview", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="wave", max_bytes=300, restore_days=3,
+                    restore_tier="BULK", status="RESTORE_REAPPROVAL_REQUIRED",
+                    restore_reapproval_required=True)
+        session.add(wave); session.flush()
+        completed = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="done",
+                                 size_bytes=100, state=ObjectState.TRANSFERRED)
+        expired = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="expired",
+                               size_bytes=200, state=ObjectState.RESTORE_REQUESTED)
+        session.add_all([completed, expired]); session.flush()
+        session.add(TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=expired.id,
+                                      size_bytes=200, state=TransferQueueState.REAPPROVAL_REQUIRED))
+        session.commit()
+
+        preview = reprocess_preview(wave.id, session)
+
+        assert preview == {
+            "wave_id": wave.id, "status": "RESTORE_REAPPROVAL_REQUIRED",
+            "requires_approval": True, "affected_objects": 1,
+            "affected_bytes": 200, "reason": None,
+        }
 
 
 def test_transfer_queue_keeps_restore_lifecycle_distinct_from_worker_task_state():
@@ -4224,6 +4479,50 @@ def test_transfer_queue_keeps_restore_lifecycle_distinct_from_worker_task_state(
         queued = transfer_queue(session)["waves"]
         assert queued[0]["task_state"] == TaskState.READY
         assert queued[0]["operational_state"] == "RESTORING"
+        assert queued[0]["operational_state_since"] is not None
+        assert queued[0]["operational_state_elapsed_seconds"] is not None
+
+
+def test_transfer_queue_exposes_byte_and_file_progress_with_state_history():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc)
+    with Session() as session:
+        source = Source(id=930, name="progress-source", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+        wave = Wave(id=931, source_id=source.id, name="progress-wave", max_bytes=1000,
+                    restore_days=1, restore_tier="BULK", status="RESTORING")
+        task = Task(id=932, wave_id=wave.id, kind="POLL_RESTORE", state=TaskState.READY,
+                    available_at=now)
+        session.add_all([source, wave, task])
+        session.add_all([
+            ObjectRecord(id=933, source_id=source.id, wave_id=wave.id, object_key="restored",
+                         size_bytes=100, state=ObjectState.RESTORED,
+                         restore_requested_at=now - timedelta(minutes=8), restored_at=now - timedelta(minutes=5)),
+            ObjectRecord(id=934, source_id=source.id, wave_id=wave.id, object_key="transferred",
+                         size_bytes=200, state=ObjectState.TRANSFERRED,
+                         restore_requested_at=now - timedelta(minutes=8), restored_at=now - timedelta(minutes=5)),
+            ObjectRecord(id=935, source_id=source.id, wave_id=wave.id, object_key="pending",
+                         size_bytes=700, state=ObjectState.RESTORING,
+                         restore_requested_at=now - timedelta(minutes=8)),
+            Event(wave_id=wave.id, source_id=source.id, kind="BATCH_RESTORE_SUBMITTED",
+                  message="submitted", created_at=now - timedelta(minutes=8)),
+            Event(wave_id=wave.id, source_id=source.id, kind="RESTORE_REQUEST_ACCEPTED",
+                  message="accepted", created_at=now - timedelta(minutes=7)),
+        ])
+        session.commit()
+
+        queued = transfer_queue(session)["waves"][0]
+        assert queued["total_files"] == 3
+        assert queued["total_bytes"] == 1000
+        assert queued["restored_files"] == 2
+        assert queued["restored_bytes"] == 300
+        assert queued["transferred_files"] == 1
+        assert queued["transferred_bytes"] == 200
+        assert [entry["state"] for entry in queued["state_history"]] == [
+            "RESTORE REQUESTED", "RESTORE ACCEPTED", "RESTORING"
+        ]
+        assert queued["state_history"][-1]["current"] is True
 
 
 def test_transfer_queue_omits_completed_wave_even_with_stale_ready_task():
@@ -4985,6 +5284,36 @@ def test_migration_project_api_persists_project_context_in_events():
         assert archived["status"] == "ARCHIVED"
 
 
+def test_configured_multi_source_project_is_not_reported_as_completed_with_attention():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-preparado")
+        session.add(project)
+        session.add_all([
+            Source(
+                name=f"source-preparada-{index}", s3_bucket=f"bucket-{index}",
+                aws_region="us-east-1", destination_bucket="destination",
+                destination_prefix=f"source-{index}", migration_project=project,
+                status="CONFIGURED",
+            )
+            for index in range(1, 5)
+        ])
+        session.flush()
+
+        summary = main.migration_project_summary(session, project)
+
+        assert summary["status"] == "CONFIGURED"
+        assert summary["source_count"] == 4
+        assert all(
+            entry["blockers"] == ["inventário ausente"]
+            for entry in summary["completion"]["sources"]
+        )
+
+
 def test_migration_project_summary_aggregates_without_erasing_source_evidence():
     import app.main as main
 
@@ -5303,6 +5632,59 @@ def test_global_lane_uses_durable_project_fairness_only_after_priority_and_expir
         assert state.last_selected_at.replace(tzinfo=timezone.utc) == now
 
 
+def test_global_lane_considers_each_equal_weight_source_before_fair_tie_break():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-fonte-ponderada")
+        recently_selected = Source(name="source-recent", s3_bucket="recent", aws_region="us-east-1",
+                                   destination_bucket="destination", migration_project=project,
+                                   destination_prefix="weighted/recent")
+        waiting = Source(name="source-waiting", s3_bucket="waiting", aws_region="us-east-1",
+                         destination_bucket="destination", migration_project=project,
+                         destination_prefix="weighted/waiting")
+        session.add_all([project, recently_selected, waiting]); session.flush()
+        recent_wave = Wave(source_id=recently_selected.id, name="recent", max_bytes=1,
+                           restore_days=1, restore_tier="BULK", status="RESTORED")
+        waiting_wave = Wave(source_id=waiting.id, name="waiting", max_bytes=1,
+                            restore_days=1, restore_tier="BULK", status="RESTORED")
+        session.add_all([recent_wave, waiting_wave]); session.flush()
+        recent_items = []
+        for index in range(12):
+            obj = ObjectRecord(source_id=recently_selected.id, wave_id=recent_wave.id,
+                               object_key=f"recent-{index}", size_bytes=1, state=ObjectState.RESTORED)
+            session.add(obj); session.flush()
+            item = TransferQueueItem(project_id=project.id, source_id=recently_selected.id,
+                                     wave_id=recent_wave.id, object_id=obj.id, size_bytes=1,
+                                     state=TransferQueueState.READY, priority_score=60,
+                                     restore_expires_at=now + timedelta(hours=3))
+            session.add(item)
+            recent_items.append(item)
+        waiting_object = ObjectRecord(source_id=waiting.id, wave_id=waiting_wave.id,
+                                      object_key="waiting", size_bytes=1, state=ObjectState.RESTORED)
+        session.add(waiting_object); session.flush()
+        waiting_item = TransferQueueItem(project_id=project.id, source_id=waiting.id,
+                                         wave_id=waiting_wave.id, object_id=waiting_object.id, size_bytes=1,
+                                         state=TransferQueueState.READY, priority_score=60,
+                                         restore_expires_at=now + timedelta(hours=3))
+        session.add(waiting_item); session.flush()
+        session.add(main.TransferLaneDecision(project_id=project.id, source_id=recently_selected.id,
+                                               queue_item_id=recent_items[0].id, priority_score=60,
+                                               reason="previous source cohort", candidates_json="[]",
+                                               created_at=now))
+        session.flush()
+
+        selected = main.select_global_transfer_lane_candidate(
+            session, {recently_selected.id, waiting.id}, now=now
+        )
+        assert selected is not None
+        assert selected.source_id == waiting.id
+
+
 def test_project_wave_groups_remain_logical_and_link_each_real_wave():
     import app.main as main
 
@@ -5411,7 +5793,7 @@ def test_postgres_claims_lock_only_non_nullable_task_and_discovery_tables():
     assert any("FOR UPDATE OF discovery_jobs SKIP LOCKED" in sql for sql in statements)
 
 
-def test_restore_slot_budget_is_global_across_projects_and_sources():
+def test_cold_restore_slot_budget_stays_at_two_across_projects_and_sources():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
@@ -5420,7 +5802,9 @@ def test_restore_slot_budget_is_global_across_projects_and_sources():
         import app.main as main
 
         settings = RuntimeSettings(
-            id=1, dynamic_restore_max_slots=2,
+            # Four is only the evidence-backed ceiling. A cold multi-source
+            # launch must not let every source consume a two-slot baseline.
+            id=1, dynamic_restore_max_slots=4,
             continuous_transfer_min_buffer_seconds=3 * 3600,
             continuous_transfer_target_buffer_seconds=6 * 3600,
             continuous_transfer_max_buffer_seconds=24 * 3600,
@@ -5459,11 +5843,24 @@ def test_restore_slot_budget_is_global_across_projects_and_sources():
         released = set(session.scalars(select(Task.wave_id).where(
             Task.kind == "SUBMIT_BATCH_RESTORE"
         )))
-        assert len(released) == settings.dynamic_restore_max_slots
+        assert len(released) == 2
         assert len(released.intersection({wave.id for wave in waves})) == 2
         assert session.scalar(select(Event.id).where(
             Event.kind == "DYNAMIC_RESTORE_DEFERRED"
         )) is not None
+
+
+def test_competing_source_cannot_idle_an_unfilled_raiju_cohort(monkeypatch):
+    """Fairness yields after the cohort is full, not after its first object."""
+    monkeypatch.setattr(
+        real_worker, "global_lane_has_competing_ready_item",
+        lambda _session, _source_id: True,
+    )
+
+    assert not real_worker.global_lane_should_yield_after_fill(None, 1, 1, 5)
+    assert not real_worker.global_lane_should_yield_after_fill(None, 1, 4, 5)
+    assert real_worker.global_lane_should_yield_after_fill(None, 1, 5, 5)
+    assert not real_worker.global_lane_should_yield_after_fill(None, 1, 5, 5, active_workers=1)
 
 
 def test_project_pause_resume_survives_control_database_reopen(tmp_path):
@@ -5497,11 +5894,13 @@ def test_project_pause_resume_survives_control_database_reopen(tmp_path):
     with ReopenedSession() as session:
         assert session.get(main.MigrationProject, project_id).status == "PAUSED"
         resumed = main.resume_migration_project(project_id, session)
-        # The read model correctly reports attention because this synthetic
-        # project has no inventory; the durable lifecycle state is resumed.
-        assert resumed["status"] == "COMPLETED_WITH_ATTENTION"
+        # The restore task was never cancelled, so the project returns to its
+        # durable running step after the admission fence is lifted.
+        assert resumed["status"] == "RUNNING"
         assert session.get(main.MigrationProject, project_id).status == "CONFIGURED"
-        assert session.get(Wave, wave_id).status == "READY_FOR_RESTORE"
+        # Project pause is an admission fence; it does not rewrite a wave or
+        # compete with a live Raiju lease. The original durable step remains.
+        assert session.get(Wave, wave_id).status == "RESTORING"
         assert session.scalar(select(Event.id).where(
             Event.migration_project_id == project_id,
             Event.kind == "MIGRATION_PROJECT_RESUMED",
