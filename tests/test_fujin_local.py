@@ -555,7 +555,7 @@ def test_oracle_linux_podman_launcher_keeps_raijin_real_and_the_data_plane_priva
     assert 'podman rename "$candidate_name" s3-oci-app' in updater
     assert 'podman exec s3-oci-local-ui-gateway nginx -s reload' in updater
     assert "validate_release_images" in updater
-    assert '[[ "$actual" == "$image" ]]' in updater
+    assert '[[ "$actual" == "$expected" ]]' in updater
     assert "no automatic rollback is configured" in updater
     assert "abort_update()" in updater
     assert "active transfer/lease record(s) remain" in updater

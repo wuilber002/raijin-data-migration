@@ -12,6 +12,7 @@ raijin_load_web_auth() {
   local trusted_proxy_cidrs=""
   local idle_minutes="30"
   local absolute_minutes="720"
+  local bootstrap_username="admin"
 
   if [[ -e "$config_file" ]]; then
     [[ -f "$config_file" && -r "$config_file" ]] || {
@@ -32,6 +33,7 @@ raijin_load_web_auth() {
         RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS) trusted_proxy_cidrs="$value" ;;
         RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES) idle_minutes="$value" ;;
         RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES) absolute_minutes="$value" ;;
+        RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME) bootstrap_username="$value" ;;
         *)
           echo "Unsupported web authentication configuration key in $config_file: $key" >&2
           return 2
@@ -45,4 +47,5 @@ raijin_load_web_auth() {
   export RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS="$trusted_proxy_cidrs"
   export RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES="$idle_minutes"
   export RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES="$absolute_minutes"
+  export RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME="$bootstrap_username"
 }

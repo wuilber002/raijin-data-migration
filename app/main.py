@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover - exercised only on Python < 3.11
 from typing import Generator
 import os
 import csv
+import hmac
 import io
 import json
 import base64
@@ -30,7 +31,8 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, Request as FastAPIRequest
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, and_, case, create_engine, delete, func, inspect, or_, select, text, update
@@ -45,7 +47,7 @@ from app.duration_format import format_duration
 from app.runtime_context import RAIJIN_BUILD_REVISION, RAIJIN_SERVICE_VERSION, SIMULATOR_SERVICE_VERSION, load_runtime_context
 from app.simulator_admin import SimulatorAdminClient, SimulatorAdminError
 from app.simulator_ports import SimulatedSourcePort, SimulatorTransportError
-from app.web_auth import load_web_auth_settings
+from app.web_auth import ConsoleRole, PasswordHasher, generate_csrf_token, generate_session_token, hash_opaque_token, load_web_auth_settings, normalize_username, read_password_file, validate_password
 
 RAIJU_MIN_WORKERS = 5
 # The continuous lane must stay bounded even when a source contains millions
@@ -83,6 +85,14 @@ DYNAMIC_FORECAST_DEGRADED_MIN_SAMPLES_PER_WINDOW = 3
 DYNAMIC_REFORECAST_EVENT_MIN_INTERVAL_SECONDS = 60 * 60
 PLATFORM_STATUS_MAX_AGE_SECONDS = 3 * 60
 CONSOLE_PRESENCE_WINDOW_SECONDS = 120
+CONSOLE_SESSION_COOKIE = "raijin_session"
+CONSOLE_CSRF_COOKIE = "raijin_csrf"
+CONSOLE_LOGIN_WINDOW_SECONDS = 15 * 60
+CONSOLE_LOGIN_MAX_FAILURES = 10
+CONSOLE_LOGIN_SOFT_FAILURES = 5
+CONSOLE_LOGIN_SOFT_WINDOW_SECONDS = 60
+CONSOLE_AUTH_EVENT_RETENTION_DAYS = 90
+CONSOLE_LOGIN_ATTEMPT_RETENTION_DAYS = 30
 
 
 def utcnow() -> datetime:
@@ -195,14 +205,6 @@ def read_secret(path: str) -> str:
 database_url = os.environ["DATABASE_URL"]
 runtime_context = load_runtime_context()
 web_auth_settings = load_web_auth_settings()
-if web_auth_settings.enabled:
-    # P1 installs and validates the policy contract, but no request is allowed
-    # to claim authentication is active until P2/P3 have the durable identity,
-    # session and authorization layers.  Failing closed prevents an operator
-    # from mistaking a configuration-only release for a protected console.
-    raise RuntimeError(
-        "RAIJIN_WEB_AUTH_MODE=local is not available until the web authentication release is installed"
-    )
 cloud_backend = backend_for(runtime_context)
 password = read_secret(os.environ["POSTGRES_PASSWORD_FILE"])
 parsed_database_url = make_url(database_url)
@@ -1142,6 +1144,73 @@ class ConsolePresence(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class ConsoleUser(Base):
+    """One local console identity; password hashes are Argon2id only."""
+    __tablename__ = "console_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(512))
+    role: Mapped[str] = mapped_column(String(16), default=ConsoleRole.VIEWER, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ConsoleSession(Base):
+    """Opaque browser session; the raw token and CSRF value never persist."""
+    __tablename__ = "console_sessions"
+    __table_args__ = (Index("ix_console_sessions_active_user", "user_id", "revoked_at", "expires_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("console_users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    csrf_hash: Mapped[str] = mapped_column(String(64))
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    idle_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    revoke_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    user: Mapped[ConsoleUser] = relationship()
+
+
+class ConsoleLoginAttempt(Base):
+    __tablename__ = "console_login_attempts"
+    __table_args__ = (Index("ix_console_login_attempts_identity_time", "identity_hash", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    identity_hash: Mapped[str] = mapped_column(String(64), index=True)
+    succeeded: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ConsoleAuthAuditEvent(Base):
+    __tablename__ = "console_auth_audit_events"
+    __table_args__ = (Index("ix_console_auth_audit_actor_time", "actor_user_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("console_users.id"), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    target: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    result: Mapped[str] = mapped_column(String(32), default="SUCCEEDED")
+    origin_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    detail_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ConsoleAuthSettings(Base):
+    __tablename__ = "console_auth_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    policy_version: Mapped[str] = mapped_column(String(32), default="v1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Event(Base):
     __tablename__ = "events"
 
@@ -1810,6 +1879,30 @@ class DeepAuditStart(BaseModel):
     confirmed: bool = False
 
 
+class ConsoleLoginRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class ConsolePasswordChange(BaseModel):
+    current_password: str = Field(default="", max_length=1024)
+    new_password: str = Field(min_length=14, max_length=1024)
+
+
+class ConsoleUserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=14, max_length=1024)
+    role: ConsoleRole = ConsoleRole.VIEWER
+    must_change_password: bool = True
+
+
+class ConsoleUserUpdate(BaseModel):
+    role: ConsoleRole | None = None
+    enabled: bool | None = None
+    password: str | None = Field(default=None, min_length=14, max_length=1024)
+    must_change_password: bool | None = None
+
+
 class IntegrityEvidence(BaseModel):
     source_checksum: str | None = Field(default=None, max_length=256)
     destination_checksum: str | None = Field(default=None, max_length=256)
@@ -1869,6 +1962,188 @@ async def simulation_foundation_guard(request: FastAPIRequest, call_next):
     return response
 
 
+def auth_client_origin(request: FastAPIRequest) -> str:
+    """Return a privacy-preserving origin fingerprint, trusting proxies explicitly."""
+    peer = request.client.host if request.client else "unknown"
+    candidate = peer
+    for cidr in web_auth_settings.trusted_proxy_networks:
+        import ipaddress
+        try:
+            trusted_peer = ipaddress.ip_address(peer) in ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            trusted_peer = False
+        if trusted_peer:
+            candidate = (request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip() or peer)
+            break
+    return hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+
+
+def auth_audit(session: Session, event_type: str, *, actor_user_id: int | None = None,
+               target: str | None = None, result: str = "SUCCEEDED",
+               request: FastAPIRequest | None = None, detail: dict | None = None) -> None:
+    """Append only allowlisted operational evidence; never accept secret payloads."""
+    session.add(ConsoleAuthAuditEvent(
+        actor_user_id=actor_user_id, event_type=event_type, target=target,
+        result=result, origin_hash=auth_client_origin(request) if request else None,
+        correlation_id=request.headers.get("x-request-id", "")[:64] or None if request else None,
+        detail_json=json.dumps(detail or {}, sort_keys=True, separators=(",", ":")),
+    ))
+
+
+def auth_role_permits(role: str, required: ConsoleRole) -> bool:
+    order = {ConsoleRole.VIEWER: 1, ConsoleRole.OPERATOR: 2, ConsoleRole.ADMIN: 3}
+    try:
+        return order[ConsoleRole(role)] >= order[required]
+    except ValueError:
+        return False
+
+
+def login_throttled(failures_in_window: int, failures_in_short_window: int) -> bool:
+    """Apply a short brake first, then a longer lockout without global state."""
+    return (failures_in_window >= CONSOLE_LOGIN_MAX_FAILURES or
+            failures_in_short_window >= CONSOLE_LOGIN_SOFT_FAILURES)
+
+
+def auth_route_requirement(path: str, method: str) -> ConsoleRole | str | None:
+    """Central deny-by-default route policy; keep worker APIs out of human RBAC."""
+    # The login document has exactly one external script. Keep that minimal
+    # asset public; every other console static asset remains session-protected.
+    if path in {"/healthz", "/metrics", "/login", "/api/auth/login", "/static/login.js"}:
+        return None
+    if path in {"/api/auth/me", "/api/auth/logout", "/api/auth/password"}:
+        return ConsoleRole.VIEWER
+    if path.startswith("/api/tasks/") and method != "GET" and path != "/api/tasks/recover":
+        return "INTERNAL"
+    if path.startswith("/api/admin/"):
+        return ConsoleRole.ADMIN
+    if path in {"/api/runtime/mode", "/api/settings", "/api/activity-refresh-settings"}:
+        return ConsoleRole.ADMIN
+    if path.startswith(("/api/oci/", "/api/aws-secrets", "/api/aws-connections", "/api/global-aws-pricing", "/api/legacy-aws/")):
+        return ConsoleRole.ADMIN
+    if path.startswith("/api/migration-projects") and method not in {"GET", "HEAD", "OPTIONS"}:
+        return ConsoleRole.ADMIN
+    if path.startswith("/api/"):
+        return ConsoleRole.VIEWER if method in {"GET", "HEAD", "OPTIONS"} else ConsoleRole.OPERATOR
+    if path in {"/", "/simulation"} or path.startswith("/static/"):
+        return ConsoleRole.VIEWER
+    return "DENY"
+
+
+def auth_response(status_code: int, detail: str, *, redirect: bool = False) -> Response:
+    if redirect:
+        return RedirectResponse("/login", status_code=303)
+    return JSONResponse(status_code=status_code, content={"detail": detail, "code": "AUTH_REQUIRED"})
+
+
+def apply_console_security_headers(response: Response, path: str) -> Response:
+    """Apply the same browser boundary to public and authenticated responses."""
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+    if path.startswith("/api/") or path in {"/", "/login"}:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.middleware("http")
+async def console_authentication_guard(request: FastAPIRequest, call_next):
+    """Enforce local browser sessions only after explicit opt-in configuration."""
+    if not web_auth_settings.enabled:
+        return await call_next(request)
+    path, method = request.url.path, request.method.upper()
+    required = auth_route_requirement(path, method)
+    if required is None:
+        response = await call_next(request)
+        return apply_console_security_headers(response, path)
+    if required in {"INTERNAL", "DENY"}:
+        return auth_response(404, "Endpoint is not available through the web console")
+
+    token = request.cookies.get(CONSOLE_SESSION_COOKIE, "")
+    now = utcnow()
+    principal: dict | None = None
+    session_id: int | None = None
+    csrf_hash: str | None = None
+    if token:
+        with SessionLocal() as session:
+            browser_session = session.scalar(select(ConsoleSession).where(
+                ConsoleSession.token_hash == hash_opaque_token(token)
+            ))
+            if browser_session and browser_session.user and browser_session.user.enabled and \
+                    browser_session.revoked_at is None and \
+                    utc_timestamp(browser_session.idle_expires_at) > now and \
+                    utc_timestamp(browser_session.expires_at) > now:
+                user = browser_session.user
+                principal = {"id": user.id, "username": user.username, "role": user.role,
+                             "must_change_password": user.must_change_password}
+                session_id, csrf_hash = browser_session.id, browser_session.csrf_hash
+                if (now - utc_timestamp(browser_session.last_seen_at)).total_seconds() >= 60:
+                    browser_session.last_seen_at = now
+                    browser_session.idle_expires_at = now + timedelta(minutes=web_auth_settings.session_idle_minutes)
+                    session.commit()
+            elif browser_session and browser_session.revoked_at is None:
+                browser_session.revoked_at = now
+                browser_session.revoke_reason = "expired_or_disabled"
+                session.commit()
+    if principal is None:
+        response = auth_response(401, "Authentication required", redirect=not path.startswith("/api/"))
+        response.delete_cookie(CONSOLE_SESSION_COOKIE, path="/")
+        response.delete_cookie(CONSOLE_CSRF_COOKIE, path="/")
+        return response
+    request.state.console_principal = principal
+    request.state.console_session_id = session_id
+    if principal["must_change_password"] and path not in {"/", "/login", "/api/auth/me", "/api/auth/password", "/api/auth/logout"}:
+        return JSONResponse(status_code=403, content={
+            "detail": "Password change is required before using the console",
+            "code": "PASSWORD_CHANGE_REQUIRED",
+        })
+    if not auth_role_permits(principal["role"], required):
+        with SessionLocal() as session:
+            auth_audit(session, "AUTHORIZATION_DENIED", actor_user_id=principal["id"], target=path,
+                       result="DENIED", request=request, detail={"required_role": required.value})
+            session.commit()
+        return JSONResponse(status_code=403, content={"detail": "Insufficient console role", "code": "AUTH_FORBIDDEN"})
+    if method not in {"GET", "HEAD", "OPTIONS"}:
+        csrf = request.headers.get("x-raijin-csrf-token", "")
+        if not csrf_hash or not csrf or not hmac.compare_digest(hash_opaque_token(csrf), csrf_hash):
+            with SessionLocal() as session:
+                auth_audit(session, "CSRF_REJECTED", actor_user_id=principal["id"], target=path,
+                           result="DENIED", request=request)
+                session.commit()
+            return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token", "code": "CSRF_REJECTED"})
+    response = await call_next(request)
+    return apply_console_security_headers(response, path)
+
+
+def ensure_console_auth_bootstrap() -> None:
+    """Create exactly one initial ADMIN when local authentication is enabled."""
+    if not web_auth_settings.enabled:
+        return
+    with SessionLocal() as session:
+        settings = session.get(ConsoleAuthSettings, 1)
+        if settings is None:
+            session.add(ConsoleAuthSettings(id=1))
+        existing = session.scalar(select(ConsoleUser.id).limit(1))
+        if existing is None:
+            password = read_password_file(str(web_auth_settings.bootstrap_password_file))
+            user = ConsoleUser(
+                username=str(web_auth_settings.bootstrap_username),
+                password_hash=PasswordHasher().hash(password),
+                role=ConsoleRole.ADMIN,
+                must_change_password=True,
+            )
+            session.add(user)
+            session.flush()
+            auth_audit(session, "BOOTSTRAP_ADMIN_CREATED", actor_user_id=user.id,
+                       target=user.username, detail={"role": ConsoleRole.ADMIN.value})
+        # Session tokens deliberately do not survive a service restart or a
+        # database restore. This avoids reviving a browser credential from an
+        # earlier operational epoch without introducing a second secret.
+        session.execute(update(ConsoleSession).where(ConsoleSession.revoked_at.is_(None)).values(
+            revoked_at=utcnow(), revoke_reason="service_restart"))
+        session.commit()
+
+
 @app.on_event("startup")
 def create_schema() -> None:
     # A Simulation process must prove it is talking to the expected external
@@ -1876,6 +2151,7 @@ def create_schema() -> None:
     # disabled while the following simulator phases are being implemented.
     cloud_backend.readiness(require_operations=False)
     Base.metadata.create_all(engine)
+    ensure_console_auth_bootstrap()
     # Lightweight additive migrations keep the single-VM deployment upgradeable. No
     # destructive schema operation is performed automatically.
     expected_columns = {
@@ -3596,13 +3872,269 @@ def aws_connection_configuration(connection: AwsConnection, secret: dict) -> dic
     }
 
 
+def console_principal(request: FastAPIRequest) -> dict:
+    principal = getattr(request.state, "console_principal", None)
+    if not principal:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return principal
+
+
+def create_console_session(session: Session, user: ConsoleUser) -> tuple[str, str]:
+    token, csrf = generate_session_token(), generate_csrf_token()
+    now = utcnow()
+    session.add(ConsoleSession(
+        user_id=user.id, token_hash=hash_opaque_token(token), csrf_hash=hash_opaque_token(csrf),
+        issued_at=now, last_seen_at=now,
+        idle_expires_at=now + timedelta(minutes=web_auth_settings.session_idle_minutes),
+        expires_at=now + timedelta(minutes=web_auth_settings.session_absolute_minutes),
+    ))
+    return token, csrf
+
+
+def set_console_cookies(response: Response, token: str, csrf: str) -> None:
+    cookie_lifetime = web_auth_settings.session_absolute_minutes * 60
+    response.set_cookie(CONSOLE_SESSION_COOKIE, token, max_age=cookie_lifetime, httponly=True,
+                        secure=web_auth_settings.external_https, samesite="lax", path="/")
+    # The CSRF value is not a credential. It is intentionally readable by the
+    # same-origin JS client so it can be sent in a custom header.
+    response.set_cookie(CONSOLE_CSRF_COOKIE, csrf, max_age=cookie_lifetime, httponly=False,
+                        secure=web_auth_settings.external_https, samesite="lax", path="/")
+
+
+def console_user_view(user: ConsoleUser) -> dict:
+    return {"id": user.id, "username": user.username, "role": user.role,
+            "enabled": user.enabled, "must_change_password": user.must_change_password,
+            "last_login_at": user.last_login_at, "created_at": user.created_at}
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page() -> HTMLResponse:
+    if not web_auth_settings.enabled:
+        return RedirectResponse("/", status_code=303)
+    with open("app/static/login.html", encoding="utf-8") as page:
+        content = page.read().replace("</body>", '<script src="/static/login.js"></script></body>')
+        return HTMLResponse(content, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+@app.post("/api/auth/login")
+def console_login(payload: ConsoleLoginRequest, request: FastAPIRequest,
+                  session: Session = Depends(get_session)) -> Response:
+    if not web_auth_settings.enabled:
+        raise HTTPException(status_code=404, detail="Local web authentication is disabled")
+    origin_hash = auth_client_origin(request)
+    identity_hash = hashlib.sha256((payload.username.strip().lower() + ":" + origin_hash).encode("utf-8")).hexdigest()
+    now = utcnow()
+    failures = session.scalar(select(func.count(ConsoleLoginAttempt.id)).where(
+        ConsoleLoginAttempt.identity_hash == identity_hash,
+        ConsoleLoginAttempt.succeeded.is_(False),
+        ConsoleLoginAttempt.created_at >= now - timedelta(seconds=CONSOLE_LOGIN_WINDOW_SECONDS),
+    )) or 0
+    short_failures = session.scalar(select(func.count(ConsoleLoginAttempt.id)).where(
+        ConsoleLoginAttempt.identity_hash == identity_hash,
+        ConsoleLoginAttempt.succeeded.is_(False),
+        ConsoleLoginAttempt.created_at >= now - timedelta(seconds=CONSOLE_LOGIN_SOFT_WINDOW_SECONDS),
+    )) or 0
+    if login_throttled(int(failures), int(short_failures)):
+        auth_audit(session, "LOGIN_RATE_LIMITED", target="redacted", result="DENIED", request=request)
+        session.commit()
+        raise HTTPException(status_code=429, detail="Authentication temporarily unavailable")
+    try:
+        username = normalize_username(payload.username)
+    except ValueError:
+        username = "invalid"
+    user = session.scalar(select(ConsoleUser).where(ConsoleUser.username == username))
+    valid = bool(user and user.enabled and PasswordHasher().verify(user.password_hash, payload.password))
+    session.add(ConsoleLoginAttempt(identity_hash=identity_hash, succeeded=valid))
+    if not valid:
+        auth_audit(session, "LOGIN_FAILED", target="redacted", result="DENIED", request=request)
+        session.commit()
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if PasswordHasher().needs_rehash(user.password_hash):
+        user.password_hash = PasswordHasher().hash(payload.password)
+    user.last_login_at = now
+    token, csrf = create_console_session(session, user)
+    auth_audit(session, "LOGIN_SUCCEEDED", actor_user_id=user.id, target=user.username, request=request)
+    session.execute(delete(ConsoleLoginAttempt).where(
+        ConsoleLoginAttempt.created_at < now - timedelta(days=CONSOLE_LOGIN_ATTEMPT_RETENTION_DAYS)))
+    session.execute(delete(ConsoleAuthAuditEvent).where(
+        ConsoleAuthAuditEvent.created_at < now - timedelta(days=CONSOLE_AUTH_EVENT_RETENTION_DAYS)))
+    session.commit()
+    response = JSONResponse(jsonable_encoder({"user": console_user_view(user), "csrf_token": csrf,
+                                              "must_change_password": user.must_change_password}))
+    set_console_cookies(response, token, csrf)
+    return response
+
+
+@app.get("/api/auth/me")
+def console_auth_me(request: FastAPIRequest) -> dict:
+    if not web_auth_settings.enabled:
+        return {"enabled": False}
+    principal = console_principal(request)
+    csrf = request.cookies.get(CONSOLE_CSRF_COOKIE, "")
+    return {"enabled": True, "user": principal, "csrf_token": csrf}
+
+
+@app.post("/api/auth/logout")
+def console_logout(request: FastAPIRequest, session: Session = Depends(get_session)) -> Response:
+    principal = console_principal(request)
+    browser_session = session.get(ConsoleSession, request.state.console_session_id)
+    if browser_session and browser_session.revoked_at is None:
+        browser_session.revoked_at, browser_session.revoke_reason = utcnow(), "logout"
+    auth_audit(session, "LOGOUT", actor_user_id=principal["id"], target=principal["username"], request=request)
+    session.commit()
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(CONSOLE_SESSION_COOKIE, path="/")
+    response.delete_cookie(CONSOLE_CSRF_COOKIE, path="/")
+    return response
+
+
+@app.post("/api/auth/password")
+def console_change_password(payload: ConsolePasswordChange, request: FastAPIRequest,
+                            session: Session = Depends(get_session)) -> Response:
+    principal = console_principal(request)
+    user = session.get(ConsoleUser, principal["id"])
+    # A newly bootstrapped/administratively reset user already proved control
+    # of this short-lived session at login. Requiring the old temporary secret
+    # again would force the browser to retain it. Normal password changes keep
+    # the usual current-password verification.
+    if not user or (not user.must_change_password and
+                    not PasswordHasher().verify(user.password_hash, payload.current_password)):
+        raise HTTPException(status_code=400, detail="Current password is invalid")
+    try:
+        user.password_hash = PasswordHasher().hash(validate_password(payload.new_password))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    user.must_change_password = False
+    session.execute(update(ConsoleSession).where(ConsoleSession.user_id == user.id,
+        ConsoleSession.revoked_at.is_(None)).values(revoked_at=utcnow(), revoke_reason="password_changed"))
+    token, csrf = create_console_session(session, user)
+    auth_audit(session, "PASSWORD_CHANGED", actor_user_id=user.id, target=user.username, request=request)
+    session.commit()
+    response = JSONResponse(jsonable_encoder({"user": console_user_view(user), "csrf_token": csrf}))
+    set_console_cookies(response, token, csrf)
+    return response
+
+
+@app.get("/api/admin/users")
+def console_list_users(session: Session = Depends(get_session)) -> list[dict]:
+    return [console_user_view(user) for user in session.scalars(select(ConsoleUser).order_by(ConsoleUser.username))]
+
+
+@app.post("/api/admin/users", status_code=201)
+def console_create_user(payload: ConsoleUserCreate, request: FastAPIRequest,
+                        session: Session = Depends(get_session)) -> dict:
+    try:
+        username, password = normalize_username(payload.username), validate_password(payload.password)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if session.scalar(select(ConsoleUser.id).where(ConsoleUser.username == username)):
+        raise HTTPException(status_code=409, detail="Username already exists")
+    user = ConsoleUser(username=username, password_hash=PasswordHasher().hash(password), role=payload.role,
+                       must_change_password=payload.must_change_password)
+    session.add(user); session.flush()
+    auth_audit(session, "USER_CREATED", actor_user_id=console_principal(request)["id"], target=username,
+               request=request, detail={"role": payload.role.value})
+    session.commit()
+    return console_user_view(user)
+
+
+@app.patch("/api/admin/users/{user_id}")
+def console_update_user(user_id: int, payload: ConsoleUserUpdate, request: FastAPIRequest,
+                        session: Session = Depends(get_session)) -> dict:
+    user = session.get(ConsoleUser, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Console user not found")
+    actor = console_principal(request)
+    if user.id == actor["id"] and payload.enabled is False:
+        raise HTTPException(status_code=422, detail="An administrator cannot disable their current account")
+    resulting_role = payload.role if payload.role is not None else user.role
+    resulting_enabled = payload.enabled if payload.enabled is not None else user.enabled
+    if user.role == ConsoleRole.ADMIN and user.enabled and \
+            (resulting_role != ConsoleRole.ADMIN or not resulting_enabled):
+        other_admins = session.scalar(select(func.count(ConsoleUser.id)).where(
+            ConsoleUser.id != user.id, ConsoleUser.role == ConsoleRole.ADMIN,
+            ConsoleUser.enabled.is_(True),
+        )) or 0
+        if other_admins == 0:
+            raise HTTPException(status_code=422, detail="At least one enabled administrator must remain")
+    changed: list[str] = []
+    if payload.role is not None:
+        user.role = payload.role; changed.append("role")
+    if payload.enabled is not None:
+        user.enabled = payload.enabled; changed.append("enabled")
+    if payload.must_change_password is not None:
+        user.must_change_password = payload.must_change_password; changed.append("must_change_password")
+    if payload.password is not None:
+        try:
+            user.password_hash = PasswordHasher().hash(validate_password(payload.password))
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        user.must_change_password = True
+        changed.append("password")
+    if changed:
+        session.execute(update(ConsoleSession).where(ConsoleSession.user_id == user.id,
+            ConsoleSession.revoked_at.is_(None)).values(revoked_at=utcnow(), revoke_reason="admin_update"))
+        auth_audit(session, "USER_UPDATED", actor_user_id=actor["id"], target=user.username,
+                   request=request, detail={"changed": sorted(changed)})
+    session.commit()
+    return console_user_view(user)
+
+
+@app.get("/api/admin/sessions")
+def console_list_sessions(session: Session = Depends(get_session)) -> list[dict]:
+    rows = session.execute(select(ConsoleSession, ConsoleUser.username).join(ConsoleUser).order_by(
+        ConsoleSession.issued_at.desc())).all()
+    return [{"id": item.id, "username": username, "issued_at": item.issued_at,
+             "last_seen_at": item.last_seen_at, "expires_at": item.expires_at,
+             "revoked_at": item.revoked_at, "revoke_reason": item.revoke_reason}
+            for item, username in rows]
+
+
+@app.post("/api/admin/sessions/{session_id}/revoke")
+def console_revoke_session(session_id: int, request: FastAPIRequest,
+                           session: Session = Depends(get_session)) -> dict:
+    target = session.get(ConsoleSession, session_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Console session not found")
+    if target.revoked_at is None:
+        target.revoked_at, target.revoke_reason = utcnow(), "admin_revoked"
+        auth_audit(session, "SESSION_REVOKED", actor_user_id=console_principal(request)["id"],
+                   target=str(session_id), request=request)
+        session.commit()
+    return {"id": target.id, "revoked_at": target.revoked_at}
+
+
+@app.get("/api/admin/auth-audit")
+def console_auth_audit(limit: int = Query(default=100, ge=1, le=500),
+                       actor: str | None = Query(default=None, max_length=64),
+                       event_type: str | None = Query(default=None, max_length=64),
+                       result: str | None = Query(default=None, max_length=32),
+                       session: Session = Depends(get_session)) -> list[dict]:
+    statement = select(ConsoleAuthAuditEvent, ConsoleUser.username).outerjoin(
+        ConsoleUser, ConsoleAuthAuditEvent.actor_user_id == ConsoleUser.id)
+    if actor:
+        try:
+            statement = statement.where(ConsoleUser.username == normalize_username(actor))
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+    if event_type:
+        statement = statement.where(ConsoleAuthAuditEvent.event_type == event_type.strip().upper())
+    if result:
+        statement = statement.where(ConsoleAuthAuditEvent.result == result.strip().upper())
+    rows = session.execute(statement.order_by(ConsoleAuthAuditEvent.created_at.desc()).limit(limit)).all()
+    return [{"id": event.id, "actor": username, "event_type": event.event_type,
+             "target": event.target, "result": event.result, "created_at": event.created_at,
+             "detail": json.loads(event.detail_json)} for event, username in rows]
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard() -> HTMLResponse:
     with open("app/static/index.html", encoding="utf-8") as page:
         content = (page.read()
                    .replace("{{RAIJIN_VERSION}}", RAIJIN_SERVICE_VERSION)
                    .replace("{{RAIJIN_BUILD_REVISION}}", RAIJIN_BUILD_REVISION)
-                   .replace("{{FUJIN_VERSION}}", SIMULATOR_SERVICE_VERSION))
+                   .replace("{{FUJIN_VERSION}}", SIMULATOR_SERVICE_VERSION)
+                   .replace("</body>", '<script src="/static/console-auth-ui.js"></script></body>'))
     # The console carries its CSS and JavaScript inline.  A cached document
     # would otherwise mix an old UI with fresh API data after a rollout.
     return HTMLResponse(content=content, headers={"Cache-Control": "no-store"})
@@ -4556,6 +5088,22 @@ def observability_details(indicator: str, limit: int = 100,
 def prometheus_metrics(session: Session = Depends(get_session)) -> Response:
     """Prometheus text exposition, loopback-only with the rest of the API."""
     data = observability(session)
+    now = utcnow()
+    if hasattr(session, "scalar"):
+        active_console_sessions = session.scalar(select(func.count(ConsoleSession.id)).where(
+            ConsoleSession.revoked_at.is_(None), ConsoleSession.idle_expires_at > now,
+            ConsoleSession.expires_at > now,
+        )) or 0
+        denied_console_events = session.scalar(select(func.count(ConsoleAuthAuditEvent.id)).where(
+            ConsoleAuthAuditEvent.result == "DENIED",
+            ConsoleAuthAuditEvent.created_at >= now - timedelta(minutes=15),
+        )) or 0
+        csrf_rejections = session.scalar(select(func.count(ConsoleAuthAuditEvent.id)).where(
+            ConsoleAuthAuditEvent.event_type == "CSRF_REJECTED",
+            ConsoleAuthAuditEvent.created_at >= now - timedelta(minutes=15),
+        )) or 0
+    else:  # Lightweight contract probes do not provide an authentication store.
+        active_console_sessions = denied_console_events = csrf_rejections = 0
     lines = [
         "# HELP raijin_failed_tasks Number of failed durable tasks.",
         "# TYPE raijin_failed_tasks gauge",
@@ -4584,6 +5132,15 @@ def prometheus_metrics(session: Session = Depends(get_session)) -> Response:
         "# HELP raijin_disk_free_bytes Free bytes on the persistent VM volume.",
         "# TYPE raijin_disk_free_bytes gauge",
         f"raijin_disk_free_bytes {data['disk']['free_bytes']}",
+        "# HELP raijin_console_active_sessions Active non-revoked web-console sessions.",
+        "# TYPE raijin_console_active_sessions gauge",
+        f"raijin_console_active_sessions {active_console_sessions}",
+        "# HELP raijin_console_denied_events_15m Authentication or authorization denials in the previous 15 minutes.",
+        "# TYPE raijin_console_denied_events_15m gauge",
+        f"raijin_console_denied_events_15m {denied_console_events}",
+        "# HELP raijin_console_csrf_rejections_15m CSRF rejections in the previous 15 minutes.",
+        "# TYPE raijin_console_csrf_rejections_15m gauge",
+        f"raijin_console_csrf_rejections_15m {csrf_rejections}",
     ]
     return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 

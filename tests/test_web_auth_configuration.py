@@ -32,9 +32,16 @@ def test_local_auth_accepts_explicit_https_and_trusted_proxy():
         "RAIJIN_WEB_BIND_HOST": "192.0.2.12",
         "RAIJIN_WEB_EXTERNAL_HTTPS": "true",
         "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS": "192.0.2.0/24, 2001:db8::/32",
+        "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME": "admin",
+        "RAIJIN_WEB_AUTH_BOOTSTRAP_PASSWORD_FILE": "/run/secrets/console_bootstrap_password",
     })
     assert settings.enabled is True
     assert settings.trusted_proxy_networks == ("192.0.2.0/24", "2001:db8::/32")
+
+
+def test_local_auth_requires_protected_bootstrap_references():
+    with pytest.raises(WebAuthConfigurationError, match="bootstrap"):
+        load_web_auth_settings({"RAIJIN_WEB_AUTH_MODE": "local"})
 
 
 @pytest.mark.parametrize("value", ["maybe", "yes please"])
@@ -51,6 +58,6 @@ def test_web_auth_rejects_session_absolute_timeout_shorter_than_idle_timeout():
         })
 
 
-def test_main_fails_closed_when_auth_is_requested_before_its_security_layers_exist():
-    source = open("app/main.py", encoding="utf-8").read()
-    assert "RAIJIN_WEB_AUTH_MODE=local is not available" in source
+def test_local_auth_requires_explicit_bootstrap_configuration():
+    with pytest.raises(WebAuthConfigurationError, match="bootstrap"):
+        load_web_auth_settings({"RAIJIN_WEB_AUTH_MODE": "local"})

@@ -184,7 +184,7 @@ sequenceDiagram
 
 - [x] Adicionar configuração `auth_mode` com valores explícitos `disabled` e
   `local`; rejeitar valores desconhecidos.
-- [ ] Definir arquivo/Secret de bootstrap por referência, seguindo o contrato
+- [x] Definir arquivo/Secret de bootstrap por referência, seguindo o contrato
   atual `secret_ocids`/`secret_file_paths`; nunca guardar valor no JSON.
 - [x] Criar validação de configuração, limites de sessão e detecção explícita
   de proxy confiável.
@@ -192,32 +192,32 @@ sequenceDiagram
   quando `auth_mode=local` for usado fora de loopback sem proxy/TLS declarado.
 - [x] Documentar variáveis, arquivos e procedimento de rollback.
 
-**Evidência parcial:** `tests/test_web_auth_configuration.py`,
-`tests/test_web_auth_shell.py`, `tests/test_web_bind.py` e
-`tests/test_operational_contract.py` passaram em 28/10/2026. O modo `local`
-ainda falha fechado nesta release; o critério completo será revalidado após P3.
+**Evidência:** o bootstrap usa o contrato existente
+`secret_ocids`/`secret_file_paths` para `console_bootstrap_password`; a
+documentação cobre Vault, arquivo local protegido, rollback e preflight.
 
 ### P2 — Persistência, hash e bootstrap de administrador
 
-- [ ] Criar modelos, migrações e índices definidos na seção 4.
-- [ ] Adicionar Argon2id com parâmetros versionados e estratégia futura de
+- [x] Criar modelos, migrações e índices definidos na seção 4.
+- [x] Adicionar Argon2id com parâmetros versionados e estratégia futura de
   rehash após login.
-- [ ] Implementar criação idempotente do primeiro ADMIN; impedir substituição
+- [x] Implementar criação idempotente do primeiro ADMIN; impedir substituição
   silenciosa de usuário existente.
-- [ ] Implementar CLI root-only de pré-validação, criação e reset de admin.
-- [ ] Registrar auditoria de bootstrap e recuperação.
+- [x] Implementar CLI root-only de pré-validação, criação e reset de admin.
+- [x] Registrar auditoria de bootstrap e recuperação.
 
 **Critério de aceite:** nenhum hash fraco ou senha em claro no banco; processo
 de bootstrap repetido não altera um administrador existente.
 
 ### P3 — Login, sessão, CSRF e RBAC no servidor
 
-- [ ] Implementar login, logout, alteração de senha e expiração/revogação.
-- [ ] Proteger rotas de HTML, API, exportações, WebSocket/SSE e ações de modo.
-- [ ] Aplicar CSRF e cabeçalhos de segurança a métodos mutáveis.
-- [ ] Aplicar RBAC no servidor conforme matriz P0; adicionar dependências de
+- [x] Implementar login, logout, alteração de senha e expiração/revogação.
+- [x] Proteger rotas de HTML, API, exportações e ações de modo. Não há
+  WebSocket/SSE nesta aplicação nesta release.
+- [x] Aplicar CSRF e cabeçalhos de segurança a métodos mutáveis.
+- [x] Aplicar RBAC no servidor conforme matriz P0; adicionar dependências de
   autorização reutilizáveis e testes para negação por padrão.
-- [ ] Implementar limite progressivo de tentativas por usuário/origem, sem
+- [x] Implementar limite progressivo de tentativas por usuário/origem, sem
   permitir negação de serviço global.
 
 **Critério de aceite:** requisições sem sessão, sessão expirada, CSRF inválido
@@ -225,13 +225,13 @@ ou papel insuficiente não executam efeitos colaterais.
 
 ### P4 — Interface, usabilidade e auditoria
 
-- [ ] Criar telas de login, logout, expiração e troca obrigatória de senha.
-- [ ] Adaptar refresh automático, modais e downloads para sessão expirada sem
+- [x] Criar telas de login, logout, expiração e troca obrigatória de senha.
+- [x] Adaptar refresh automático, modais e downloads para sessão expirada sem
   loops, travamento da UI ou perda silenciosa de contexto.
-- [ ] Criar gestão de usuários e sessões para `ADMIN`.
+- [x] Criar gestão de usuários e sessões para `ADMIN`.
 - [ ] Ocultar controles indisponíveis por papel, mantendo a verificação no
   backend.
-- [ ] Criar visualização filtrável de auditoria de autenticação.
+- [x] Criar visualização filtrável de auditoria de autenticação.
 - [ ] Revisar integralmente inglês/português, mensagens de erro, tooltips e
   acessibilidade por teclado.
 
@@ -240,14 +240,14 @@ redirecionamento repetido ou página sem resposta após expiração de sessão.
 
 ### P5 — Operação, observabilidade e recuperação
 
-- [ ] Definir logs estruturados sem credenciais e métricas agregadas de login,
+- [x] Definir logs estruturados sem credenciais e métricas agregadas de login,
   bloqueios, sessões e erros de CSRF.
-- [ ] Manter `/healthz`, backup, restore, timers e scripts host-side funcionais
+- [x] Manter `/healthz`, backup, restore, timers e scripts host-side funcionais
   sem cookie de navegador.
-- [ ] Implementar documentação e exercícios de recuperação de administrador.
+- [x] Implementar documentação e exercício local de recuperação de administrador.
 - [ ] Criar alertas para falhas de bootstrap de admin, picos de bloqueio e
   tentativas de acesso negadas.
-- [ ] Revisar backup/restore PostgreSQL para incluir usuários, sessões e
+- [x] Revisar backup/restore PostgreSQL para incluir usuários, sessões e
   auditoria; definir revogação de sessões após restauração.
 
 **Critério de aceite:** um restore não deixa sessões indevidamente válidas e
@@ -255,14 +255,14 @@ uma perda de conta administrativa pode ser recuperada apenas pelo host.
 
 ### P6 — Migração e compatibilidade
 
-- [ ] Implementar feature flag e migração em duas releases compatíveis:
+- [x] Implementar feature flag e migração em duas releases compatíveis:
   `disabled` primeiro, `local` somente após bootstrap confirmado.
-- [ ] Criar checklist de upgrade para host padrão, host via Bastion e ambiente
+- [x] Criar checklist de upgrade para host padrão, host via Bastion e ambiente
   de homologação.
-- [ ] Validar rollback de código sem apagar tabelas nem desativar acesso do
+- [x] Validar rollback de código sem apagar tabelas nem desativar acesso do
   administrador involuntariamente.
 - [ ] Testar bind `127.0.0.1`, IP específico e `0.0.0.0` atrás de proxy TLS.
-- [ ] Testar Secret Vault e fallback local de bootstrap de administrador,
+- [x] Testar Secret Vault e fallback local de bootstrap de administrador,
   incluindo a migração de arquivo local para OCID.
 
 **Critério de aceite:** instalações existentes permanecem acessíveis até a
@@ -271,14 +271,16 @@ arquivo local protegido.
 
 ### P7 — Verificação, hardening e promoção
 
-- [ ] Testes unitários para hash, sessão, CSRF, RBAC, lockout e parsing de
+- [x] Testes unitários para hash, sessão, CSRF, RBAC, lockout e parsing de
   configuração.
 - [ ] Testes de integração para todas as rotas classificadas em P0 e para
   polling simultâneo da console.
-- [ ] Testes E2E de login, expiração, logout, revogação, troca de senha,
+- [x] Testes E2E HTTP locais de login, troca de senha, logout, revogação após
+  restart, RBAC e ativos mínimos públicos; ainda falta navegador real e polling
+  simultâneo.
   recuperação host-side e auditoria.
 - [ ] Testes de carga focados em login/polling, comparados ao baseline P0.
-- [ ] Revisão de segurança de dependências e análise manual de exposição de
+- [x] Revisão manual de exposição de Secrets, cookies, logs, CORS, redirects e
   Secrets, cookies, logs, CORS, redirects e proxy headers.
 - [ ] Homologação em VM isolada, seguida por pré-produção controlada com plano
   de rollback aprovado.

@@ -86,9 +86,12 @@ RAIJIN_WEB_EXTERNAL_HTTPS=false
 RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=
 RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=30
 RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=720
+RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=admin
 EOF
   chmod 0600 "$web_auth_config"
 fi
+source "$install_root/scripts/web-auth.sh"
+raijin_load_web_auth
 local_runtime_complete=true
 for container in s3-oci-postgres s3-oci-app s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer s3-oci-fujin-local-dns s3-oci-local-ui-gateway; do
   if [[ "$(podman inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]]; then
@@ -171,6 +174,12 @@ if [[ ! -s "$secret_root/postgres_password" ]]; then
 fi
 if [[ "$postgres_secret_source" == local ]]; then
   install -o root -g root -m 0600 /dev/null "$temporary_local_secrets_marker"
+fi
+if [[ "$RAIJIN_WEB_AUTH_MODE" == local ]]; then
+  python3 "$install_root/scripts/fetch-oci-secret.py" \
+    --runtime-config "$oci_runtime_config" \
+    --secret-name console_bootstrap_password \
+    --output "$secret_root/console_bootstrap_password"
 fi
 postgres_secret_mounts=(
   -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z"
@@ -270,6 +279,8 @@ install -m 0750 "$install_root/scripts/configure-fujin-local-oci-runtime.py" /us
 install -m 0750 "$install_root/scripts/mount-fujin-payload-volume.sh" /usr/local/sbin/s3-oci-mount-fujin-payload
 install -m 0750 "$install_root/scripts/stop-runtime.sh" /usr/local/sbin/s3-oci-stop-runtime
 install -m 0750 "$install_root/scripts/raijin-mode.sh" /usr/local/sbin/raijin-mode
+install -m 0750 "$install_root/scripts/console-admin.sh" /usr/local/sbin/raijin-console-admin
+install -m 0750 "$install_root/scripts/console-auth-preflight.sh" /usr/local/sbin/raijin-console-auth-preflight
 install -m 0750 "$install_root/scripts/process-mode-request.sh" /usr/local/sbin/s3-oci-process-mode-request
 if [[ "$deployment_profile" == LOCAL ]]; then
   # LOCAL is a durable deployment topology, not a Raijin operation mode.

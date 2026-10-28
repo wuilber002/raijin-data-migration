@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Raijin Console sign in</title>
+  <style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b1322;color:#e5edf9;font-family:system-ui,sans-serif}
+    .card{width:min(400px,calc(100vw - 2rem));padding:2rem;border:1px solid #52627e;border-radius:12px;background:#182237;box-shadow:0 16px 42px #0008}
+    h1{margin:0;color:#f8fafc}p{color:#b9c9df;line-height:1.5}label{display:grid;gap:.35rem;margin:1rem 0;font-weight:700}
+    input{box-sizing:border-box;width:100%;padding:.7rem;border:1px solid #52627e;border-radius:5px;background:#0d1524;color:#fff;font:inherit}
+    button{width:100%;padding:.72rem;border:0;border-radius:5px;background:#2f7ef7;color:#fff;font:inherit;font-weight:800;cursor:pointer}button:disabled{opacity:.6}
+    #message{min-height:1.4rem;color:#fca5a5}.en{display:none}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>RAIJIN</h1>
+    <p class="pt">Acesse a console com sua conta individual.</p>
+    <p class="en">Sign in with your individual console account.</p>
+    <form id="login">
+      <label><span class="pt">Usuário</span><span class="en">Username</span><input name="username" autocomplete="username" required></label>
+      <label><span class="pt">Senha</span><span class="en">Password</span><input name="password" type="password" autocomplete="current-password" required></label>
+      <p id="message" role="alert"></p>
+      <button><span class="pt">Entrar</span><span class="en">Sign in</span></button>
+    </form>
+  </main>
+</body>
+</html>

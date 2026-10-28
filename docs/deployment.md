@@ -123,7 +123,7 @@ continua na porta interna `8080`; não a exponha diretamente. Um bind diferente
 de loopback exige controles externos equivalentes, como NSG, firewall e proxy
 reverso com autenticação.
 
-### Preparação da autenticação da console
+### Autenticação local da console
 
 O bootstrap também cria `/etc/s3-oci-migration/web-auth.env`. Nesta release o
 valor padrão é compatível com instalações existentes e **não ativa** login:
@@ -134,14 +134,42 @@ RAIJIN_WEB_EXTERNAL_HTTPS=false
 RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=
 RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=30
 RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=720
+RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=admin
 ```
 
-O futuro modo `local` exigirá credenciais individuais e somente poderá usar
-bind fora de loopback quando `RAIJIN_WEB_EXTERNAL_HTTPS=true` e os CIDRs do
-proxy reverso confiável forem informados. Nunca use `0.0.0.0` para expor a
-console diretamente. Nesta primeira release de compatibilidade, configurar
-`local` faz o serviço falhar de forma segura: ele só poderá iniciar após a
-entrega das fases de identidade, sessão e RBAC. A matriz de rotas prevista está em
+Para ativar login local, crie a referência `console_bootstrap_password` em
+`oci-runtime.json` (Vault ou arquivo local protegido), altere somente
+`RAIJIN_WEB_AUTH_MODE=local` e valide antes do restart:
+
+```bash
+sudo /usr/local/sbin/raijin-console-auth-preflight
+sudo systemctl restart s3-oci-migration.service
+```
+
+O primeiro início cria somente o usuário bootstrap como `ADMIN`, com senha
+Argon2id, e exige troca de senha no primeiro login. A credencial bootstrap não
+sobrescreve usuários já existentes. O modo `local` só aceita bind fora de
+loopback quando `RAIJIN_WEB_EXTERNAL_HTTPS=true` e os CIDRs exatos do proxy
+reverso confiável forem informados. Nunca publique `0.0.0.0` diretamente.
+
+O rollback é explícito: mantenha o serviço em bind privado/loopback, mude
+`RAIJIN_WEB_AUTH_MODE=disabled` e reinicie. As tabelas de usuários, sessões e
+auditoria são preservadas; reativar `local` reutiliza as mesmas contas. Após
+qualquer restart ou restore PostgreSQL, as sessões anteriores são revogadas e
+cada pessoa precisa efetuar login novamente.
+
+Recuperação de acesso é exclusiva do host e exige arquivo de senha root-owned
+`0600`; a senha nunca entra em argumento ou log:
+
+```bash
+sudo install -o root -g root -m 0600 /dev/null /root/raijin-console-reset-password
+sudoedit /root/raijin-console-reset-password
+sudo RAIJIN_CONSOLE_ADMIN_PASSWORD_FILE=/root/raijin-console-reset-password \
+  /usr/local/sbin/raijin-console-admin reset admin --confirm
+```
+
+A recuperação revoga as sessões do usuário afetado e registra um evento de
+auditoria. A matriz de autorização efetiva está em
 `docs/web-console-authentication-route-matrix.md`.
 
 ### 2. Criar a configuração de runtime OCI
@@ -165,13 +193,33 @@ Substitua todos os valores entre `<...>` e proteja o arquivo:
     "<DESTINATION_COMPARTMENT_OCID>": "<DESTINATION_COMPARTMENT_NAME>"
   },
   "secret_ocids": {
-    "postgres_password": "<POSTGRES_SECRET_OCID>"
+    "postgres_password": "<POSTGRES_SECRET_OCID>",
+    "console_bootstrap_password": "<CONSOLE_BOOTSTRAP_SECRET_OCID>"
   },
   "secret_file_paths": {},
   "secrets_compartment_ocid": "<SECRETS_COMPARTMENT_OCID>",
   "secret_compartment_ocids": ["<SECRETS_COMPARTMENT_OCID>"]
 }
 ```
+
+Cada nome de Secret deve estar em exatamente uma das duas seções. Para um
+bootstrap offline temporário, mantenha `secret_ocids` sem o nome e use um
+caminho absoluto root-owned `0600` em `secret_file_paths`:
+
+```json
+{
+  "secret_ocids": {"postgres_password": "<POSTGRES_SECRET_OCID>"},
+  "secret_file_paths": {
+    "console_bootstrap_password": "/etc/s3-oci-migration/bootstrap-console-password"
+  }
+}
+```
+
+Depois que o Vault estiver disponível, mova apenas
+`console_bootstrap_password` de `secret_file_paths` para `secret_ocids` e
+execute novamente o bootstrap. O arquivo materializado em
+`/etc/s3-oci-migration/secrets/` é atualizado sem alterar usuários ou dados de
+migração.
 
 ```bash
 sudo chmod 0600 /etc/s3-oci-migration/oci-runtime.json

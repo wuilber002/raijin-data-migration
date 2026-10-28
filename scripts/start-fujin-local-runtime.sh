@@ -18,9 +18,21 @@ local_oci_runtime="${RAIJIN_LOCAL_OCI_RUNTIME_CONFIG:-/etc/s3-oci-migration/oci-
 # shellcheck source=web-bind.sh
 source "$install_root/scripts/web-bind.sh"
 raijin_load_web_bind
-# shellcheck source=web-auth.sh
-source "$install_root/scripts/web-auth.sh"
-raijin_load_web_auth
+# An old release directory can launch the compatible disabled mode while the
+# host is being upgraded. Local authentication is always opt-in, never an
+# implicit downgrade or activation during that transition.
+if [[ -r "$install_root/scripts/web-auth.sh" ]]; then
+  # shellcheck source=web-auth.sh
+  source "$install_root/scripts/web-auth.sh"
+  raijin_load_web_auth
+else
+  RAIJIN_WEB_AUTH_MODE=disabled
+  RAIJIN_WEB_EXTERNAL_HTTPS=false
+  RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=
+  RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=30
+  RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=720
+  RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=admin
+fi
 
 web_auth_environment=(
   -e "RAIJIN_WEB_BIND_HOST=$RAIJIN_WEB_BIND_HOST"
@@ -29,7 +41,17 @@ web_auth_environment=(
   -e "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=$RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS"
   -e "RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES"
   -e "RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES"
+  -e "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=$RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME"
 )
+web_auth_secret_mounts=()
+if [[ "$RAIJIN_WEB_AUTH_MODE" == local ]]; then
+  [[ -s "$secret_root/console_bootstrap_password" ]] || {
+    echo "Local web authentication requires console_bootstrap_password" >&2
+    exit 2
+  }
+  web_auth_environment+=( -e RAIJIN_WEB_AUTH_BOOTSTRAP_PASSWORD_FILE=/run/secrets/console_bootstrap_password )
+  web_auth_secret_mounts+=( -v "$secret_root/console_bootstrap_password:/run/secrets/console_bootstrap_password:ro,z" )
+fi
 
 [[ -s "$local_oci_runtime" ]] || {
   echo "Missing $local_oci_runtime. Create it with configure-fujin-local-oci-runtime first." >&2
@@ -128,7 +150,7 @@ if [[ -s "$data_root/fujin-local/tls/fujin-local.crt" ]]; then
   install -m 0644 "$data_root/fujin-local/tls/fujin-local.crt" "$ca_root/fujin-local.crt"
 fi
 
-common=(--network "$main_network" --dns 172.30.0.53 -e RAIJIN_OPERATION_MODE=REAL -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password "${web_auth_environment[@]}" -e OCI_RUNTIME_CONFIG_FILE=/run/oci-runtime/oci-runtime.json -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" -v "$runtime_root:/run/platform-status:ro,z" -v "$local_oci_runtime:/run/oci-runtime/oci-runtime.json:ro,z" -v "$ca_root:/etc/fujin-local-ca:ro,z")
+common=(--network "$main_network" --dns 172.30.0.53 -e RAIJIN_OPERATION_MODE=REAL -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password "${web_auth_environment[@]}" "${web_auth_secret_mounts[@]}" -e OCI_RUNTIME_CONFIG_FILE=/run/oci-runtime/oci-runtime.json -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" -v "$runtime_root:/run/platform-status:ro,z" -v "$local_oci_runtime:/run/oci-runtime/oci-runtime.json:ro,z" -v "$ca_root:/etc/fujin-local-ca:ro,z")
 podman run -d --name s3-oci-app --replace --restart unless-stopped --network-alias local-app "${common[@]}" "$image"
 podman network connect "$data_network" s3-oci-app
 # This is a control-plane-only attachment: it lets the UI gateway resolve the

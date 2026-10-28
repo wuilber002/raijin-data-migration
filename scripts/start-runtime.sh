@@ -16,9 +16,20 @@ network=s3-oci-migration
 # shellcheck source=web-bind.sh
 source "$install_root/scripts/web-bind.sh"
 raijin_load_web_bind
-# shellcheck source=web-auth.sh
-source "$install_root/scripts/web-auth.sh"
-raijin_load_web_auth
+# Older release directories can be used by the pre-auth update workflow. Keep
+# their launcher usable with the compatibility-safe disabled defaults.
+if [[ -r "$install_root/scripts/web-auth.sh" ]]; then
+  # shellcheck source=web-auth.sh
+  source "$install_root/scripts/web-auth.sh"
+  raijin_load_web_auth
+else
+  RAIJIN_WEB_AUTH_MODE=disabled
+  RAIJIN_WEB_EXTERNAL_HTTPS=false
+  RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=
+  RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=30
+  RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=720
+  RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=admin
+fi
 
 web_auth_environment=(
   -e "RAIJIN_WEB_BIND_HOST=$RAIJIN_WEB_BIND_HOST"
@@ -27,7 +38,18 @@ web_auth_environment=(
   -e "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=$RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS"
   -e "RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES"
   -e "RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES"
+  -e "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=$RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME"
 )
+
+web_auth_secret_mounts=()
+if [[ "$RAIJIN_WEB_AUTH_MODE" == local ]]; then
+  [[ -s "$secret_root/console_bootstrap_password" ]] || {
+    echo "Local web authentication requires console_bootstrap_password" >&2
+    exit 2
+  }
+  web_auth_environment+=( -e RAIJIN_WEB_AUTH_BOOTSTRAP_PASSWORD_FILE=/run/secrets/console_bootstrap_password )
+  web_auth_secret_mounts+=( -v "$secret_root/console_bootstrap_password:/run/secrets/console_bootstrap_password:ro,z" )
+fi
 
 case "$mode" in
   REAL)
@@ -37,6 +59,7 @@ case "$mode" in
       -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
       -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
       "${web_auth_environment[@]}" \
+      "${web_auth_secret_mounts[@]}" \
       -e OCI_RUNTIME_CONFIG_FILE=/run/oci-runtime/oci-runtime.json \
       -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
       -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
@@ -95,6 +118,7 @@ case "$mode" in
       -e DATABASE_URL=postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation \
       -e POSTGRES_PASSWORD_FILE=/run/secrets/simulation_postgres_password \
       "${web_auth_environment[@]}" \
+      "${web_auth_secret_mounts[@]}" \
       -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
       -v "$runtime_root:/run/platform-status:ro,z" \
       -v "$mode_control_root:/run/mode-control:rw,z" \
