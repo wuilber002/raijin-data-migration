@@ -9,6 +9,7 @@ mode_control_root=/var/lib/s3-oci-migration/mode-control
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 deployment_profile_file=/etc/s3-oci-migration/deployment-profile
 web_bind_config=/etc/s3-oci-migration/web-bind.env
+temporary_local_secrets_marker=/etc/s3-oci-migration/temporary-local-secrets
 bootstrap_complete=false
 
 service_version="${RAIJIN_SERVICE_VERSION:-$(tr -d '[:space:]' <"$install_root/VERSION")}"
@@ -115,6 +116,26 @@ fi
 # only when it needs OCI metadata.
 chmod 644 "$oci_runtime_config"
 
+# A host that starts from a protected local password needs an explicit durable
+# marker. On a later restart, changing only oci-runtime.json from
+# secret_file_paths to secret_ocids is enough for bootstrap to rotate the
+# database role to Vault and retire this marker safely.
+postgres_secret_source="$(python3 - "$oci_runtime_config" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    runtime = json.load(source)
+ocid = (runtime.get("secret_ocids") or {}).get("postgres_password")
+local_path = (runtime.get("secret_file_paths") or {}).get("postgres_password")
+if bool(ocid) == bool(local_path):
+    raise SystemExit(
+        "Configure exactly one postgres_password source: secret_ocids or secret_file_paths"
+    )
+print("vault" if ocid else "local")
+PY
+)"
+
 mode_file=/etc/s3-oci-migration/operation-mode
 if [[ ! -s "$mode_file" ]]; then
   printf 'REAL\n' >"$mode_file"
@@ -132,6 +153,9 @@ if [[ ! -s "$secret_root/postgres_password" ]]; then
     --runtime-config "$oci_runtime_config" \
     --secret-name postgres_password \
     --output "$secret_root/postgres_password"
+fi
+if [[ "$postgres_secret_source" == local ]]; then
+  install -o root -g root -m 0600 /dev/null "$temporary_local_secrets_marker"
 fi
 postgres_secret_mounts=(
   -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z"
@@ -176,6 +200,10 @@ done
 if [[ "$postgres_ready" != true ]]; then
   echo "PostgreSQL did not become ready" >&2
   exit 1
+fi
+
+if [[ "$postgres_secret_source" == vault && -f "$temporary_local_secrets_marker" ]]; then
+  "$install_root/scripts/adopt-vault-secrets.sh"
 fi
 
 if [[ "$operation_mode" == SIMULATION ]]; then
