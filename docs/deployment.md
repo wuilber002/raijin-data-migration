@@ -182,6 +182,30 @@ registre logs sem expor Secrets:
 sudo journalctl -u s3-oci-migration.service -n 200 --no-pager
 ```
 
+### Bootstrap temporário sem OCI Vault
+
+Use este caminho apenas em host novo, quando seja necessário validar a
+topologia local antes da liberação de Dynamic Group, policies e Secrets OCI.
+Ele gera senhas aleatórias locais para PostgreSQL, protegidas em `0600`, e
+permite testar a API, Raikō, Raiju, timers, banco e túnel SSH. Não cadastre
+conexões AWS nem tente operações com buckets: estas continuam indisponíveis
+até a configuração OCI definitiva.
+
+O host deve conter o marcador
+`/etc/s3-oci-migration/temporary-local-secrets`. Quando o Vault estiver
+disponível, preencha o `oci-runtime.json` completo, mantenha o PostgreSQL em
+execução e converta o host sem expor valores de senha:
+
+```bash
+sudo /opt/s3-oci-migration/release/scripts/adopt-vault-secrets.sh
+sudo systemctl restart s3-oci-migration.service
+sudo systemctl is-active s3-oci-migration.service
+```
+
+O script troca primeiro a senha da role principal no PostgreSQL em execução,
+adota o Secret auxiliar e só então remove o marcador temporário. Não apague
+os arquivos locais nem sobrescreva uma senha antes dessa conversão.
+
 ### 5. Aceite funcional inicial
 
 Abra o túnel na estação administrativa:
