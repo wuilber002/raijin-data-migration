@@ -92,7 +92,6 @@ Registre estes valores antes de acessar o host:
 | `<SECRETS_COMPARTMENT_OCID>` | Compartment dos Secrets da plataforma. |
 | `<DESTINATION_COMPARTMENT_OCID>` | Compartment dos buckets OCI autorizados. |
 | `<POSTGRES_SECRET_OCID>` | Secret `postgres_password`. |
-| `<SIMULATION_POSTGRES_SECRET_OCID>` | Secret `simulation_postgres_password`. |
 
 ### 1. Preparar o host
 
@@ -129,8 +128,7 @@ Substitua todos os valores entre `<...>` e proteja o arquivo:
     "<DESTINATION_COMPARTMENT_OCID>": "<DESTINATION_COMPARTMENT_NAME>"
   },
   "secret_ocids": {
-    "postgres_password": "<POSTGRES_SECRET_OCID>",
-    "simulation_postgres_password": "<SIMULATION_POSTGRES_SECRET_OCID>"
+    "postgres_password": "<POSTGRES_SECRET_OCID>"
   },
   "secrets_compartment_ocid": "<SECRETS_COMPARTMENT_OCID>",
   "secret_compartment_ocids": ["<SECRETS_COMPARTMENT_OCID>"]
@@ -202,8 +200,10 @@ sudo systemctl restart s3-oci-migration.service
 sudo systemctl is-active s3-oci-migration.service
 ```
 
-O script troca primeiro a senha da role principal no PostgreSQL em execução,
-adota o Secret auxiliar e só então remove o marcador temporário. Não apague
+No modo REAL, o script troca a senha da role principal no PostgreSQL em
+execução e então remove o marcador temporário. A Secret
+`simulation_postgres_password` só é necessária em uma instalação que inicie
+explicitamente em `SIMULATION`. Não apague
 os arquivos locais nem sobrescreva uma senha antes dessa conversão.
 
 ### 5. Aceite funcional inicial

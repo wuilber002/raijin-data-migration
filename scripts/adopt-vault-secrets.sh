@@ -10,14 +10,15 @@ secret_root=/etc/s3-oci-migration/secrets
 runtime_config=/etc/s3-oci-migration/oci-runtime.json
 temporary_marker=/etc/s3-oci-migration/temporary-local-secrets
 simulation_candidate="$secret_root/.simulation_postgres_password.vault"
+mode_file=/etc/s3-oci-migration/operation-mode
 
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
 [[ -f "$temporary_marker" ]] || {
   echo "This host is not marked as a temporary-local-secrets installation." >&2
   exit 1
 }
-[[ -s "$secret_root/postgres_password" && -s "$secret_root/simulation_postgres_password" ]] || {
-  echo "Temporary PostgreSQL password files are missing." >&2
+[[ -s "$secret_root/postgres_password" ]] || {
+  echo "Temporary PostgreSQL password file is missing." >&2
   exit 1
 }
 [[ -f "$runtime_config" ]] || { echo "OCI runtime configuration is missing." >&2; exit 1; }
@@ -31,6 +32,21 @@ trap 'rm -f "$simulation_candidate"' EXIT
 # The existing rotation script reads Vault into a candidate, changes the
 # running migration role, then atomically installs the file.
 "$install_root/scripts/sync-postgres-password-from-vault.sh"
+
+operation_mode=REAL
+if [[ -s "$mode_file" ]]; then
+  operation_mode="$(tr '[:lower:]' '[:upper:]' <"$mode_file")"
+fi
+if [[ "$operation_mode" != SIMULATION ]]; then
+  rm -f "$temporary_marker"
+  echo "Vault PostgreSQL Secret adopted for REAL mode."
+  exit 0
+fi
+
+[[ -s "$secret_root/simulation_postgres_password" ]] || {
+  echo "Temporary simulation PostgreSQL password file is missing." >&2
+  exit 1
+}
 
 python3 "$install_root/scripts/fetch-oci-secret.py" \
   --runtime-config "$runtime_config" \

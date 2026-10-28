@@ -119,12 +119,16 @@ def test_backend_clocks_distinguish_real_and_accelerated_simulation_time(monkeyp
     assert not simulated.paused
 
 
-def test_bootstrap_prepares_an_isolated_simulation_database_and_defaults_to_real():
+def test_bootstrap_prepares_the_isolated_database_only_for_explicit_simulation_mode():
     bootstrap = Path("scripts/bootstrap.sh").read_text(encoding="utf-8")
     runtime = Path("scripts/start-runtime.sh").read_text(encoding="utf-8")
     stop_runtime = Path("scripts/stop-runtime.sh").read_text(encoding="utf-8")
     switch = Path("scripts/raijin-mode.sh").read_text(encoding="utf-8")
     assert "simulation_postgres_password" in bootstrap
+    assert 'if [[ "$operation_mode" == SIMULATION ]]; then' in bootstrap
+    assert bootstrap.index('if [[ "$operation_mode" == SIMULATION ]]; then') < bootstrap.index(
+        'chown 70:70 "$secret_root/simulation_postgres_password"'
+    )
     assert 'chown 70:70 "$secret_root/simulation_postgres_password"' in bootstrap
     assert 'chmod 0400 "$secret_root/simulation_postgres_password"' in bootstrap
     assert "trap cleanup_failed_bootstrap EXIT" in bootstrap

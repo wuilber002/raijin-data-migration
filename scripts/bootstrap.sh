@@ -102,6 +102,16 @@ fi
 # container must read it; Vault still protects every credential value.
 chmod 644 "$oci_runtime_config"
 
+mode_file=/etc/s3-oci-migration/operation-mode
+if [[ ! -s "$mode_file" ]]; then
+  printf 'REAL\n' >"$mode_file"
+fi
+operation_mode="$(tr '[:lower:]' '[:upper:]' <"$mode_file")"
+[[ "$operation_mode" == REAL || "$operation_mode" == SIMULATION ]] || {
+  echo "Invalid operation mode in $mode_file" >&2
+  exit 1
+}
+
 # Vault is the source of truth. A first boot materializes the Terraform-created
 # password locally without writing its value to a command line or service log.
 if [[ ! -s "$secret_root/postgres_password" ]]; then
@@ -110,17 +120,24 @@ if [[ ! -s "$secret_root/postgres_password" ]]; then
     --secret-name postgres_password \
     --output "$secret_root/postgres_password"
 fi
-if [[ ! -s "$secret_root/simulation_postgres_password" ]]; then
-  python3 "$install_root/scripts/fetch-oci-secret.py" \
-    --runtime-config "$oci_runtime_config" \
-    --secret-name simulation_postgres_password \
-    --output "$secret_root/simulation_postgres_password"
+postgres_secret_mounts=(
+  -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z"
+)
+if [[ "$operation_mode" == SIMULATION ]]; then
+  if [[ ! -s "$secret_root/simulation_postgres_password" ]]; then
+    python3 "$install_root/scripts/fetch-oci-secret.py" \
+      --runtime-config "$oci_runtime_config" \
+      --secret-name simulation_postgres_password \
+      --output "$secret_root/simulation_postgres_password"
+  fi
+  # postgres:16-alpine runs the database server as UID/GID 70. The server reads
+  # this file through pg_read_file() while creating/updating the isolated role.
+  chown 70:70 "$secret_root/simulation_postgres_password"
+  chmod 0400 "$secret_root/simulation_postgres_password"
+  postgres_secret_mounts+=(
+    -v "$secret_root/simulation_postgres_password:/run/secrets/simulation_postgres_password:ro,z"
+  )
 fi
-# postgres:16-alpine runs the database server as UID/GID 70. The server reads
-# this file through pg_read_file() while creating/updating the isolated role;
-# keep it unreadable to every other non-root host user.
-chown 70:70 "$secret_root/simulation_postgres_password"
-chmod 0400 "$secret_root/simulation_postgres_password"
 
 podman network exists s3-oci-migration 2>/dev/null || podman network create s3-oci-migration
 podman rm -f s3-oci-app s3-oci-postgres s3-oci-governance-worker s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-real-worker s3-oci-simulator 2>/dev/null || true
@@ -132,8 +149,7 @@ podman run -d --name s3-oci-postgres --replace --restart unless-stopped \
   -e POSTGRES_USER=migration \
   -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
   -v "$data_root/postgres:/var/lib/postgresql/data:Z" \
-  -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
-  -v "$secret_root/simulation_postgres_password:/run/secrets/simulation_postgres_password:ro,z" \
+  "${postgres_secret_mounts[@]}" \
   docker.io/library/postgres:16-alpine
 
 postgres_ready=false
@@ -149,10 +165,11 @@ if [[ "$postgres_ready" != true ]]; then
   exit 1
 fi
 
-# A distinct role and database keep real and simulated control-plane state
-# isolated while sharing the same durable PostgreSQL container. The password
-# is read inside PostgreSQL from the mounted Secret and never enters argv/logs.
-podman exec -i s3-oci-postgres psql -U migration -d migration -v ON_ERROR_STOP=1 <<'SQL'
+if [[ "$operation_mode" == SIMULATION ]]; then
+  # A distinct role and database keep real and simulated control-plane state
+  # isolated while sharing the same durable PostgreSQL container. The password
+  # is read inside PostgreSQL from the mounted Secret and never enters argv/logs.
+  podman exec -i s3-oci-postgres psql -U migration -d migration -v ON_ERROR_STOP=1 <<'SQL'
 DO $block$
 DECLARE
   simulation_password text := btrim(
@@ -168,9 +185,10 @@ BEGIN
 END
 $block$;
 SQL
-if ! podman exec s3-oci-postgres psql -U migration -d migration -tAc \
-  "SELECT 1 FROM pg_database WHERE datname = 'migration_simulation'" | grep -q 1; then
-  podman exec s3-oci-postgres createdb -U migration -O migration_simulation migration_simulation
+  if ! podman exec s3-oci-postgres psql -U migration -d migration -tAc \
+    "SELECT 1 FROM pg_database WHERE datname = 'migration_simulation'" | grep -q 1; then
+    podman exec s3-oci-postgres createdb -U migration -O migration_simulation migration_simulation
+  fi
 fi
 
 if ! podman image exists "$release_image"; then
@@ -182,15 +200,6 @@ if ! podman image exists "$release_image"; then
     --build-arg "RAIJIN_BUILD_REVISION=$build_revision" \
     -t "$release_image" "$install_root"
 fi
-mode_file=/etc/s3-oci-migration/operation-mode
-if [[ ! -s "$mode_file" ]]; then
-  printf 'REAL\n' >"$mode_file"
-fi
-operation_mode="$(tr '[:lower:]' '[:upper:]' <"$mode_file")"
-[[ "$operation_mode" == REAL || "$operation_mode" == SIMULATION ]] || {
-  echo "Invalid operation mode in $mode_file" >&2
-  exit 1
-}
 if [[ ! -s "$deployment_profile_file" ]]; then
   printf 'STANDARD\n' >"$deployment_profile_file"
 fi
