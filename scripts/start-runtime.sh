@@ -10,10 +10,17 @@ oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 image="${RAIJIN_IMAGE:-localhost/s3-oci-migration:latest}"
 network=s3-oci-migration
 
+# The web console is loopback-only by default. Operators can persist a
+# different host interface/port in /etc/s3-oci-migration/web-bind.env.
+# See scripts/web-bind.sh for validation and supported values.
+# shellcheck source=web-bind.sh
+source "$install_root/scripts/web-bind.sh"
+raijin_load_web_bind
+
 case "$mode" in
   REAL)
     podman run -d --name s3-oci-app --replace --restart unless-stopped \
-      --network "$network" -p 127.0.0.1:8080:8080 \
+      --network "$network" -p "$RAIJIN_WEB_BIND_PUBLISH" \
       -e RAIJIN_OPERATION_MODE=REAL \
       -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
       -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
@@ -24,7 +31,7 @@ case "$mode" in
       -v "$mode_control_root:/run/mode-control:rw,z" \
       -v "$oci_runtime_config:/run/oci-runtime/oci-runtime.json:ro,z" "$image"
     for attempt in $(seq 1 30); do
-      curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null && break
+      curl --fail --silent "$RAIJIN_WEB_BIND_PROBE_URL/healthz" >/dev/null && break
       [[ "$attempt" -lt 30 ]] || { echo "REAL API did not become healthy" >&2; exit 1; }
       sleep 2
     done
@@ -69,7 +76,7 @@ case "$mode" in
       sleep 2
     done
     podman run -d --name s3-oci-app --replace --restart unless-stopped \
-      --network "$network" -p 127.0.0.1:8080:8080 \
+      --network "$network" -p "$RAIJIN_WEB_BIND_PUBLISH" \
       -e RAIJIN_OPERATION_MODE=SIMULATION \
       -e RAIJIN_SIMULATOR_BASE_URL=http://simulator:8090 \
       -e DATABASE_URL=postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation \
@@ -79,7 +86,7 @@ case "$mode" in
       -v "$mode_control_root:/run/mode-control:rw,z" \
       -v "$secret_root/simulation_postgres_password:/run/secrets/simulation_postgres_password:ro,z" "$image"
     for attempt in $(seq 1 30); do
-      curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null && break
+      curl --fail --silent "$RAIJIN_WEB_BIND_PROBE_URL/healthz" >/dev/null && break
       [[ "$attempt" -lt 30 ]] || { echo "SIMULATION API did not become healthy" >&2; exit 1; }
       sleep 2
     done

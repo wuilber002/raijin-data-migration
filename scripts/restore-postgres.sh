@@ -5,8 +5,13 @@ set -euo pipefail
 # refuses ambiguous paths or an omitted confirmation because it replaces the
 # durable control-plane state (inventory, tasks, waves and audit evidence).
 backup_root=/var/lib/s3-oci-migration/backups
+install_root=/opt/s3-oci-migration/release
 confirm=false
 backup_file=''
+
+# shellcheck source=web-bind.sh
+source "$install_root/scripts/web-bind.sh"
+raijin_load_web_bind
 
 usage() {
   cat <<'EOF'
@@ -96,7 +101,7 @@ if ((${#running_writers[@]} == 0)); then
   exit 0
 fi
 for attempt in $(seq 1 30); do
-  if curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null; then
+  if curl --fail --silent "$RAIJIN_WEB_BIND_PROBE_URL/healthz" >/dev/null; then
     echo "Raijin PostgreSQL restore completed and API is healthy."
     exit 0
   fi

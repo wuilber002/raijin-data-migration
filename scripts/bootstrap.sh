@@ -8,6 +8,7 @@ runtime_root=/run/s3-oci-migration
 mode_control_root=/var/lib/s3-oci-migration/mode-control
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 deployment_profile_file=/etc/s3-oci-migration/deployment-profile
+web_bind_config=/etc/s3-oci-migration/web-bind.env
 bootstrap_complete=false
 
 service_version="${RAIJIN_SERVICE_VERSION:-$(tr -d '[:space:]' <"$install_root/VERSION")}"
@@ -56,11 +57,22 @@ cleanup_failed_bootstrap() {
 
 trap cleanup_failed_bootstrap EXIT
 
-# A LOCAL deployment owns the shared loopback gateway on port 8080 and keeps
+# A LOCAL deployment owns the configured host web endpoint (loopback port 1604
+# by default) and keeps
 # Raijin in ordinary REAL mode behind it.  Re-running this bootstrap while the
 # complete LOCAL topology is already healthy must be idempotent: attempting to
-# publish a second process on 8080 would incorrectly mark the platform service
+# publish a second process on that endpoint would incorrectly mark the platform service
 # failed even though every required container is running.
+if [[ ! -e "$web_bind_config" ]]; then
+  install -d -m 0755 "$(dirname "$web_bind_config")"
+  cat >"$web_bind_config" <<'EOF'
+# Raijin web console host publication. The container continues to listen on
+# port 8080 internally; only this host endpoint is configurable.
+WEB_BIND_HOST=127.0.0.1
+WEB_BIND_PORT=1604
+EOF
+  chmod 0600 "$web_bind_config"
+fi
 local_runtime_complete=true
 for container in s3-oci-postgres s3-oci-app s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer s3-oci-fujin-local-dns s3-oci-local-ui-gateway; do
   if [[ "$(podman inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]]; then

@@ -36,7 +36,7 @@ services:
       DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${RAIJIN_WEB_BIND_HOST:-127.0.0.1}:${RAIJIN_WEB_BIND_PORT:-1604}:8080"
     secrets:
       - postgres_password
 
@@ -219,7 +219,7 @@ services:
     profiles: ["local"]
     restart: unless-stopped
     depends_on: [local-app, fujin-local]
-    ports: ["127.0.0.1:8080:8080"]
+    ports: ["${RAIJIN_WEB_BIND_HOST:-127.0.0.1}:${RAIJIN_WEB_BIND_PORT:-1604}:8080"]
     volumes:
       - ./docker/nginx-local-ui.conf:/opt/fujin/nginx-local-ui.conf:ro
       - ./docker/run-local-ui-gateway.sh:/opt/fujin/run-local-ui-gateway.sh:ro
@@ -282,7 +282,7 @@ services:
       DATABASE_URL: postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation
       POSTGRES_PASSWORD_FILE: /run/secrets/simulation_postgres_password
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${RAIJIN_WEB_BIND_HOST:-127.0.0.1}:${RAIJIN_WEB_BIND_PORT:-1604}:8080"
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
       interval: 10s

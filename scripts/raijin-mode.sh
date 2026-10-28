@@ -2,8 +2,13 @@
 set -euo pipefail
 
 mode_file=/etc/s3-oci-migration/operation-mode
+install_root=/opt/s3-oci-migration/release
 requested="${1:-status}"
 current="$(tr '[:lower:]' '[:upper:]' <"$mode_file" 2>/dev/null || echo REAL)"
+
+# shellcheck source=web-bind.sh
+source "$install_root/scripts/web-bind.sh"
+raijin_load_web_bind
 
 if [[ "$requested" == status ]]; then
   printf '%s\n' "$current"
@@ -36,7 +41,7 @@ chmod 0644 "$mode_file.tmp"
 mv "$mode_file.tmp" "$mode_file"
 systemctl restart s3-oci-migration.service
 sleep 2
-reported="$(curl --fail --silent http://127.0.0.1:8080/api/runtime | sed -n 's/.*"operation_mode":"\([A-Z]*\)".*/\1/p')"
+reported="$(curl --fail --silent "$RAIJIN_WEB_BIND_PROBE_URL/api/runtime" | sed -n 's/.*"operation_mode":"\([A-Z]*\)".*/\1/p')"
 if [[ "$reported" != "$target" ]]; then
   echo "Runtime validation failed after switch to $target; rolling back to $current" >&2
   printf '%s\n' "$current" >"$mode_file.tmp"

@@ -17,6 +17,10 @@ candidate_name="s3-oci-app-candidate"
 handoff_started=0
 release_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# shellcheck source=web-bind.sh
+source "$release_root/scripts/web-bind.sh"
+raijin_load_web_bind
+
 [[ -n "$target_image" ]] || {
   echo "Usage: $0 TARGET_IMAGE" >&2
   exit 2
@@ -208,7 +212,7 @@ sleep 3
 for name in s3-oci-app s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker; do
   [[ "$(podman inspect --format '{{.State.Running}}' "$name")" == true ]]
 done
-curl --fail --silent --show-error http://127.0.0.1:8080/raijin/healthz
+curl --fail --silent --show-error "$RAIJIN_WEB_BIND_PROBE_URL/raijin/healthz"
 validate_release_images "$target_image"
 install_platform_status_runtime
 # The freshly generated host snapshot must be accepted by the target API.

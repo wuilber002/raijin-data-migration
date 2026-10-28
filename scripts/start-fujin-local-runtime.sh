@@ -15,6 +15,10 @@ data_network="${FUJIN_LOCAL_DATA_NETWORK:-s3-oci-fujin-local-data}"
 ui_network="${FUJIN_LOCAL_UI_NETWORK:-s3-oci-fujin-local-ui}"
 local_oci_runtime="${RAIJIN_LOCAL_OCI_RUNTIME_CONFIG:-/etc/s3-oci-migration/oci-runtime-local.json}"
 
+# shellcheck source=web-bind.sh
+source "$install_root/scripts/web-bind.sh"
+raijin_load_web_bind
+
 [[ -s "$local_oci_runtime" ]] || {
   echo "Missing $local_oci_runtime. Create it with configure-fujin-local-oci-runtime first." >&2
   exit 2
@@ -154,7 +158,7 @@ configure_private_dns s3-oci-transfer-worker
 
 ui_resolver_ip="$(podman inspect --format "{{(index .NetworkSettings.Networks \"$main_network\").Gateway}}" s3-oci-fujin-local)"
 podman create --name s3-oci-local-ui-gateway --replace --restart unless-stopped \
-  --network "$main_network" -p 127.0.0.1:8080:8080 \
+  --network "$main_network" -p "$RAIJIN_WEB_BIND_PUBLISH" \
   -e FUJIN_UI_RESOLVER="$ui_resolver_ip" \
   -v "$install_root/docker/nginx-local-ui.conf:/opt/fujin/nginx-local-ui.conf:ro,z" \
   -v "$install_root/docker/run-local-ui-gateway.sh:/opt/fujin/run-local-ui-gateway.sh:ro,z" \
@@ -168,4 +172,4 @@ if [[ -n "$ui_resolver_ip" && -n "$gateway_resolv_conf" && -e "$gateway_resolv_c
   printf 'nameserver %s\noptions ndots:1\n' "$ui_resolver_ip" > "$gateway_resolv_conf"
 fi
 podman start s3-oci-local-ui-gateway
-echo "LOCAL private cloud is ready: http://127.0.0.1:8080/raijin/ and /fujin/"
+echo "LOCAL private cloud is ready: $RAIJIN_WEB_BIND_PROBE_URL/raijin/ and /fujin/"

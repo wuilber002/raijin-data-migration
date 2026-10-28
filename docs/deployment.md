@@ -104,8 +104,24 @@ git --version
 podman --version
 ```
 
-Não abra TCP/8080 no NSG, security list ou firewall. A interface é publicada
-somente em `127.0.0.1:8080` e será acessada pelo túnel SSH.
+Não abra TCP/1604 no NSG, security list ou firewall. Por padrão, a interface é
+publicada somente em `127.0.0.1:1604` e será acessada pelo túnel SSH.
+
+### Bind da console web
+
+O bootstrap cria `/etc/s3-oci-migration/web-bind.env` com o padrão seguro:
+
+```ini
+WEB_BIND_HOST=127.0.0.1
+WEB_BIND_PORT=1604
+```
+
+O host aceita `127.0.0.1`, `0.0.0.0`, `::` ou um IP específico da VM; a porta
+deve estar entre 1 e 65535. Após alterar o arquivo, aplique com
+`sudo systemctl restart s3-oci-migration.service`. O processo no container
+continua na porta interna `8080`; não a exponha diretamente. Um bind diferente
+de loopback exige controles externos equivalentes, como NSG, firewall e proxy
+reverso com autenticação.
 
 ### 2. Criar a configuração de runtime OCI
 
@@ -182,8 +198,8 @@ sudo /opt/s3-oci-migration/release/scripts/bootstrap.sh
 sudo systemctl enable --now s3-oci-migration.service
 
 sudo systemctl is-active s3-oci-migration.service
-curl --fail --silent http://127.0.0.1:8080/healthz
-curl --fail --silent http://127.0.0.1:8080/api/runtime
+curl --fail --silent http://127.0.0.1:1604/healthz
+curl --fail --silent http://127.0.0.1:1604/api/runtime
 sudo podman ps --format '{{.Names}} | {{.Status}}'
 sudo systemctl list-timers 's3-oci-*' --all
 ```
@@ -228,10 +244,10 @@ os arquivos locais nem sobrescreva uma senha antes dessa conversão.
 Abra o túnel na estação administrativa:
 
 ```bash
-ssh -N -L 8080:127.0.0.1:8080 <LINUX_USER>@<VM_HOST>
+ssh -N -L 1604:127.0.0.1:1604 <LINUX_USER>@<VM_HOST>
 ```
 
-Abra `http://127.0.0.1:8080`. Em **Configurações**, atualize o inventário de
+Abra `http://127.0.0.1:1604`. Em **Configurações**, atualize o inventário de
 buckets OCI, cadastre a conexão AWS por Secret e execute o pré-check. Faça
 discovery de uma source de teste e valide eventos, fila e observabilidade. O
 pré-check não restaura, lista nem baixa objetos AWS.
@@ -295,10 +311,10 @@ a topologia ativa. Em caso de falha ou restauração de backup, siga o
 Na estação administrativa, crie um túnel SSH:
 
 ```bash
-ssh -N -L 8080:127.0.0.1:8080 <usuario>@<ip-ou-hostname-da-vm>
+ssh -N -L 1604:127.0.0.1:1604 <usuario>@<ip-ou-hostname-da-vm>
 ```
 
-Depois, acesse `http://127.0.0.1:8080`. A porta da aplicação não deve ser liberada no NSG/security list.
+Depois, acesse `http://127.0.0.1:1604`. A porta da aplicação não deve ser liberada no NSG/security list.
 
 ### Operação da console
 
@@ -323,7 +339,7 @@ Os parâmetros operacionais são persistidos no PostgreSQL. Cinco containers fic
 ### Execução local por Compose
 
 Os perfis são mutuamente exclusivos e expõem a console somente em
-`127.0.0.1:8080`:
+`127.0.0.1:1604`:
 
 ```bash
 docker compose --profile real up -d
@@ -359,8 +375,8 @@ em `REAL`. Ele inicia o Fujin como provedor privado, com os dados em rede
 Docker interna e as duas interfaces no mesmo túnel SSH:
 
 ```text
-http://127.0.0.1:8080/raijin/
-http://127.0.0.1:8080/fujin/
+http://127.0.0.1:1604/raijin/
+http://127.0.0.1:1604/fujin/
 ```
 
 A console administrativa LOCAL não usa token próprio. O gateway publica-a
@@ -400,21 +416,21 @@ montado exclusivamente nos containers do perfil Compose `local`.
 
 A troca de modo não é exposta na interface web. Ela é uma operação
 administrativa executada somente na própria VM, pela API local publicada em
-`127.0.0.1:8080`. O endpoint solicita ao host um reinício controlado e recusa
+`127.0.0.1:1604`. O endpoint solicita ao host um reinício controlado e recusa
 a operação enquanto houver tarefas ou *discoveries* em estado `READY` ou
 `RUNNING`.
 
 Primeiro, consulte o modo atual:
 
 ```bash
-curl --fail --silent http://127.0.0.1:8080/api/runtime
+curl --fail --silent http://127.0.0.1:1604/api/runtime
 ```
 
 Para solicitar a mudança para o runtime que acessa AWS e OCI reais:
 
 ```bash
 curl --fail --silent --show-error \
-  --request POST http://127.0.0.1:8080/api/runtime/mode \
+  --request POST http://127.0.0.1:1604/api/runtime/mode \
   --header 'Content-Type: application/json' \
   --data '{"target_mode":"REAL","confirmed":true}'
 ```
@@ -423,7 +439,7 @@ Para solicitar a mudança para o runtime isolado, que não chama AWS nem OCI:
 
 ```bash
 curl --fail --silent --show-error \
-  --request POST http://127.0.0.1:8080/api/runtime/mode \
+  --request POST http://127.0.0.1:1604/api/runtime/mode \
   --header 'Content-Type: application/json' \
   --data '{"target_mode":"SIMULATION","confirmed":true}'
 ```
@@ -433,7 +449,7 @@ o reinício e consulte `/healthz` até receber `"status":"ok"` e o
 `operation_mode` solicitado:
 
 ```bash
-until curl --fail --silent http://127.0.0.1:8080/healthz; do sleep 5; done
+until curl --fail --silent http://127.0.0.1:1604/healthz; do sleep 5; done
 ```
 
 Não execute a troca por navegador, por máquina remota ou durante uma
@@ -447,7 +463,7 @@ Depois de qualquer atualização na VM, valide explicitamente o agendamento e a 
 ```bash
 sudo systemctl show s3-oci-platform-status.timer \
   -p ActiveState -p NextElapseUSecRealtime -p NextElapseUSecMonotonic
-curl -fsS http://127.0.0.1:8080/raijin/api/platform/status
+curl -fsS http://127.0.0.1:1604/raijin/api/platform/status
 ```
 
 O timer deve estar ativo e possuir uma próxima execução; a API deve retornar
@@ -455,7 +471,7 @@ O timer deve estar ativo e possuir uma próxima execução; a API deve retornar
 
 Embora o boot volume seja provisionado com 500 GB, a imagem OCI pode iniciar com a partição LVM ainda no tamanho original. No primeiro boot, o cloud-init expande a partição e o PV e aloca todos os extents livres do volume group ao filesystem raiz. Assim, o Raijin instalado no boot volume utiliza praticamente toda a capacidade disponível. A rotina é idempotente e não reduz nem altera o filesystem em execuções posteriores.
 
-O bloco **Observabilidade operacional** acompanha, sem chamar AWS ou OCI: tarefas falhas e em retry, leases vencidos, checkpoints multipart pendentes de retomada, transferências sem progresso há mais de dez minutos, falhas persistidas nas últimas 24 horas, risco previsto de expiração de cópias restauradas e espaço livre do volume persistente. Para um coletor local compatível, `http://127.0.0.1:8080/metrics` expõe essas métricas no formato Prometheus (`raijin_failed_tasks`, `raijin_retrying_tasks`, `raijin_stale_task_leases`, `raijin_active_multipart_checkpoints`, `raijin_stalled_transfers`, `raijin_failures_last_24h`, `raijin_restore_expiry_risk_waves` e `raijin_disk_free_bytes`); mantenha-o atrás do mesmo túnel SSH ou de um agente local, nunca em uma porta pública.
+O bloco **Observabilidade operacional** acompanha, sem chamar AWS ou OCI: tarefas falhas e em retry, leases vencidos, checkpoints multipart pendentes de retomada, transferências sem progresso há mais de dez minutos, falhas persistidas nas últimas 24 horas, risco previsto de expiração de cópias restauradas e espaço livre do volume persistente. Para um coletor local compatível, `http://127.0.0.1:1604/metrics` expõe essas métricas no formato Prometheus (`raijin_failed_tasks`, `raijin_retrying_tasks`, `raijin_stale_task_leases`, `raijin_active_multipart_checkpoints`, `raijin_stalled_transfers`, `raijin_failures_last_24h`, `raijin_restore_expiry_risk_waves` e `raijin_disk_free_bytes`); mantenha-o atrás do mesmo túnel SSH ou de um agente local, nunca em uma porta pública.
 
 Alertas recomendados para a operação do cliente: qualquer `raijin_failed_tasks > 0`; `raijin_stale_task_leases > 0` por mais de um ciclo de lease; `raijin_stalled_transfers > 0` por mais de 15 minutos; ou volume livre abaixo da margem de operação definida pelo cliente. Os eventos e erros detalhados permanecem no histórico persistente da console e nos logs do serviço, sem incluir valores de Secrets.
 
@@ -488,6 +504,6 @@ O procedimento de instalação de release está na seção
 O bootstrap constrói a imagem com Podman no host; portanto, a primeira
 instalação exige acesso aos registries e dependências declarados acima.
 
-Na Oracle Linux, o bootstrap utiliza Podman nativo e registra `s3-oci-migration.service` no systemd. Os containers `s3-oci-postgres` e `s3-oci-app` usam volumes persistentes no boot volume. A API é publicada apenas em `127.0.0.1:8080`.
+Na Oracle Linux, o bootstrap utiliza Podman nativo e registra `s3-oci-migration.service` no systemd. Os containers `s3-oci-postgres` e `s3-oci-app` usam volumes persistentes no boot volume. A API é publicada em `127.0.0.1:1604` por padrão e pode ser ajustada em `web-bind.env`.
 
 O timer `s3-oci-backup-postgres.timer` executa diariamente às 02:15 UTC um `pg_dump` dos bancos real e simulado e conserva 35 dias por padrão. Esse prazo cobre a quarentena padrão de 30 dias do simulador. Ele pode ser ampliado com `RAIJIN_LOGICAL_BACKUP_RETENTION_DAYS` no serviço systemd, mas nunca reduzido abaixo de 30 dias. Isso complementa, mas não substitui, a policy automática de backup do boot volume.

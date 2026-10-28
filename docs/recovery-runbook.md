@@ -8,7 +8,7 @@ ondas, fila, checkpoints multipart, eventos, duração acumulada do discovery e 
 
 1. Conecte-se à VM por SSH e confirme que a porta web continua local.
 2. Execute `sudo systemctl start s3-oci-migration.service`.
-3. Confirme saúde com `curl -fsS http://127.0.0.1:8080/healthz`.
+3. Confirme saúde com `curl -fsS http://127.0.0.1:1604/healthz`.
 4. Abra a console pelo túnel SSH e revise **Status → Observabilidade** e a
    fila. Tarefas cujo lease venceu voltam a ser elegíveis; uploads multipart
    consultam as partes OCI já aceitas antes de enviar partes faltantes.

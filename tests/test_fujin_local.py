@@ -481,7 +481,7 @@ def test_local_compose_exposes_only_the_loopback_ui_gateway():
     local_app = compose.split("  local-app:\n", 1)[1].split("  local-ui-gateway:\n", 1)[0]
     gateway = compose.split("  local-ui-gateway:\n", 1)[1].split("  simulator:\n", 1)[0]
     assert "ports:" not in fujin and "ports:" not in local_app
-    assert 'ports: ["127.0.0.1:8080:8080"]' in gateway
+    assert 'ports: ["${RAIJIN_WEB_BIND_HOST:-127.0.0.1}:${RAIJIN_WEB_BIND_PORT:-1604}:8080"]' in gateway
     assert "fujin-local-data:\n    internal: true" in compose
     assert "fujin-local-ui:\n    internal: true" in compose
     assert "networks: [fujin-local-ui, default, fujin-local-data]" in compose
@@ -518,7 +518,8 @@ def test_oracle_linux_podman_launcher_keeps_raijin_real_and_the_data_plane_priva
     assert 'podman network connect --alias fujin-local "$ui_network" s3-oci-fujin-local' in launcher
     assert "s3-oci-stop-runtime" in launcher and "docker.io/library/postgres:16-alpine" in launcher
     assert 'mountpoint -q "$data_root/fujin-payloads"' in launcher
-    assert "-p 127.0.0.1:8080:8080" in launcher
+    assert 'source "$install_root/scripts/web-bind.sh"' in launcher
+    assert '-p "$RAIJIN_WEB_BIND_PUBLISH"' in launcher
     assert "s3-oci-fujin-local" in launcher and "fujin-payloads:/var/lib/fujin-local/payloads:ro" in launcher
     assert "s3-oci-fujin-local-materializer" in launcher
     assert 'fujin-local:/var/lib/fujin-local:z' in launcher
@@ -526,7 +527,7 @@ def test_oracle_linux_podman_launcher_keeps_raijin_real_and_the_data_plane_priva
     assert 'fujin-payloads:/var/lib/fujin-local/payloads:rw,z' in launcher
     assert '"$image" python3 -m app.fujin_local_materializer' in launcher
     assert 'podman network connect --alias local-app "$ui_network" s3-oci-app' in launcher
-    assert '--network "$main_network" -p 127.0.0.1:8080:8080' in launcher
+    assert '--network "$main_network" -p "$RAIJIN_WEB_BIND_PUBLISH"' in launcher
     assert 'ui_resolver_ip=' in launcher and 'gateway_resolv_conf=' in launcher
     assert 'FUJIN_UI_RESOLVER="$ui_resolver_ip"' in launcher
     assert 'FUJIN_UI_RESOLVER:-' in Path("docker/run-local-ui-gateway.sh").read_text(encoding="utf-8")
@@ -574,6 +575,10 @@ def test_oracle_linux_podman_launcher_executes_the_private_topology_in_dry_run(t
     install = tmp_path / "release"; (install / "docker").mkdir(parents=True)
     (install / "docker" / "fujin-local.Corefile").write_text(".:53 {}", encoding="utf-8")
     (install / "docker" / "nginx-local-ui.conf").write_text("server {}", encoding="utf-8")
+    (install / "scripts").mkdir()
+    (install / "scripts" / "web-bind.sh").write_text(
+        Path("scripts/web-bind.sh").read_text(encoding="utf-8"), encoding="utf-8"
+    )
     data = tmp_path / "data"; (data / "fujin-payloads").mkdir(parents=True)
     secret = tmp_path / "secrets"; secret.mkdir(); (secret / "fujin_local_admin_token").write_text("token", encoding="utf-8")
     runtime = tmp_path / "oci-local.json"; runtime.write_text("{}", encoding="utf-8")
@@ -592,7 +597,7 @@ def test_oracle_linux_podman_launcher_executes_the_private_topology_in_dry_run(t
     assert "--name s3-oci-fujin-local-materializer" in commands
     assert "--name s3-oci-app" in commands and "RAIJIN_OPERATION_MODE=REAL" in commands
     assert "/run/platform-status:ro,z" in commands
-    assert "--name s3-oci-local-ui-gateway" in commands and "-p 127.0.0.1:8080:8080" in commands
+    assert "--name s3-oci-local-ui-gateway" in commands and "-p 127.0.0.1:1604:8080" in commands
 
 
 def test_local_administration_uses_the_ssh_tunnel_boundary_not_a_browser_token(monkeypatch):

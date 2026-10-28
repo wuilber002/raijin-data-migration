@@ -25,7 +25,7 @@ somente nos *buckets* OCI explicitamente autorizados.
 | Dynamic Group | Representa exclusivamente a VM perante os serviços OCI. |
 | Policy OCI | Permite à Dynamic Group ler os *Secrets* e manipular objetos apenas nos destinos aprovados. |
 
-A interface é publicada somente em `127.0.0.1:8080` dentro da VM. O acesso
+A interface é publicada somente em `127.0.0.1:1604` dentro da VM. O acesso
 administrativo ocorre por túnel SSH autenticado por chave pública/privada.
 
 ## 2. Informações a registrar antes do início

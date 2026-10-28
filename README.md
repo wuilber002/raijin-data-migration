@@ -58,7 +58,7 @@ plataforma, consulte [Capacidades e operação do RAIJIN](docs/capabilities.md).
 Crie um túnel SSH até a VM e mantenha o terminal aberto:
 
 ```bash
-ssh -N -L 8080:127.0.0.1:8080 -i ~/.ssh/id_rsa opc@<ip-da-vm>
+ssh -N -L 1604:127.0.0.1:1604 -i ~/.ssh/id_rsa opc@<ip-da-vm>
 ```
 
-Abra `http://127.0.0.1:8080`. A porta 8080 permanece vinculada apenas ao localhost da VM.
+Abra `http://127.0.0.1:1604`. Por padrão, a console é vinculada apenas a `127.0.0.1:1604` na VM. Para ajustar host/interface e porta, edite `/etc/s3-oci-migration/web-bind.env` e reinicie `s3-oci-migration.service`.
