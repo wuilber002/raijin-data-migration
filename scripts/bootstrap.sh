@@ -203,7 +203,6 @@ install -m 0750 "$install_root/scripts/start-runtime.sh" /usr/local/sbin/s3-oci-
 install -m 0750 "$install_root/scripts/start-fujin-local-runtime.sh" /usr/local/sbin/s3-oci-start-fujin-local-runtime
 install -m 0750 "$install_root/scripts/configure-fujin-local-oci-runtime.py" /usr/local/sbin/configure-fujin-local-oci-runtime
 install -m 0750 "$install_root/scripts/mount-fujin-payload-volume.sh" /usr/local/sbin/s3-oci-mount-fujin-payload
-/usr/local/sbin/s3-oci-mount-fujin-payload
 install -m 0750 "$install_root/scripts/stop-runtime.sh" /usr/local/sbin/s3-oci-stop-runtime
 install -m 0750 "$install_root/scripts/raijin-mode.sh" /usr/local/sbin/raijin-mode
 install -m 0750 "$install_root/scripts/process-mode-request.sh" /usr/local/sbin/s3-oci-process-mode-request
@@ -212,6 +211,7 @@ if [[ "$deployment_profile" == LOCAL ]]; then
   # Raijin remains in REAL and sees Fujin only through ordinary private
   # provider endpoints.  Keeping this choice separate from operation-mode
   # makes a host reboot reconstruct the same eight-container topology.
+  /usr/local/sbin/s3-oci-mount-fujin-payload
   RAIJIN_IMAGE="$release_image" /usr/local/sbin/s3-oci-start-fujin-local-runtime
 else
   RAIJIN_IMAGE="$release_image" /usr/local/sbin/s3-oci-start-runtime "$operation_mode"
