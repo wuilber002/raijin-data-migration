@@ -271,6 +271,18 @@
     #console-profile-modal .console-profile-panel hr{margin:1.15rem 0;border:0;border-top:1px solid #64748b}
     #console-profile-modal input:disabled{opacity:1;background:#090f1d;color:#7f8da4;border-color:#34425c;border-style:dashed;cursor:not-allowed}
     #console-profile-modal input:disabled+small{color:#7f8da4}
+    /* Deliberately mirrors the MFA card displayed immediately after login.
+       The profile only changes the safe exit action from "Skip" to "Cancel". */
+    #console-mfa-enrollment-modal .console-mfa-enrollment-panel{width:min(400px,calc(100vw - 2rem));padding:2rem;background:#182237;box-shadow:0 16px 42px #0008}
+    #console-mfa-enrollment-modal .console-mfa-enrollment-panel h2{margin:0;color:#f8fafc;font-size:1.8rem}
+    #console-mfa-enrollment-modal .console-mfa-enrollment-panel .hint{margin:.9rem 0;color:#b9c9df;line-height:1.5}
+    #console-mfa-enrollment-modal .console-mfa-fields{display:block}
+    #console-mfa-enrollment-modal .field{display:grid;gap:.35rem;margin:1rem 0;font-weight:700}
+    #console-mfa-enrollment-modal .console-mfa-qr{margin:1rem 0;text-align:center}
+    #console-mfa-enrollment-modal .console-mfa-qr img{display:block;width:220px;height:220px;margin:0 auto;padding:.45rem;border-radius:.45rem;background:#fff}
+    #console-mfa-enrollment-modal .console-mfa-actions{display:grid;gap:.65rem;margin-top:1rem}
+    #console-mfa-enrollment-modal .console-mfa-actions button{width:100%;margin:0}
+    #console-mfa-enrollment-modal .console-mfa-actions .secondary{background:#34425c}
     @media(max-width:520px){.console-user-menu-panel{right:0;min-width:180px}}
   </style>
 </head>

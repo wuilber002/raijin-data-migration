@@ -620,6 +620,7 @@
   "O limite de dois autenticadores já foi atingido.": "O limite de dois autenticadores já foi atingido.",
   "Nome do autenticador": "Nome do autenticador",
   "Esta conta administrativa precisa ativar a autenticação em duas etapas.": "Esta conta administrativa precisa ativar a autenticação em duas etapas.",
+  "Escaneie o QR Code e confirme o código de seis dígitos do autenticador.": "Escaneie o QR Code e confirme o código de seis dígitos do autenticador.",
   "Adicione esta chave ao seu aplicativo autenticador e informe o código de seis dígitos para confirmar.": "Adicione esta chave ao seu aplicativo autenticador e informe o código de seis dígitos para confirmar.",
   "Chave de configuração": "Chave de configuração",
   "Código de autenticação": "Código de autenticação",

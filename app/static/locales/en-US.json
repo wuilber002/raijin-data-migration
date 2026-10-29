@@ -620,6 +620,7 @@
   "O limite de dois autenticadores já foi atingido.": "The maximum of two authenticators has been reached.",
   "Nome do autenticador": "Authenticator name",
   "Esta conta administrativa precisa ativar a autenticação em duas etapas.": "This administrative account must enable two-step authentication.",
+  "Escaneie o QR Code e confirme o código de seis dígitos do autenticador.": "Scan the QR Code and confirm the authenticator's six-digit code.",
   "Escaneie o QR Code com seu aplicativo autenticador.": "Scan the QR Code with your authenticator app.",
   "QR Code para configurar o autenticador": "QR Code to set up the authenticator",
   "Informe um código de seis dígitos.": "Enter a six-digit code.",
