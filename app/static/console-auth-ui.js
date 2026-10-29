@@ -281,6 +281,7 @@
         <p class="hint" id="console-mfa-state"></p>
         <div id="console-mfa-enrollment" class="hidden">
           <p class="hint" data-console-i18n="Adicione esta chave ao seu aplicativo autenticador e informe o código de seis dígitos para confirmar."></p>
+          <figure class="console-mfa-qr"><img id="console-mfa-qr" alt="" width="224" height="224"><figcaption data-console-i18n="Escaneie o QR Code com seu aplicativo autenticador."></figcaption></figure>
           <label class="field"><span data-console-i18n="Chave de configuração"></span><input id="console-mfa-secret" readonly></label>
           <label class="field"><span data-console-i18n="Código de autenticação"></span><input id="console-mfa-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
           <button type="button" id="console-mfa-confirm" data-console-i18n="Ativar autenticação em duas etapas"></button>
@@ -332,6 +333,9 @@
       try {
         const data = await apiCall("/api/auth/mfa/enrollment", {method:"POST"});
         profileModal.querySelector("#console-mfa-secret").value = data.secret;
+        const qr = profileModal.querySelector("#console-mfa-qr");
+        qr.src = `${data.qr_code_url}?v=${Date.now()}`;
+        qr.alt = uiText("QR Code para configurar o autenticador");
         profileModal.querySelector("#console-mfa-enrollment").classList.remove("hidden");
         profileMessage("Informe o código exibido no autenticador para concluir a ativação.");
       } catch (error) { profileMessage(error.message); }

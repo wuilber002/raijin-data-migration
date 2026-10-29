@@ -126,6 +126,22 @@ def test_totp_accepts_current_window_and_rejects_wrong_pin():
     assert not main.verify_totp(secret, "000000", now=timestamp)
 
 
+def test_pending_mfa_qr_is_session_protected_and_contains_an_otpauth_payload(tmp_path, monkeypatch):
+    database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'mfa-qr.db'}")
+    monkeypatch.setattr(main, "engine", database)
+    monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))
+    main.Base.metadata.create_all(database)
+    with main.SessionLocal() as session:
+        user = main.ConsoleUser(username="mfa-user", password_hash=PasswordHasher().hash("a secure test password"),
+                                role=ConsoleRole.VIEWER, mfa_pending_secret_encrypted=main.mfa_encrypt("JBSWY3DPEHPK3PXP"))
+        session.add(user); session.commit()
+        request = SimpleNamespace(state=SimpleNamespace(console_principal={"id": user.id}))
+        response = main.console_mfa_enrollment_qr(request, session)
+    assert response.media_type == "image/svg+xml"
+    assert b"<svg" in response.body
+    assert main.auth_route_requirement("/api/auth/mfa/enrollment/qr", "GET") is ConsoleRole.VIEWER
+
+
 def test_auth_security_summary_is_aggregate_and_detects_lockouts_and_denial_spikes(tmp_path, monkeypatch):
     database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'auth-security.db'}")
     monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))

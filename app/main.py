@@ -31,6 +31,8 @@ import base64
 import struct
 import time
 import secrets
+import qrcode
+from qrcode.image.svg import SvgPathImage
 from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 from urllib.request import Request, urlopen
@@ -2089,7 +2091,9 @@ def auth_route_requirement(path: str, method: str) -> ConsoleRole | str | None:
     # asset public; every other console static asset remains session-protected.
     if path in {"/healthz", "/metrics", "/login", "/api/auth/login", "/api/auth/mfa/verify", "/static/login.js"}:
         return None
-    if path in {"/api/auth/me", "/api/auth/logout", "/api/auth/password", "/api/auth/profile"}:
+    if path in {"/api/auth/me", "/api/auth/logout", "/api/auth/password", "/api/auth/profile",
+                "/api/auth/mfa/enrollment", "/api/auth/mfa/enrollment/confirm",
+                "/api/auth/mfa/enrollment/qr"}:
         return ConsoleRole.VIEWER
     # Presence is a low-volume, anonymous console metric. It is emitted by
     # every authenticated browser and must not turn a VIEWER heartbeat into a
@@ -4192,6 +4196,15 @@ def generate_recovery_codes(session: Session, user: ConsoleUser) -> list[str]:
     return codes
 
 
+def totp_enrollment_uri(user: ConsoleUser, secret: str) -> str:
+    """Build the standard URI consumed by authenticator applications."""
+    from urllib.parse import quote
+    issuer = "RAIJIN"
+    label = f"{issuer}:{user.username}"
+    return (f"otpauth://totp/{quote(label)}?secret={secret}&issuer={quote(issuer)}"
+            "&algorithm=SHA1&digits=6&period=30")
+
+
 def mfa_verified_or_recovery(session: Session, user: ConsoleUser, code: str) -> bool:
     try:
         if verify_totp(mfa_decrypt(user.mfa_secret_encrypted), code):
@@ -4356,11 +4369,24 @@ def console_start_mfa_enrollment(request: FastAPIRequest, session: Session = Dep
     user.mfa_pending_secret_encrypted = mfa_encrypt(secret)
     auth_audit(session, "MFA_ENROLLMENT_STARTED", actor_user_id=user.id, target=user.username, request=request)
     session.commit()
-    issuer = "RAIJIN"
-    label = f"{issuer}:{user.username}"
-    from urllib.parse import quote
-    uri = f"otpauth://totp/{quote(label)}?secret={secret}&issuer={quote(issuer)}&algorithm=SHA1&digits=6&period=30"
-    return {"secret": secret, "otpauth_uri": uri, "issuer": issuer, "username": user.username}
+    return {"secret": secret, "otpauth_uri": totp_enrollment_uri(user, secret), "issuer": "RAIJIN",
+            "username": user.username, "qr_code_url": "/api/auth/mfa/enrollment/qr"}
+
+
+@app.get("/api/auth/mfa/enrollment/qr", response_class=Response)
+def console_mfa_enrollment_qr(request: FastAPIRequest, session: Session = Depends(get_session)) -> Response:
+    """Render a pending enrollment as SVG without disclosing its secret in a URL."""
+    user = session.get(ConsoleUser, console_principal(request)["id"])
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        secret = mfa_decrypt(user.mfa_pending_secret_encrypted)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail="Start MFA enrollment before requesting its QR code") from error
+    image = qrcode.make(totp_enrollment_uri(user, secret), image_factory=SvgPathImage,
+                        border=3, box_size=8)
+    return Response(image.to_string(encoding="unicode"), media_type="image/svg+xml",
+                    headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/auth/mfa/enrollment/confirm")
