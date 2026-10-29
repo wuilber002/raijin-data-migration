@@ -73,10 +73,10 @@ check_update() {
 runtime_is_drained() {
   local counts
   counts="$(podman exec s3-oci-postgres psql -U migration -d migration -Atc \
-    "select count(*) from tasks where state in ('READY','RUNNING'); select count(*) from waves where status in ('RESTORE_REQUESTED','RESTORE_REQUEST_ACCEPTED','RESTORING','RESTORE_DRAINING','TRANSFERRING','TRANSFER_DRAINING');" 2>/dev/null || true)"
-  local task_count wave_count
-  task_count="$(sed -n '1p' <<<"$counts")"; wave_count="$(sed -n '2p' <<<"$counts")"
-  [[ "$task_count" =~ ^[0-9]+$ && "$wave_count" =~ ^[0-9]+$ && "$task_count" == 0 && "$wave_count" == 0 ]]
+    "select count(*) from tasks where state in ('READY','RUNNING'); select count(*) from discovery_jobs where state in ('READY','RUNNING'); select count(*) from waves where status in ('RESTORE_REQUESTED','RESTORE_REQUEST_ACCEPTED','RESTORING','RESTORE_DRAINING','TRANSFERRING','TRANSFER_DRAINING');" 2>/dev/null || true)"
+  local task_count discovery_count wave_count
+  task_count="$(sed -n '1p' <<<"$counts")"; discovery_count="$(sed -n '2p' <<<"$counts")"; wave_count="$(sed -n '3p' <<<"$counts")"
+  [[ "$task_count" =~ ^[0-9]+$ && "$discovery_count" =~ ^[0-9]+$ && "$wave_count" =~ ^[0-9]+$ && "$task_count" == 0 && "$discovery_count" == 0 && "$wave_count" == 0 ]]
 }
 
 apply_update() {

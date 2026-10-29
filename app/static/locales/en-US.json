@@ -708,5 +708,13 @@
   "Revisão instalada": "Installed revision",
   "Revisão disponível": "Available revision",
   "Estado": "State",
-  "A atualização criará um backup e reiniciará a plataforma. Continuar?": "The update will create a backup and restart the platform. Continue?"
+  "A atualização criará um backup e reiniciará a plataforma. Continuar?": "The update will create a backup and restart the platform. Continue?",
+  "A atualização criará um backup, reiniciará a plataforma e encerrará sua sessão atual. Será necessário entrar novamente. Continuar?": "The update will create a backup, restart the platform, and end your current session. You will need to sign in again. Continue?",
+  "O controle de atualização do host não está disponível.": "The host update control is unavailable.",
+  "A revisão instalada está atual.": "The installed revision is current.",
+  "Uma revisão aprovada está disponível.": "An approved revision is available.",
+  "Criando backup do PostgreSQL antes da atualização.": "Creating a PostgreSQL backup before the update.",
+  "Instalando a revisão aprovada.": "Installing the approved revision.",
+  "Atualização concluída e validada pelo health check local.": "Update completed and validated by the local health check.",
+  "A nova revisão falhou; a revisão anterior foi restaurada.": "The new revision failed; the previous revision was restored."
 }

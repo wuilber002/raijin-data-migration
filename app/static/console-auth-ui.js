@@ -503,8 +503,17 @@
       card.querySelector("#console-web-bind-status").textContent = webBind.locked ? uiText(webBind.lock_reason) : (webBind.pending ? uiText("Solicitação de endpoint aguardando aplicação no host.") : (webBind.result?.message || ""));
       const updatePending = Boolean(updateState.pending);
       const updateAvailable = updateState.state === "AVAILABLE" && /^[0-9a-f]{40}$/.test(updateState.available_revision || "");
+      const updateMessage = {
+        UNAVAILABLE: uiText("O controle de atualização do host não está disponível."),
+        CURRENT: uiText("A revisão instalada está atual."),
+        AVAILABLE: uiText("Uma revisão aprovada está disponível."),
+        BACKING_UP: uiText("Criando backup do PostgreSQL antes da atualização."),
+        DEPLOYING: uiText("Instalando a revisão aprovada."),
+        SUCCEEDED: uiText("Atualização concluída e validada pelo health check local."),
+        ROLLED_BACK: uiText("A nova revisão falhou; a revisão anterior foi restaurada."),
+      }[updateState.state] || updateState.message || "";
       latestUpdateState = updateState;
-      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateState.message || "")}</p>`;
+      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
       card.querySelector("#console-update-check").disabled = updatePending;
       card.querySelector("#console-update-apply").disabled = updatePending || !updateAvailable;
       clearTimeout(updateRefreshTimer);
@@ -557,7 +566,7 @@
       await apiCall("/api/admin/updates/check", {method:"POST"}); await render();
     });
     card.querySelector("#console-update-apply").addEventListener("click", async () => {
-      if (!latestUpdateState?.available_revision || !window.confirm(uiText("A atualização criará um backup e reiniciará a plataforma. Continuar?"))) return;
+      if (!latestUpdateState?.available_revision || !window.confirm(uiText("A atualização criará um backup, reiniciará a plataforma e encerrará sua sessão atual. Será necessário entrar novamente. Continuar?"))) return;
       await apiCall("/api/admin/updates/apply", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({revision:latestUpdateState.available_revision})}); await render();
     });
     card.querySelector("#console-audit-filter").addEventListener("submit", async event => { event.preventDefault(); await render(); });

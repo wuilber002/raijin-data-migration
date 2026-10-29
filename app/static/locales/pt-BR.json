@@ -705,5 +705,13 @@
   "Revisão instalada": "Revisão instalada",
   "Revisão disponível": "Revisão disponível",
   "Estado": "Estado",
-  "A atualização criará um backup e reiniciará a plataforma. Continuar?": "A atualização criará um backup e reiniciará a plataforma. Continuar?"
+  "A atualização criará um backup e reiniciará a plataforma. Continuar?": "A atualização criará um backup e reiniciará a plataforma. Continuar?",
+  "A atualização criará um backup, reiniciará a plataforma e encerrará sua sessão atual. Será necessário entrar novamente. Continuar?": "A atualização criará um backup, reiniciará a plataforma e encerrará sua sessão atual. Será necessário entrar novamente. Continuar?",
+  "O controle de atualização do host não está disponível.": "O controle de atualização do host não está disponível.",
+  "A revisão instalada está atual.": "A revisão instalada está atual.",
+  "Uma revisão aprovada está disponível.": "Uma revisão aprovada está disponível.",
+  "Criando backup do PostgreSQL antes da atualização.": "Criando backup do PostgreSQL antes da atualização.",
+  "Instalando a revisão aprovada.": "Instalando a revisão aprovada.",
+  "Atualização concluída e validada pelo health check local.": "Atualização concluída e validada pelo health check local.",
+  "A nova revisão falhou; a revisão anterior foi restaurada.": "A nova revisão falhou; a revisão anterior foi restaurada."
 }
