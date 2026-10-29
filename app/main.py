@@ -1154,6 +1154,8 @@ class ConsoleUser(Base):
     role: Mapped[str] = mapped_column(String(16), default=ConsoleRole.VIEWER, index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -1903,6 +1905,11 @@ class ConsolePasswordChange(BaseModel):
     new_password: str = Field(min_length=14, max_length=1024)
 
 
+class ConsoleProfileUpdate(BaseModel):
+    display_name: str | None = Field(default=None, max_length=128)
+    email: str | None = Field(default=None, max_length=320)
+
+
 class ConsoleUserCreate(BaseModel):
     username: str = Field(min_length=3, max_length=64)
     password: str = Field(min_length=14, max_length=1024)
@@ -2028,7 +2035,7 @@ def auth_route_requirement(path: str, method: str) -> ConsoleRole | str | None:
     # asset public; every other console static asset remains session-protected.
     if path in {"/healthz", "/metrics", "/login", "/api/auth/login", "/static/login.js"}:
         return None
-    if path in {"/api/auth/me", "/api/auth/logout", "/api/auth/password"}:
+    if path in {"/api/auth/me", "/api/auth/logout", "/api/auth/password", "/api/auth/profile"}:
         return ConsoleRole.VIEWER
     if path.startswith("/api/tasks/") and method != "GET" and path != "/api/tasks/recover":
         return "INTERNAL"
@@ -2189,6 +2196,16 @@ def create_schema() -> None:
                 "ALTER TABLE console_auth_settings "
                 "ADD COLUMN password_history_count INTEGER NOT NULL DEFAULT 3"
             ))
+    existing_console_user_columns = {
+        column["name"] for column in inspect(engine).get_columns("console_users")
+    }
+    with engine.begin() as connection:
+        for column, sql_type in {
+            "display_name": "VARCHAR(128)",
+            "email": "VARCHAR(320)",
+        }.items():
+            if column not in existing_console_user_columns:
+                connection.execute(text(f"ALTER TABLE console_users ADD COLUMN {column} {sql_type}"))
     ensure_console_auth_bootstrap()
     # Lightweight additive migrations keep the single-VM deployment upgradeable. No
     # destructive schema operation is performed automatically.
@@ -3945,6 +3962,24 @@ def console_user_view(user: ConsoleUser) -> dict:
             "last_login_at": user.last_login_at, "created_at": user.created_at}
 
 
+CONSOLE_EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def normalize_console_profile(display_name: str | None, email: str | None) -> tuple[str | None, str | None]:
+    name = str(display_name or "").strip() or None
+    address = str(email or "").strip().lower() or None
+    if name and (len(name) > 128 or any(ord(character) < 32 for character in name)):
+        raise ValueError("Display name contains invalid characters")
+    if address and not CONSOLE_EMAIL_PATTERN.fullmatch(address):
+        raise ValueError("Email address is invalid")
+    return name, address
+
+
+def console_profile_view(user: ConsoleUser) -> dict:
+    return {"username": user.username, "role": user.role, "display_name": user.display_name,
+            "email": user.email, "last_login_at": user.last_login_at}
+
+
 MAX_CONSOLE_PASSWORD_HISTORY = 12
 
 
@@ -4051,6 +4086,31 @@ def console_auth_me(request: FastAPIRequest) -> dict:
     principal = console_principal(request)
     csrf = request.cookies.get(CONSOLE_CSRF_COOKIE, "")
     return {"enabled": True, "user": principal, "csrf_token": csrf}
+
+
+@app.get("/api/auth/profile")
+def console_get_profile(request: FastAPIRequest, session: Session = Depends(get_session)) -> dict:
+    user = session.get(ConsoleUser, console_principal(request)["id"])
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return console_profile_view(user)
+
+
+@app.patch("/api/auth/profile")
+def console_update_profile(payload: ConsoleProfileUpdate, request: FastAPIRequest,
+                           session: Session = Depends(get_session)) -> dict:
+    user = session.get(ConsoleUser, console_principal(request)["id"])
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        display_name, email = normalize_console_profile(payload.display_name, payload.email)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    user.display_name, user.email = display_name, email
+    auth_audit(session, "PROFILE_UPDATED", actor_user_id=user.id, target=user.username,
+               request=request, detail={"fields": ["display_name", "email"]})
+    session.commit()
+    return console_profile_view(user)
 
 
 @app.post("/api/auth/logout")

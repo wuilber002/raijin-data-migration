@@ -31,6 +31,13 @@
 7. Confirme que uma janela anônima recebe `401` da API e que um `VIEWER` não
    consegue executar uma mutação. Registre o aceite.
 
+## Perfil individual
+
+O botão **Meu perfil** está disponível para `ADMIN`, `OPERATOR` e `VIEWER`.
+Ele permite alterar o nome de exibição, e-mail e a própria senha, sem expor a
+área administrativa. A troca de senha exige a senha atual, aplica a política
+de histórico e revoga as demais sessões do usuário.
+
 ## Host via Bastion
 
 O fluxo é idêntico. Mantenha `WEB_BIND_HOST=127.0.0.1` e acesse a console por

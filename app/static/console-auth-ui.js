@@ -16,6 +16,67 @@
       finally { location.assign("/login"); }
     });
     actions?.append(logout);
+    const profile = document.createElement("button");
+    profile.type = "button"; profile.className = "secondary";
+    profile.textContent = "Meu perfil";
+    profile.setAttribute("aria-label", "Gerenciar meu perfil");
+    const profileModal = document.createElement("section");
+    profileModal.id = "console-profile-modal";
+    profileModal.className = "modal hidden";
+    profileModal.setAttribute("role", "dialog");
+    profileModal.setAttribute("aria-modal", "true");
+    profileModal.setAttribute("aria-labelledby", "console-profile-title");
+    profileModal.innerHTML = `
+      <div class="modal-card">
+        <div class="modal-header"><h2 id="console-profile-title">Meu perfil</h2><button type="button" class="secondary" data-close-profile>Fechar</button></div>
+        <p class="hint">Atualize somente seus próprios dados. Seu usuário e papel são gerenciados pelo administrador.</p>
+        <form id="console-profile-form" class="grid">
+          <label class="field"><span>Usuário</span><input name="username" readonly></label>
+          <label class="field"><span>Papel</span><input name="role" readonly></label>
+          <label class="field"><span>Nome</span><input name="display_name" maxlength="128" autocomplete="name"></label>
+          <label class="field"><span>E-mail</span><input name="email" type="email" maxlength="320" autocomplete="email"></label>
+          <div class="field action"><span class="field-label">Dados pessoais</span><button>Salvar perfil</button></div>
+        </form>
+        <hr>
+        <h3>Trocar senha</h3>
+        <form id="console-password-form" class="grid">
+          <label class="field"><span>Senha atual</span><input name="current_password" type="password" autocomplete="current-password" required></label>
+          <label class="field"><span>Nova senha</span><input name="new_password" type="password" minlength="14" autocomplete="new-password" required></label>
+          <label class="field"><span>Confirmar nova senha</span><input name="confirmation" type="password" minlength="14" autocomplete="new-password" required></label>
+          <div class="field action"><span class="field-label">Segurança</span><button>Trocar senha</button></div>
+        </form>
+        <p id="console-profile-message" class="hint" role="status"></p>
+      </div>`;
+    document.body.append(profileModal);
+    actions?.append(profile);
+    const profileMessage = value => { profileModal.querySelector("#console-profile-message").textContent = value || ""; };
+    const openProfile = async () => {
+      profileMessage("");
+      const data = await apiCall("/api/auth/profile");
+      const form = profileModal.querySelector("#console-profile-form");
+      ["username", "role", "display_name", "email"].forEach(field => { form.elements[field].value = data[field] || ""; });
+      if (window.openModal) window.openModal("#console-profile-modal"); else profileModal.classList.remove("hidden");
+    };
+    profile.addEventListener("click", () => openProfile().catch(error => profileMessage(error.message)));
+    profileModal.querySelector("[data-close-profile]").addEventListener("click", () => {
+      if (window.closeModal) window.closeModal("#console-profile-modal"); else profileModal.classList.add("hidden");
+    });
+    profileModal.querySelector("#console-profile-form").addEventListener("submit", async event => {
+      event.preventDefault(); const form = event.currentTarget;
+      try {
+        await apiCall("/api/auth/profile", {method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify({display_name:form.display_name.value, email:form.email.value})});
+        profileMessage("Perfil atualizado.");
+      } catch (error) { profileMessage(error.message); }
+    });
+    profileModal.querySelector("#console-password-form").addEventListener("submit", async event => {
+      event.preventDefault(); const form = event.currentTarget;
+      if (form.new_password.value !== form.confirmation.value) { profileMessage("As novas senhas não coincidem."); return; }
+      try {
+        const result = await apiCall("/api/auth/password", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({current_password:form.current_password.value, new_password:form.new_password.value})});
+        if (result.csrf_token) sessionStorage.setItem("raijin_csrf", result.csrf_token);
+        form.reset(); profileMessage("Senha alterada. As demais sessões foram encerradas.");
+      } catch (error) { profileMessage(error.message); }
+    });
     if (identity.user.role !== "ADMIN") {
       // Settings contains only tenancy integration and global scheduling
       // controls. Do not make an OPERATOR/VIEWER discover administrative

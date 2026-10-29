@@ -65,6 +65,8 @@ def test_safe_dashboard_configuration_reads_are_available_to_viewers():
     assert main.auth_route_requirement("/api/settings", "PUT") is ConsoleRole.ADMIN
     assert main.auth_route_requirement("/api/activity-refresh-settings", "GET") is ConsoleRole.VIEWER
     assert main.auth_route_requirement("/api/activity-refresh-settings", "PUT") is ConsoleRole.ADMIN
+    assert main.auth_route_requirement("/api/auth/profile", "GET") is ConsoleRole.VIEWER
+    assert main.auth_route_requirement("/api/auth/profile", "PATCH") is ConsoleRole.VIEWER
 
 
 def test_password_policy_rejects_obvious_common_bootstrap_passwords():
@@ -105,6 +107,13 @@ def test_password_history_rejects_current_and_last_configured_passwords(tmp_path
         main.replace_console_password(session, user, "third secure test password", history_count=0)
         session.commit()
         assert main.console_password_reused(session, user, "second secure test password", 3)
+
+
+def test_console_profile_normalization_is_safe_and_does_not_change_username():
+    assert main.normalize_console_profile(" Ana Maria ", " ANA@example.COM ") == ("Ana Maria", "ana@example.com")
+    assert main.normalize_console_profile("", "") == (None, None)
+    with pytest.raises(ValueError, match="Email"):
+        main.normalize_console_profile("Ana", "not-an-email")
 
 
 def test_bootstrap_revokes_existing_sessions_after_service_restart(tmp_path, monkeypatch):
