@@ -124,6 +124,12 @@ def test_console_auth_menu_and_profile_use_the_shared_translation_catalog():
     assert 'data-console-i18n="Meu perfil"' in script
 
 
+def test_console_audit_labels_the_target_user_for_user_created_events():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert 'row.event_type === "USER_CREATED" && row.target' in script
+    assert '`${row.event_type} (${row.target})`' in script
+
+
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():
     catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
