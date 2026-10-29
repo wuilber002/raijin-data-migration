@@ -634,6 +634,7 @@
   "Nenhum autenticador configurado.": "No authenticator configured.",
   "Informe o código exibido no autenticador para concluir a ativação.": "Enter the code displayed by the authenticator to complete activation.",
   "Autenticação em duas etapas ativada.": "Two-step authentication enabled.",
+  "O autenticador foi configurado com sucesso para esta conta.": "The authenticator was configured successfully for this account.",
   "Redefinir MFA": "Reset MFA",
   "Não configurado": "Not configured",
   "Redefinir MFA deste usuário encerrará suas sessões. Continuar?": "Resetting this user's MFA will end their sessions. Continue?",

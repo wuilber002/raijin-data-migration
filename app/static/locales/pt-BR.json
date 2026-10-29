@@ -631,6 +631,7 @@
   "Nenhum autenticador configurado.": "Nenhum autenticador configurado.",
   "Informe o código exibido no autenticador para concluir a ativação.": "Informe o código exibido no autenticador para concluir a ativação.",
   "Autenticação em duas etapas ativada.": "Autenticação em duas etapas ativada.",
+  "O autenticador foi configurado com sucesso para esta conta.": "O autenticador foi configurado com sucesso para esta conta.",
   "Redefinir MFA": "Redefinir MFA",
   "Não configurado": "Não configurado",
   "Redefinir MFA deste usuário encerrará suas sessões. Continuar?": "Redefinir MFA deste usuário encerrará suas sessões. Continuar?",
