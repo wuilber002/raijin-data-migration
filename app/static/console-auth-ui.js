@@ -91,16 +91,61 @@
   };
   const installAdminActiveSessionSummary = () => {
     let sessions = [];
+    const modal = document.createElement("section");
+    modal.id = "console-active-sessions-modal";
+    modal.className = "modal hidden";
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-labelledby", "console-active-sessions-title");
+    modal.innerHTML = `
+      <div class="modal-panel console-profile-panel console-active-sessions-panel">
+        <div class="modal-header"><h2 id="console-active-sessions-title" data-console-i18n="Sessões autenticadas"></h2><button type="button" class="secondary" data-close-active-sessions data-console-i18n="Fechar"></button></div>
+        <p class="hint" data-console-i18n="Somente administradores podem visualizar ou revogar sessões autenticadas ativas."></p>
+        <div id="console-active-sessions-content" class="report-content"></div>
+      </div>`;
+    document.body.append(modal);
+    applyAuthTranslations(modal);
+    const content = modal.querySelector("#console-active-sessions-content");
+    const close = () => {
+      if (window.closeModal) window.closeModal("#console-active-sessions-modal");
+      else modal.classList.add("hidden");
+    };
+    modal.querySelector("[data-close-active-sessions]").addEventListener("click", close);
+    const renderModal = () => {
+      const empty = uiText("Nenhuma sessão autenticada ativa.");
+      content.innerHTML = sessions.length ? `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(item => `<tr><td>${escapeHtml(item.username)}${item.is_current?` <small>(${uiText("sessão atual")})</small>`:""}</td><td>${escapeHtml(item.role)}</td><td>${localTime(item.last_seen_at)}</td><td>${localTime(item.expires_at)}</td><td><button type="button" class="danger" data-revoke-active-session="${Number(item.id)}" data-current-session="${item.is_current?"true":"false"}">${uiText("Revogar")}</button></td></tr>`).join("")}</tbody></table>` : `<p class="hint">${empty}</p>`;
+      content.querySelectorAll("[data-revoke-active-session]").forEach(button => button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await apiCall(`/api/admin/sessions/${button.dataset.revokeActiveSession}/revoke`, {method:"POST"});
+          if (button.dataset.currentSession === "true") {
+            sessionStorage.removeItem("raijin_csrf");
+            location.assign("/login");
+            return;
+          }
+          await refreshActiveSessions();
+          renderModal();
+        } catch (error) { button.disabled = false; content.insertAdjacentHTML("afterbegin", `<p class="error">${escapeHtml(error.message)}</p>`); }
+      }));
+    };
     const decorateHealthCard = () => {
       const card = document.querySelector("#health .platform-health-metric:nth-child(2)");
       const detail = card?.querySelector(".platform-health-secondary");
       if (!detail) return;
-      const uniqueUsers = [...new Map(sessions.map(item => [`${item.username}:${item.role}`, item])).values()];
-      const people = uniqueUsers.map(item => `${item.username} (${item.role})`).join(", ");
       const en = window.raijinLocale?.() === "en-US";
-      detail.textContent = people
-        ? (en ? `authenticated: ${people}` : `autenticados: ${people}`)
-        : (en ? "no authenticated session" : "nenhuma sessão autenticada");
+      const label = en ? `${sessions.length} authenticated session(s)` : `${sessions.length} sessão(ões) autenticada(s)`;
+      detail.replaceChildren(document.createTextNode(`${label} · `));
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "console-active-sessions-link";
+      link.textContent = en ? "Manage" : "Gerenciar";
+      link.addEventListener("click", async () => {
+        await refreshActiveSessions();
+        renderModal();
+        if (window.openModal) window.openModal("#console-active-sessions-modal");
+        else modal.classList.remove("hidden");
+      });
+      detail.append(link);
       detail.title = en
         ? "Authenticated sessions are visible only to administrators. The console heartbeat count remains anonymous."
         : "Sessões autenticadas são visíveis somente para administradores. A contagem de heartbeat da console continua anônima.";
@@ -116,7 +161,7 @@
     if (health) new MutationObserver(decorateHealthCard).observe(health, {childList:true});
     refreshActiveSessions();
     setInterval(() => { if (document.visibilityState !== "hidden") refreshActiveSessions(); }, 60_000);
-    document.addEventListener("raijin:language-changed", decorateHealthCard);
+    document.addEventListener("raijin:language-changed", () => { applyAuthTranslations(modal); decorateHealthCard(); renderModal(); });
   };
 
   async function install() {

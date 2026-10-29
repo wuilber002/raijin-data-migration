@@ -4376,7 +4376,8 @@ def console_auth_security_summary_view(session: Session = Depends(get_session)) 
 
 
 @app.get("/api/admin/active-sessions")
-def console_active_sessions(session: Session = Depends(get_session)) -> list[dict]:
+def console_active_sessions(request: FastAPIRequest,
+                            session: Session = Depends(get_session)) -> list[dict]:
     """List current authenticated console sessions for ADMIN observability only."""
     now = utcnow()
     rows = session.execute(select(ConsoleSession, ConsoleUser).join(
@@ -4387,6 +4388,8 @@ def console_active_sessions(session: Session = Depends(get_session)) -> list[dic
         ConsoleSession.expires_at > now,
     ).order_by(ConsoleSession.last_seen_at.desc(), ConsoleSession.id.desc())).all()
     return [{
+        "id": browser_session.id,
+        "is_current": browser_session.id == request.state.console_session_id,
         "username": user.username,
         "role": user.role,
         "last_seen_at": browser_session.last_seen_at,

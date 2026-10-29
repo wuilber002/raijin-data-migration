@@ -172,6 +172,12 @@ def test_auth_alerts_open_filtered_audit_and_admins_can_see_authenticated_sessio
     assert "authAlert?'settings'" in page
     assert "installAdminActiveSessionSummary" in script
     assert '"/api/admin/active-sessions"' in script
+    assert "console-active-sessions-modal" in script
+    assert "data-revoke-active-session" in script
+    assert "/api/admin/sessions/${button.dataset.revokeActiveSession}/revoke" in script
+    assert "data-current-session" in script
+    assert 'location.assign("/login")' in script
+    assert "console-active-sessions-link" in script
     assert "authenticated sessions are visible only to administrators" in script.lower()
     assert "LOGIN_RATE_LIMITED" in script
     assert "observe(health, {childList:true});" in script
