@@ -178,7 +178,7 @@ def test_auth_alerts_open_filtered_audit_and_admins_can_see_authenticated_sessio
     assert "/api/admin/users/${button.dataset.disableActiveUser}" in script
     assert "is_current_user" in script
     assert "/api/admin/sessions/${button.dataset.revokeActiveSession}/revoke" in script
-    assert "Você não pode revogar suas próprias sessões." in script
+    assert "Você não pode revogar a sessão atual." in script
     assert "data-current-session" not in script
     assert "console-active-sessions-link" in script
     assert "authenticated sessions are visible only to administrators" in script.lower()

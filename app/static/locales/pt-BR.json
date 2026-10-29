@@ -652,7 +652,7 @@
   "Sessões autenticadas": "Sessões autenticadas",
   "Desativar este usuário encerrará todas as suas sessões. Continuar?": "Desativar este usuário encerrará todas as suas sessões. Continuar?",
   "Você não pode desativar sua própria conta.": "Você não pode desativar sua própria conta.",
-  "Você não pode revogar suas próprias sessões.": "Você não pode revogar suas próprias sessões.",
+  "Você não pode revogar a sessão atual.": "Você não pode revogar a sessão atual.",
   "Somente administradores podem visualizar ou revogar sessões autenticadas ativas.": "Somente administradores podem visualizar ou revogar sessões autenticadas ativas.",
   "Nenhuma sessão autenticada ativa.": "Nenhuma sessão autenticada ativa.",
   "sessão atual": "sessão atual",

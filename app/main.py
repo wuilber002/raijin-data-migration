@@ -4329,9 +4329,11 @@ def console_update_user(user_id: int, payload: ConsoleUserUpdate, request: FastA
 def console_list_sessions(request: FastAPIRequest,
                           session: Session = Depends(get_session)) -> list[dict]:
     current_user_id = console_principal(request)["id"]
+    current_session_id = request.state.console_session_id
     rows = session.execute(select(ConsoleSession, ConsoleUser.username).join(ConsoleUser).order_by(
         ConsoleSession.issued_at.desc())).all()
     return [{"id": item.id, "user_id": item.user_id, "is_current_user": item.user_id == current_user_id,
+             "is_current": item.id == current_session_id,
              "username": username, "issued_at": item.issued_at,
              "last_seen_at": item.last_seen_at, "expires_at": item.expires_at,
              "revoked_at": item.revoked_at, "revoke_reason": item.revoke_reason}
@@ -4344,8 +4346,8 @@ def console_revoke_session(session_id: int, request: FastAPIRequest,
     target = session.get(ConsoleSession, session_id)
     if not target:
         raise HTTPException(status_code=404, detail="Console session not found")
-    if target.user_id == console_principal(request)["id"]:
-        raise HTTPException(status_code=422, detail="An administrator cannot revoke their own sessions")
+    if target.id == request.state.console_session_id:
+        raise HTTPException(status_code=422, detail="An administrator cannot revoke their current session")
     if target.revoked_at is None:
         target.revoked_at, target.revoke_reason = utcnow(), "admin_revoked"
         auth_audit(session, "SESSION_REVOKED", actor_user_id=console_principal(request)["id"],
