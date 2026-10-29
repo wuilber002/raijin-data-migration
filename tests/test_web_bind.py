@@ -49,3 +49,14 @@ def test_web_bind_rejects_non_address_or_invalid_port(tmp_path):
     run = load_bind(tmp_path, "WEB_BIND_HOST=127.0.0.1\nWEB_BIND_PORT=70000\n")
     assert run.returncode != 0
     assert "WEB_BIND_PORT" in run.stderr
+
+
+def test_non_loopback_http_requires_closed_ipv4_upstream_allowlist(tmp_path):
+    run = load_bind(tmp_path, "WEB_BIND_HOST=10.0.0.10\nWEB_BIND_PORT=8080\nWEB_TRANSPORT=http\n")
+    assert run.returncode != 0
+    assert "WEB_TRUSTED_UPSTREAM_IPS" in run.stderr
+    run = load_bind(tmp_path, "WEB_BIND_HOST=10.0.0.10\nWEB_BIND_PORT=8080\nWEB_TRANSPORT=http\nWEB_TRUSTED_UPSTREAM_IPS=10.0.0.21/24\n")
+    assert run.returncode != 0
+    assert "/32" in run.stderr
+    run = load_bind(tmp_path, "WEB_BIND_HOST=10.0.0.10\nWEB_BIND_PORT=8080\nWEB_TRANSPORT=http\nWEB_TRUSTED_UPSTREAM_IPS=10.0.0.21/32,10.0.0.22/32\n")
+    assert run.returncode == 0, run.stderr
