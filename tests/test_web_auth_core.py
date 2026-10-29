@@ -49,7 +49,7 @@ def test_bootstrap_creates_exactly_one_argon_admin(tmp_path, monkeypatch):
 def test_roles_and_route_policy_are_server_side_and_deny_unknown_paths():
     assert main.auth_route_requirement("/api/sources", "GET") is ConsoleRole.VIEWER
     assert main.auth_route_requirement("/api/sources", "POST") is ConsoleRole.OPERATOR
-    assert main.auth_route_requirement("/api/settings", "GET") is ConsoleRole.ADMIN
+    assert main.auth_route_requirement("/api/settings", "GET") is ConsoleRole.VIEWER
     assert main.auth_route_requirement("/api/tasks/claim", "POST") == "INTERNAL"
     assert main.auth_route_requirement("/unclassified", "GET") == "DENY"
     assert main.auth_role_permits(ConsoleRole.ADMIN, ConsoleRole.OPERATOR)
@@ -57,6 +57,14 @@ def test_roles_and_route_policy_are_server_side_and_deny_unknown_paths():
     assert main.login_throttled(0, 5)
     assert main.login_throttled(10, 0)
     assert not main.login_throttled(9, 4)
+
+
+def test_safe_dashboard_configuration_reads_are_available_to_viewers():
+    assert main.auth_route_requirement("/api/runtime", "GET") is ConsoleRole.VIEWER
+    assert main.auth_route_requirement("/api/settings", "GET") is ConsoleRole.VIEWER
+    assert main.auth_route_requirement("/api/settings", "PUT") is ConsoleRole.ADMIN
+    assert main.auth_route_requirement("/api/activity-refresh-settings", "GET") is ConsoleRole.VIEWER
+    assert main.auth_route_requirement("/api/activity-refresh-settings", "PUT") is ConsoleRole.ADMIN
 
 
 def test_password_policy_rejects_obvious_common_bootstrap_passwords():
@@ -78,6 +86,25 @@ def test_sessions_are_opaque_and_csrf_is_independently_hashed(tmp_path, monkeypa
         assert stored.token_hash == main.hash_opaque_token(token)
         assert stored.csrf_hash == main.hash_opaque_token(csrf)
         assert token not in stored.token_hash and csrf not in stored.csrf_hash
+
+
+def test_password_history_rejects_current_and_last_configured_passwords(tmp_path, monkeypatch):
+    database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'password-history.db'}")
+    monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))
+    main.Base.metadata.create_all(database)
+    with main.SessionLocal() as session:
+        user = main.ConsoleUser(username="operator-hml", password_hash=PasswordHasher().hash("first secure test password"),
+                                role=ConsoleRole.OPERATOR)
+        session.add(user); session.flush()
+        with pytest.raises(ValueError, match="current password"):
+            main.replace_console_password(session, user, "first secure test password", history_count=3)
+        main.replace_console_password(session, user, "second secure test password", history_count=3)
+        session.commit()
+        with pytest.raises(ValueError, match="last 3"):
+            main.replace_console_password(session, user, "first secure test password", history_count=3)
+        main.replace_console_password(session, user, "third secure test password", history_count=0)
+        session.commit()
+        assert main.console_password_reused(session, user, "second secure test password", 3)
 
 
 def test_bootstrap_revokes_existing_sessions_after_service_restart(tmp_path, monkeypatch):

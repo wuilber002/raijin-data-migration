@@ -1207,8 +1207,22 @@ class ConsoleAuthSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     policy_version: Mapped[str] = mapped_column(String(32), default="v1")
+    # Number of *previous* passwords that cannot be reused.  The current
+    # password is always checked separately, including when this is zero.
+    password_history_count: Mapped[int] = mapped_column(Integer, default=3)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ConsolePasswordHistory(Base):
+    """Prior Argon2id hashes only; plaintext passwords never enter the database."""
+    __tablename__ = "console_password_history"
+    __table_args__ = (Index("ix_console_password_history_user_changed", "user_id", "changed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("console_users.id"), index=True)
+    password_hash: Mapped[str] = mapped_column(String(512))
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 class Event(Base):
@@ -1903,6 +1917,10 @@ class ConsoleUserUpdate(BaseModel):
     must_change_password: bool | None = None
 
 
+class ConsoleAuthSettingsUpdate(BaseModel):
+    password_history_count: int = Field(ge=0, le=12)
+
+
 class IntegrityEvidence(BaseModel):
     source_checksum: str | None = Field(default=None, max_length=256)
     destination_checksum: str | None = Field(default=None, max_length=256)
@@ -2016,8 +2034,17 @@ def auth_route_requirement(path: str, method: str) -> ConsoleRole | str | None:
         return "INTERNAL"
     if path.startswith("/api/admin/"):
         return ConsoleRole.ADMIN
-    if path in {"/api/runtime/mode", "/api/settings", "/api/activity-refresh-settings"}:
+    # These values are already rendered by the operational dashboard during
+    # its initial refresh.  They contain no credential material, so read-only
+    # access is appropriate for a VIEWER; mutations remain ADMIN-only.
+    if path in {"/api/runtime", "/api/runtime/clock"}:
+        return ConsoleRole.VIEWER
+    if path in {"/api/settings", "/api/activity-refresh-settings"}:
+        return ConsoleRole.VIEWER if method in {"GET", "HEAD", "OPTIONS"} else ConsoleRole.ADMIN
+    if path == "/api/runtime/mode":
         return ConsoleRole.ADMIN
+    if path.startswith("/api/global-aws-pricing") and method in {"GET", "HEAD", "OPTIONS"}:
+        return ConsoleRole.VIEWER
     if path.startswith(("/api/oci/", "/api/aws-secrets", "/api/aws-connections", "/api/global-aws-pricing", "/api/legacy-aws/")):
         return ConsoleRole.ADMIN
     if path.startswith("/api/migration-projects") and method not in {"GET", "HEAD", "OPTIONS"}:
@@ -2151,6 +2178,17 @@ def create_schema() -> None:
     # disabled while the following simulator phases are being implemented.
     cloud_backend.readiness(require_operations=False)
     Base.metadata.create_all(engine)
+    # ``create_all`` does not alter the singleton on an upgraded deployment.
+    # Add this auth-policy column before bootstrap reads the mapped row.
+    existing_auth_columns = {
+        column["name"] for column in inspect(engine).get_columns("console_auth_settings")
+    }
+    if "password_history_count" not in existing_auth_columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE console_auth_settings "
+                "ADD COLUMN password_history_count INTEGER NOT NULL DEFAULT 3"
+            ))
     ensure_console_auth_bootstrap()
     # Lightweight additive migrations keep the single-VM deployment upgradeable. No
     # destructive schema operation is performed automatically.
@@ -3907,6 +3945,47 @@ def console_user_view(user: ConsoleUser) -> dict:
             "last_login_at": user.last_login_at, "created_at": user.created_at}
 
 
+MAX_CONSOLE_PASSWORD_HISTORY = 12
+
+
+def console_auth_settings_view(settings: ConsoleAuthSettings) -> dict:
+    return {"password_history_count": int(settings.password_history_count or 0)}
+
+
+def console_password_reused(session: Session, user: ConsoleUser, candidate: str,
+                            history_count: int) -> bool:
+    """Check current plus the configured number of prior Argon2id hashes."""
+    hasher = PasswordHasher()
+    if hasher.verify(user.password_hash, candidate):
+        return True
+    if history_count <= 0:
+        return False
+    previous = session.scalars(select(ConsolePasswordHistory).where(
+        ConsolePasswordHistory.user_id == user.id
+    ).order_by(ConsolePasswordHistory.changed_at.desc(), ConsolePasswordHistory.id.desc()).limit(history_count))
+    return any(hasher.verify(item.password_hash, candidate) for item in previous)
+
+
+def replace_console_password(session: Session, user: ConsoleUser, password: str,
+                             *, history_count: int) -> None:
+    """Persist the outgoing hash then replace it after reuse-policy validation."""
+    candidate = validate_password(password)
+    if console_password_reused(session, user, candidate, history_count):
+        raise ValueError(
+            "New password must differ from the current password and the last "
+            f"{history_count} password(s)"
+        )
+    session.add(ConsolePasswordHistory(user_id=user.id, password_hash=user.password_hash))
+    user.password_hash = PasswordHasher().hash(candidate)
+    # Retain enough hashes for a future increase without retaining an
+    # unbounded authentication artifact.
+    history = list(session.scalars(select(ConsolePasswordHistory).where(
+        ConsolePasswordHistory.user_id == user.id
+    ).order_by(ConsolePasswordHistory.changed_at.desc(), ConsolePasswordHistory.id.desc())))
+    for item in history[MAX_CONSOLE_PASSWORD_HISTORY:]:
+        session.delete(item)
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page() -> HTMLResponse:
     if not web_auth_settings.enabled:
@@ -4000,9 +4079,15 @@ def console_change_password(payload: ConsolePasswordChange, request: FastAPIRequ
     if not user or (not user.must_change_password and
                     not PasswordHasher().verify(user.password_hash, payload.current_password)):
         raise HTTPException(status_code=400, detail="Current password is invalid")
+    settings = session.get(ConsoleAuthSettings, 1)
+    history_count = int(settings.password_history_count if settings else 3)
     try:
-        user.password_hash = PasswordHasher().hash(validate_password(payload.new_password))
+        replace_console_password(session, user, payload.new_password, history_count=history_count)
     except ValueError as error:
+        auth_audit(session, "PASSWORD_REUSE_REJECTED", actor_user_id=user.id,
+                   target=user.username, result="DENIED", request=request,
+                   detail={"history_count": history_count})
+        session.commit()
         raise HTTPException(status_code=422, detail=str(error)) from error
     user.must_change_password = False
     session.execute(update(ConsoleSession).where(ConsoleSession.user_id == user.id,
@@ -4018,6 +4103,31 @@ def console_change_password(payload: ConsolePasswordChange, request: FastAPIRequ
 @app.get("/api/admin/users")
 def console_list_users(session: Session = Depends(get_session)) -> list[dict]:
     return [console_user_view(user) for user in session.scalars(select(ConsoleUser).order_by(ConsoleUser.username))]
+
+
+@app.get("/api/admin/auth-settings")
+def console_get_auth_settings(session: Session = Depends(get_session)) -> dict:
+    settings = session.get(ConsoleAuthSettings, 1)
+    if settings is None:
+        settings = ConsoleAuthSettings(id=1)
+        session.add(settings)
+        session.commit()
+    return console_auth_settings_view(settings)
+
+
+@app.put("/api/admin/auth-settings")
+def console_update_auth_settings(payload: ConsoleAuthSettingsUpdate, request: FastAPIRequest,
+                                 session: Session = Depends(get_session)) -> dict:
+    settings = session.get(ConsoleAuthSettings, 1)
+    if settings is None:
+        settings = ConsoleAuthSettings(id=1)
+        session.add(settings)
+    settings.password_history_count = payload.password_history_count
+    auth_audit(session, "AUTH_SETTINGS_UPDATED", actor_user_id=console_principal(request)["id"],
+               target="password_history_count", request=request,
+               detail={"password_history_count": payload.password_history_count})
+    session.commit()
+    return console_auth_settings_view(settings)
 
 
 @app.post("/api/admin/users", status_code=201)
@@ -4065,9 +4175,15 @@ def console_update_user(user_id: int, payload: ConsoleUserUpdate, request: FastA
     if payload.must_change_password is not None:
         user.must_change_password = payload.must_change_password; changed.append("must_change_password")
     if payload.password is not None:
+        settings = session.get(ConsoleAuthSettings, 1)
+        history_count = int(settings.password_history_count if settings else 3)
         try:
-            user.password_hash = PasswordHasher().hash(validate_password(payload.password))
+            replace_console_password(session, user, payload.password, history_count=history_count)
         except ValueError as error:
+            auth_audit(session, "PASSWORD_REUSE_REJECTED", actor_user_id=actor["id"],
+                       target=user.username, result="DENIED", request=request,
+                       detail={"history_count": history_count, "via": "admin_reset"})
+            session.commit()
             raise HTTPException(status_code=422, detail=str(error)) from error
         user.must_change_password = True
         changed.append("password")

@@ -23,6 +23,11 @@
 6. Reinicie `sudo systemctl restart s3-oci-migration.service`. Entre com o
    administrador bootstrap, troque a senha obrigatória e crie
    contas individuais `ADMIN`, `OPERATOR` e `VIEWER`.
+   Em **Settings → Console access**, mantenha a política de reutilização em
+   `3` (padrão), salvo uma exigência formal diferente. A política sempre
+   bloqueia a senha atual e também a quantidade configurada de senhas
+   anteriores (0–12); somente hashes Argon2id dessas senhas anteriores são
+   mantidos.
 7. Confirme que uma janela anônima recebe `401` da API e que um `VIEWER` não
    consegue executar uma mutação. Registre o aceite.
 
