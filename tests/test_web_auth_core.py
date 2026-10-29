@@ -225,6 +225,42 @@ def test_administrator_can_revoke_other_sessions_but_not_the_current_one(tmp_pat
         assert other_session.revoked_at is not None
 
 
+def test_administrator_can_delete_another_user_and_preserve_auth_evidence(tmp_path, monkeypatch):
+    database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'user-delete.db'}")
+    monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))
+    main.Base.metadata.create_all(database)
+    with main.SessionLocal() as session:
+        admin = main.ConsoleUser(username="admin", password_hash=PasswordHasher().hash("a secure test password"),
+                                 role=ConsoleRole.ADMIN)
+        user = main.ConsoleUser(username="operator-hml", password_hash=PasswordHasher().hash("another secure test password"),
+                                role=ConsoleRole.OPERATOR, mfa_enabled=True)
+        session.add_all([admin, user]); session.flush()
+        token, csrf = main.create_console_session(session, user)
+        session.add(main.ConsoleMfaChallenge(user_id=user.id, token_hash=main.hash_opaque_token(token),
+                                             origin_hash="origin", expires_at=main.utcnow()))
+        session.add(main.ConsoleMfaRecoveryCode(user_id=user.id, code_hash=main.hash_opaque_token(csrf)))
+        session.add(main.ConsolePasswordHistory(user_id=user.id, password_hash=user.password_hash))
+        main.auth_audit(session, "LOGIN_SUCCEEDED", actor_user_id=user.id, target=user.username)
+        session.commit()
+        request = SimpleNamespace(
+            state=SimpleNamespace(console_principal={"id": admin.id}), client=None, headers={},
+        )
+        response = main.console_delete_user(user.id, request, session)
+        assert response.status_code == 204
+        assert session.get(main.ConsoleUser, user.id) is None
+        assert session.scalar(select(main.ConsoleSession.id).where(main.ConsoleSession.user_id == user.id)) is None
+        assert session.scalar(select(main.ConsoleMfaChallenge.id).where(main.ConsoleMfaChallenge.user_id == user.id)) is None
+        assert session.scalar(select(main.ConsoleMfaRecoveryCode.id).where(main.ConsoleMfaRecoveryCode.user_id == user.id)) is None
+        assert session.scalar(select(main.ConsolePasswordHistory.id).where(main.ConsolePasswordHistory.user_id == user.id)) is None
+        audit = main.console_auth_audit(limit=100, actor=None, event_type=None, result=None, session=session)
+        prior = next(row for row in audit if row["event_type"] == "LOGIN_SUCCEEDED")
+        deleted = next(row for row in audit if row["event_type"] == "USER_DELETED")
+        assert prior["actor"] == "operator-hml"
+        assert deleted["target"] == "operator-hml"
+        with pytest.raises(main.HTTPException, match="cannot delete their own"):
+            main.console_delete_user(admin.id, request, session)
+
+
 def test_password_history_rejects_current_and_last_configured_passwords(tmp_path, monkeypatch):
     database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'password-history.db'}")
     monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))

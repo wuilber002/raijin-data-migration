@@ -1235,6 +1235,9 @@ class ConsoleAuthAuditEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("console_users.id"), nullable=True, index=True)
+    # Keep the human-readable actor in immutable evidence even when a local
+    # console identity is later removed by an administrator.
+    actor_username: Mapped[str | None] = mapped_column(String(320), nullable=True)
     event_type: Mapped[str] = mapped_column(String(64), index=True)
     target: Mapped[str | None] = mapped_column(String(256), nullable=True)
     result: Mapped[str] = mapped_column(String(32), default="SUCCEEDED")
@@ -2063,8 +2066,13 @@ def auth_audit(session: Session, event_type: str, *, actor_user_id: int | None =
                target: str | None = None, result: str = "SUCCEEDED",
                request: FastAPIRequest | None = None, detail: dict | None = None) -> None:
     """Append only allowlisted operational evidence; never accept secret payloads."""
+    actor_username = None
+    if actor_user_id is not None:
+        actor = session.get(ConsoleUser, actor_user_id)
+        actor_username = actor.username if actor else None
     session.add(ConsoleAuthAuditEvent(
         actor_user_id=actor_user_id, event_type=event_type, target=target,
+        actor_username=actor_username,
         result=result, origin_hash=auth_client_origin(request) if request else None,
         correlation_id=request.headers.get("x-request-id", "")[:64] or None if request else None,
         detail_json=json.dumps(detail or {}, sort_keys=True, separators=(",", ":")),
@@ -2295,6 +2303,22 @@ def create_schema() -> None:
         )
         if engine.dialect.name == "postgresql" and username_column and getattr(username_column["type"], "length", None) != 320:
             connection.execute(text("ALTER TABLE console_users ALTER COLUMN username TYPE VARCHAR(320)"))
+    existing_audit_columns = {
+        column["name"] for column in inspect(engine).get_columns("console_auth_audit_events")
+    }
+    if "actor_username" not in existing_audit_columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE console_auth_audit_events ADD COLUMN actor_username VARCHAR(320)"
+            ))
+            # Backfill is safe and preserves the visible actor for all
+            # evidence that predates the additive column.
+            connection.execute(text(
+                "UPDATE console_auth_audit_events "
+                "SET actor_username = (SELECT username FROM console_users "
+                "WHERE console_users.id = console_auth_audit_events.actor_user_id) "
+                "WHERE actor_user_id IS NOT NULL AND actor_username IS NULL"
+            ))
     ensure_console_auth_bootstrap()
     # Lightweight additive migrations keep the single-VM deployment upgradeable. No
     # destructive schema operation is performed automatically.
@@ -4652,6 +4676,42 @@ def console_update_user(user_id: int, payload: ConsoleUserUpdate, request: FastA
     return console_user_view(user)
 
 
+@app.delete("/api/admin/users/{user_id}")
+def console_delete_user(user_id: int, request: FastAPIRequest,
+                        session: Session = Depends(get_session)) -> Response:
+    """Permanently remove a local identity without losing auth evidence."""
+    user = session.get(ConsoleUser, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Console user not found")
+    actor = console_principal(request)
+    if user.id == actor["id"]:
+        raise HTTPException(status_code=422, detail="An administrator cannot delete their own account")
+    if user.role == ConsoleRole.ADMIN:
+        other_admins = session.scalar(select(func.count(ConsoleUser.id)).where(
+            ConsoleUser.id != user.id, ConsoleUser.role == ConsoleRole.ADMIN,
+            ConsoleUser.enabled.is_(True),
+        )) or 0
+        if other_admins == 0:
+            raise HTTPException(status_code=422, detail="At least one enabled administrator must remain")
+
+    username = user.username
+    # The foreign key is deliberately detached rather than cascading audit
+    # evidence away. ``actor_username`` makes its historical attribution
+    # survive the identity deletion.
+    session.execute(update(ConsoleAuthAuditEvent).where(
+        ConsoleAuthAuditEvent.actor_user_id == user.id,
+    ).values(actor_user_id=None, actor_username=username))
+    session.execute(delete(ConsoleSession).where(ConsoleSession.user_id == user.id))
+    session.execute(delete(ConsoleMfaChallenge).where(ConsoleMfaChallenge.user_id == user.id))
+    session.execute(delete(ConsoleMfaRecoveryCode).where(ConsoleMfaRecoveryCode.user_id == user.id))
+    session.execute(delete(ConsolePasswordHistory).where(ConsolePasswordHistory.user_id == user.id))
+    session.delete(user)
+    auth_audit(session, "USER_DELETED", actor_user_id=actor["id"], target=username,
+               request=request, detail={"deleted_user_id": user_id})
+    session.commit()
+    return Response(status_code=204)
+
+
 @app.post("/api/admin/users/{user_id}/mfa/reset")
 def console_reset_user_mfa(user_id: int, request: FastAPIRequest,
                            session: Session = Depends(get_session)) -> dict:
@@ -4705,15 +4765,16 @@ def console_revoke_session(session_id: int, request: FastAPIRequest,
 
 @app.get("/api/admin/auth-audit")
 def console_auth_audit(limit: int = Query(default=100, ge=1, le=500),
-                       actor: str | None = Query(default=None, max_length=64),
+                       actor: str | None = Query(default=None, max_length=320),
                        event_type: str | None = Query(default=None, max_length=64),
                        result: str | None = Query(default=None, max_length=32),
                        session: Session = Depends(get_session)) -> list[dict]:
-    statement = select(ConsoleAuthAuditEvent, ConsoleUser.username).outerjoin(
+    actor_name = func.coalesce(ConsoleUser.username, ConsoleAuthAuditEvent.actor_username)
+    statement = select(ConsoleAuthAuditEvent, actor_name).outerjoin(
         ConsoleUser, ConsoleAuthAuditEvent.actor_user_id == ConsoleUser.id)
     if actor:
         try:
-            statement = statement.where(ConsoleUser.username == normalize_username(actor))
+            statement = statement.where(actor_name == normalize_username(actor))
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
     if event_type:
