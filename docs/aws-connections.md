@@ -31,12 +31,21 @@ current version must contain this JSON document:
 ```
 
 `private_endpoint` é opcional. Omita o objeto inteiro para usar os endpoints
-públicos escolhidos normalmente pelo SDK. Quando informado, ele deve conter as
-três origens HTTPS (STS, S3 e S3 Control); `s3_addressing_style` assume `auto`
-se omitido e `tls_ca_bundle_path` também é opcional. O caminho da CA identifica
-um arquivo absoluto instalado pela infraestrutura na VM/container do Raijin.
-Os campos manuais da interface continuam disponíveis como override operacional
-durante o cadastro, sem criar um modo especial no Raijin.
+públicos regionais escolhidos normalmente pelo SDK. Quando informado, cada
+origem HTTPS é independente: informe somente os serviços que possuem endpoint
+privado; campos ausentes ou vazios continuam usando o endpoint público do
+respectivo serviço. Isto permite, por exemplo, S3 por PrivateLink e STS/S3
+Control públicos. `s3_addressing_style` assume `auto` se omitido e
+`tls_ca_bundle_path` também é opcional. O caminho da CA identifica um arquivo
+absoluto instalado pela infraestrutura na VM/container do Raijin.
+
+Um endpoint de interface S3 normalmente publica as variantes `bucket`,
+`accesspoint` e `control` com o mesmo identificador `vpce`; portanto, se for
+necessário manter S3 Control privado, use a variante `control.vpce-...` fornecida
+pela AWS. STS é outro serviço: ele exige um Interface VPC Endpoint próprio
+(`com.amazonaws.<região>.sts`) ou, sem essa URL, será acessado no endpoint STS
+regional público. Os campos manuais da interface continuam disponíveis como
+override operacional durante o cadastro, sem criar um modo especial no Raijin.
 
 `connection_name` is only a suggested label. When the connection is created,
 RAIJIN copies the operator-confirmed label into PostgreSQL and never changes it

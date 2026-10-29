@@ -3520,7 +3520,13 @@ AWS_CONNECTION_SCHEMA_VERSION = 1
 
 
 def parse_secret_private_endpoint(value) -> dict | None:
-    """Validate the optional, provider-neutral SDK endpoint profile in a Secret."""
+    """Validate optional per-service SDK endpoint overrides in a Secret.
+
+    Every omitted (or blank) service URL intentionally retains the normal
+    regional AWS SDK endpoint.  A deployment may therefore use PrivateLink for
+    S3 while it reaches STS and S3 Control through permitted public endpoints,
+    or it may provide private URLs for any combination of the three services.
+    """
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -3533,13 +3539,20 @@ def parse_secret_private_endpoint(value) -> dict | None:
     endpoints = {}
     for field in ("sts_endpoint_url", "s3_endpoint_url", "s3control_endpoint_url"):
         endpoint = value.get(field)
-        if not isinstance(endpoint, str) or not endpoint.strip():
-            raise ValueError(f"private_endpoint.{field} is required when private_endpoint is set")
-        parsed = urlparse(endpoint.strip())
+        if endpoint is None:
+            endpoints[field] = None
+            continue
+        if not isinstance(endpoint, str):
+            raise ValueError(f"private_endpoint.{field} must be an HTTPS origin or blank")
+        endpoint = endpoint.strip()
+        if not endpoint:
+            endpoints[field] = None
+            continue
+        parsed = urlparse(endpoint)
         if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
                 or parsed.query or parsed.fragment or parsed.path not in {"", "/"}):
             raise ValueError(f"private_endpoint.{field} must be an HTTPS origin without credentials, path, query or fragment")
-        endpoints[field] = endpoint.strip().rstrip("/")
+        endpoints[field] = endpoint.rstrip("/")
     addressing_style = value.get("s3_addressing_style", "auto")
     if addressing_style not in {"auto", "virtual", "path"}:
         raise ValueError("private_endpoint.s3_addressing_style must be auto, virtual or path")
@@ -8532,9 +8545,6 @@ def create_aws_connection(payload: AwsConnectionCreate, session: Session = Depen
                        if request_has_endpoint else secret_endpoint)
     endpoints = {field: normalized_private_endpoint(endpoint_source.get(field), field)
                  for field in ("sts_endpoint_url", "s3_endpoint_url", "s3control_endpoint_url")}
-    custom_endpoints = [value for value in endpoints.values() if value]
-    if custom_endpoints and len(custom_endpoints) != 3:
-        raise HTTPException(status_code=422, detail="Private AWS connections require STS, S3 and S3 Control endpoint URLs")
     ca_bundle = ((payload.tls_ca_bundle_path or "").strip() or
                  (secret_endpoint.get("tls_ca_bundle_path") if not request_has_endpoint else None))
     if ca_bundle and not os.path.isabs(ca_bundle):

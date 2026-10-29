@@ -4810,7 +4810,7 @@ def test_aws_connection_secret_schema_requires_matching_account_role_arns():
         parse_aws_connection_payload(__import__("json").dumps(payload))
 
 
-def test_aws_connection_secret_accepts_an_optional_complete_private_endpoint_profile():
+def test_aws_connection_secret_accepts_independent_optional_private_endpoint_overrides():
     payload = {
         "schema_version": AWS_CONNECTION_SCHEMA_VERSION, "connection_name": "Private S3",
         "aws_account_id": "123456789012", "default_region": "us-east-1",
@@ -4830,8 +4830,12 @@ def test_aws_connection_secret_accepts_an_optional_complete_private_endpoint_pro
     assert parsed["private_endpoint"]["sts_endpoint_url"] == "https://sts.us-east-1.example.internal"
     assert parsed["private_endpoint"]["s3_addressing_style"] == "virtual"
     payload["private_endpoint"].pop("s3control_endpoint_url")
-    with pytest.raises(ValueError, match="s3control_endpoint_url"):
-        parse_aws_connection_payload(__import__("json").dumps(payload))
+    partial = parse_aws_connection_payload(__import__("json").dumps(payload))
+    assert partial["private_endpoint"]["s3control_endpoint_url"] is None
+    assert partial["private_endpoint"]["s3_endpoint_url"] == "https://vpce-example.s3.us-east-1.example.internal"
+    payload["private_endpoint"] = {"s3_endpoint_url": ""}
+    blank = parse_aws_connection_payload(__import__("json").dumps(payload))
+    assert blank["private_endpoint"]["s3_endpoint_url"] is None
 
 
 def test_aws_connection_secret_without_private_endpoint_remains_compatible():
@@ -4846,7 +4850,7 @@ def test_aws_connection_secret_without_private_endpoint_remains_compatible():
     assert parse_aws_connection_payload(__import__("json").dumps(payload))["private_endpoint"] is None
 
 
-def test_aws_connection_registration_uses_private_endpoint_from_secret(tmp_path, monkeypatch):
+def test_aws_connection_registration_uses_partial_private_endpoint_from_secret(tmp_path, monkeypatch):
     import app.main as module
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'private-endpoint.db'}")
     Base.metadata.create_all(engine)
@@ -4860,10 +4864,7 @@ def test_aws_connection_registration_uses_private_endpoint_from_secret(tmp_path,
         "batch_operations_role_arn": "arn:aws:iam::123456789012:role/batch",
         "control_bucket": "private-raijin-control",
         "private_endpoint": {
-            "sts_endpoint_url": "https://sts.example.internal",
             "s3_endpoint_url": "https://s3.example.internal",
-            "s3control_endpoint_url": "https://s3control.example.internal",
-            "s3_addressing_style": "virtual", "tls_ca_bundle_path": "/etc/private/ca.crt",
         },
     }
     monkeypatch.setattr(module, "aws_secret_payload", lambda _ocid: parse_aws_connection_payload(__import__("json").dumps(secret)))
@@ -4875,8 +4876,10 @@ def test_aws_connection_registration_uses_private_endpoint_from_secret(tmp_path,
         result = module.create_aws_connection(module.AwsConnectionCreate(secret_ocid=secret_ocid, label="Private"), session)
         connection = session.get(AwsConnection, result["id"])
         assert connection.s3_endpoint_url == "https://s3.example.internal"
-        assert connection.s3_addressing_style == "virtual"
-        assert connection.tls_ca_bundle_path == "/etc/private/ca.crt"
+        assert connection.sts_endpoint_url is None
+        assert connection.s3control_endpoint_url is None
+        assert connection.s3_addressing_style == "auto"
+        assert connection.tls_ca_bundle_path is None
 
 
 def test_archived_connection_releases_reused_secret_for_new_identity(tmp_path, monkeypatch):
