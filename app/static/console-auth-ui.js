@@ -316,9 +316,11 @@
       openProfile().catch(error => profileMessage(error.message));
     });
     let adminMfaAlert;
+    const adminMfaAlertTop = () => window.innerWidth <= 520 ? "145px" : (window.innerWidth <= 850 ? "104px" : "78px");
     const renderAdminMfaAlert = enabled => {
       if (!adminMfaAlert) return;
       adminMfaAlert.classList.toggle("hidden", Boolean(enabled));
+      adminMfaAlert.style.top = adminMfaAlertTop();
       adminMfaAlert.querySelector("span").textContent = uiText("Esta conta administrativa precisa ativar a autenticação em duas etapas.");
       adminMfaAlert.querySelector("button").textContent = uiText("Configurar autenticador");
     };
@@ -326,11 +328,12 @@
       adminMfaAlert = document.createElement("section");
       adminMfaAlert.className = "alert warning console-admin-mfa-alert";
       adminMfaAlert.setAttribute("role", "alert");
-      adminMfaAlert.style.cssText = "position:fixed;z-index:28;top:138px;left:50%;width:min(900px,calc(100vw - 2rem));margin:0;transform:translateX(-50%);box-shadow:0 8px 22px #0007;display:flex;align-items:center;justify-content:space-between;gap:.75rem;";
+      adminMfaAlert.style.cssText = "position:fixed;z-index:31;top:78px;left:0;width:100%;margin:0;padding:.55rem max(1.4rem,calc((100vw - 1440px)/2 + 2rem));border:0;border-bottom:1px solid #f87171;border-radius:0;background:#991b1b;color:#fee2e2;box-shadow:0 5px 14px #0008;display:flex;align-items:center;justify-content:space-between;gap:.75rem;font-weight:800;";
       adminMfaAlert.innerHTML = `<span></span><button type="button" class="secondary"></button>`;
       adminMfaAlert.querySelector("button").addEventListener("click", () => openProfile().catch(error => profileMessage(error.message)));
       document.body.append(adminMfaAlert);
       renderAdminMfaAlert(false);
+      window.addEventListener("resize", () => renderAdminMfaAlert(false));
     }
     profileModal.querySelector("[data-close-profile]").addEventListener("click", () => {
       if (window.closeModal) window.closeModal("#console-profile-modal"); else profileModal.classList.add("hidden");
