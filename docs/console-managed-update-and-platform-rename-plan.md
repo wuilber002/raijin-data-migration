@@ -244,6 +244,8 @@ e exigir procedimento manual aprovado.
 - [ ] Induzir falha em B e provar rollback para A.
 - [ ] Repetir usando PostgreSQL password local e, em nova VM, OCI Vault.
 - [ ] Testar bloqueio com work ativo e atualização após drenagem completa.
+- [x] Validar, na VM de homologação legada, a consulta do agente ao GitHub e
+      a identificação determinística da revisão atual.
 
 ### P5 — Aceite e operação do cliente
 
