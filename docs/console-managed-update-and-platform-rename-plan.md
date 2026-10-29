@@ -217,19 +217,23 @@ e exigir procedimento manual aprovado.
 
 ### P2 — Base do agente de atualização
 
-- [ ] Criar unidade root e timer de consulta, inicialmente sem endpoint web.
+- [x] Criar unidade root e timer de consulta, inicialmente compatível com o
+      clone legado da homologação.
 - [ ] Implementar checkout imutável em `releases/<SHA>` e `current` atômico.
-- [ ] Implementar preflight de disco, Git, config, backup e estado da fila.
-- [ ] Implementar backup, health check, evidência e rollback automático.
-- [ ] Testar rede indisponível, checkout inválido, imagem inválida e timeout.
+      A instalação legada usa checkout detach no clone atual e rollback por
+      SHA; a instalação limpa adotará o layout final de releases.
+- [x] Implementar preflight de Git, backup e estado drenado da fila.
+- [x] Implementar backup, health check, evidência e rollback automático.
+- [ ] Testar rede indisponível, checkout inválido, falha de startup e timeout.
 
 ### P3 — API e console ADMIN
 
-- [ ] Criar modelo de estado/auditoria de atualização no PostgreSQL.
-- [ ] Criar APIs ADMIN com CSRF, autorização e limite de uma operação.
-- [ ] Criar a seção Settings e polling somente do estado sanitizado.
+- [ ] Criar modelo de estado/auditoria de atualização no PostgreSQL. A fase
+      inicial usa evidência sanitizada do host e a auditoria existente.
+- [x] Criar APIs ADMIN com CSRF, autorização e limite de uma operação.
+- [x] Criar a seção Settings e polling somente do estado sanitizado.
 - [ ] Ocultar integralmente para OPERATOR/VIEWER e testar `403` no servidor.
-- [ ] Auditar `UPDATE_CHECKED`, `UPDATE_REQUESTED`, `UPDATE_SUCCEEDED`,
+- [~] Auditar `UPDATE_CHECKED`, `UPDATE_REQUESTED`, `UPDATE_SUCCEEDED`,
       `UPDATE_FAILED` e `UPDATE_ROLLED_BACK`.
 
 ### P4 — Homologação de ciclo completo

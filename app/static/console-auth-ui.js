@@ -448,6 +448,11 @@
       </form>
       <p class="hint" id="console-web-bind-status"></p>
       <hr class="console-section-divider">
+      <h3 data-console-i18n="Atualizações da plataforma"></h3>
+      <p class="hint" data-console-i18n="Consulta uma revisão aprovada no GitHub. A instalação exige fila completamente drenada, backup e validação local de saúde."></p>
+      <div id="console-update-status" class="report-content"></div>
+      <div class="row"><button type="button" class="secondary" id="console-update-check" data-console-i18n="Verificar atualizações"></button><button type="button" id="console-update-apply" data-console-i18n="Instalar atualização"></button></div>
+      <hr class="console-section-divider">
       <h3 data-console-i18n="Gerenciamento de usuários"></h3>
       <form id="console-create-user" class="row">
         <label class="field"><span data-console-i18n="Usuário"></span><input name="username" pattern="(?:[a-z][a-z0-9_.-]{2,63}|[a-z0-9][a-z0-9._+-]{0,63}@[a-z0-9-]+(?:\.[a-z0-9-]+)+)" required></label>
@@ -478,10 +483,10 @@
       return query.toString() ? `?${query}` : "";
     };
     const render = async () => {
-      const [users, sessions, audit, authSettings, webBind, bindAddresses] = await Promise.all([
+      const [users, sessions, audit, authSettings, webBind, bindAddresses, updateState] = await Promise.all([
         apiCall("/api/admin/users"), apiCall("/api/admin/sessions"),
         apiCall(`/api/admin/auth-audit${auditQuery()}`),
-        apiCall("/api/admin/auth-settings"), apiCall("/api/admin/web-bind"), apiCall("/api/admin/web-bind/addresses"),
+        apiCall("/api/admin/auth-settings"), apiCall("/api/admin/web-bind"), apiCall("/api/admin/web-bind/addresses"), apiCall("/api/admin/updates"),
       ]);
       const auditEventLabel = row => row.event_type === "USER_CREATED" && row.target
         ? `${row.event_type} (${row.target})` : row.event_type;
@@ -494,6 +499,16 @@
       bindForm.trusted_upstream_ips.value = (webBind.trusted_upstream_ips || []).join(",");
       bindForm.querySelectorAll("input, select, button").forEach(control => { control.disabled = Boolean(webBind.locked || webBind.pending); });
       card.querySelector("#console-web-bind-status").textContent = webBind.locked ? uiText(webBind.lock_reason) : (webBind.pending ? uiText("Solicitação de endpoint aguardando aplicação no host.") : (webBind.result?.message || ""));
+      const updatePending = Boolean(updateState.pending);
+      const updateAvailable = updateState.state === "AVAILABLE" && /^[0-9a-f]{40}$/.test(updateState.available_revision || "");
+      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateState.message || "")}</p>`;
+      card.querySelector("#console-update-check").disabled = updatePending;
+      card.querySelector("#console-update-apply").disabled = updatePending || !updateAvailable;
+      card.querySelector("#console-update-check").addEventListener("click", async () => { await apiCall("/api/admin/updates/check", {method:"POST"}); await render(); });
+      card.querySelector("#console-update-apply").addEventListener("click", async () => {
+        if (!window.confirm(uiText("A atualização criará um backup e reiniciará a plataforma. Continuar?"))) return;
+        await apiCall("/api/admin/updates/apply", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({revision:updateState.available_revision})}); await render();
+      });
       card.querySelector("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Ativo")}</th><th>MFA</th><th>${uiText("Redefinir senha")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => { const isCurrentUser = user.id === identity.user.id; const deleteControl = isCurrentUser ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode excluir sua própria conta."))}">${uiText("Excluir")}</button>` : `<button type="button" class="danger" data-delete-user="${user.id}">${uiText("Excluir")}</button>`; return `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(uiText("Ativar {{username}}", {username:user.username}))}"></td><td>${user.mfa_enabled ? `<button type="button" class="secondary" data-reset-mfa="${user.id}">${uiText("Redefinir MFA")}</button>` : uiText("Não configurado")}</td><td><input data-field="password" type="password" minlength="14" placeholder="${escapeHtml(uiText("Opcional"))}"></td><td><div class="row"><button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button>${deleteControl}</div></td></tr>`; }).join("")}</tbody></table>`;
       card.querySelector("#console-sessions").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:row.is_current?`<button type="button" disabled title="${escapeHtml(uiText("Você não pode revogar a sessão atual."))}">${uiText("Revogar")}</button>`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
       card.querySelector("#console-auth-audit").innerHTML = `<table><thead><tr><th>${uiText("Data e hora")}</th><th>${uiText("Responsável")}</th><th>${uiText("Evento")}</th><th>${uiText("Resultado")}</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||uiText("sistema"))}</td><td>${escapeHtml(auditEventLabel(row))}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;

@@ -2005,6 +2005,10 @@ class ConsoleWebBindUpdate(BaseModel):
     trusted_upstream_ips: list[str] = Field(default_factory=list, max_length=16)
 
 
+class ConsoleUpdateApply(BaseModel):
+    revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
 class IntegrityEvidence(BaseModel):
     source_checksum: str | None = Field(default=None, max_length=256)
     destination_checksum: str | None = Field(default=None, max_length=256)
@@ -4663,6 +4667,43 @@ def console_web_bind_state() -> dict:
     }
 
 
+def console_update_control_state() -> dict:
+    """Expose a sanitized, host-authored source-update state to ADMIN only."""
+    request_file = Path(os.environ.get("RAIJIN_UPDATE_REQUEST_FILE", "/run/update-control/request.json"))
+    result_file = Path(os.environ.get("RAIJIN_UPDATE_RESULT_FILE", "/run/update-control/result.json"))
+    fallback = {
+        "state": "UNAVAILABLE",
+        "message": "Host update control is unavailable.",
+        "current_revision": RAIJIN_BUILD_REVISION,
+        "available_revision": None,
+        "previous_revision": None,
+        "updated_at": None,
+    }
+    try:
+        state = json.loads(result_file.read_text(encoding="utf-8")) if result_file.is_file() else fallback
+        if not isinstance(state, dict):
+            raise ValueError("Invalid update status")
+    except (OSError, ValueError, json.JSONDecodeError):
+        state = {**fallback, "state": "UNKNOWN", "message": "Host update status is unreadable."}
+    state = {**fallback, **{key: state.get(key) for key in fallback if key in state}}
+    state["pending"] = request_file.exists() or request_file.with_suffix(".processing").exists()
+    return state
+
+
+def request_console_update(action: str, *, revision: str | None = None) -> dict:
+    request_file = Path(os.environ.get("RAIJIN_UPDATE_REQUEST_FILE", "/run/update-control/request.json"))
+    try:
+        request_file.parent.mkdir(parents=True, exist_ok=True)
+        with request_file.open("x", encoding="utf-8") as destination:
+            json.dump({"action": action, "revision": revision or ""}, destination,
+                      sort_keys=True, separators=(",", ":"))
+    except FileExistsError as error:
+        raise HTTPException(status_code=409, detail="An update request is already being processed") from error
+    except OSError as error:
+        raise HTTPException(status_code=503, detail="Host update control channel is unavailable") from error
+    return {"accepted": True, **console_update_control_state()}
+
+
 @app.get("/api/admin/web-bind/addresses")
 def console_get_web_bind_addresses() -> dict:
     address_file = Path(os.environ.get("RAIJIN_WEB_BIND_REQUEST_FILE", "/run/web-bind-control/request.json")).parent / "interfaces.json"
@@ -4677,6 +4718,35 @@ def console_get_web_bind_addresses() -> dict:
     except (OSError, ValueError, json.JSONDecodeError):
         addresses = fallback
     return {"addresses": addresses}
+
+
+@app.get("/api/admin/updates")
+def console_get_update_state() -> dict:
+    return console_update_control_state()
+
+
+@app.post("/api/admin/updates/check", status_code=202)
+def console_check_updates(request: FastAPIRequest, session: Session = Depends(get_session)) -> dict:
+    response = request_console_update("check")
+    auth_audit(session, "UPDATE_CHECK_REQUESTED", actor_user_id=console_principal(request)["id"],
+               target="configured-source-channel", request=request)
+    session.commit()
+    return response
+
+
+@app.post("/api/admin/updates/apply", status_code=202)
+def console_apply_update(payload: ConsoleUpdateApply, request: FastAPIRequest,
+                         session: Session = Depends(get_session)) -> dict:
+    state = console_update_control_state()
+    if state.get("pending"):
+        raise HTTPException(status_code=409, detail="An update request is already being processed")
+    if state.get("state") != "AVAILABLE" or payload.revision != state.get("available_revision"):
+        raise HTTPException(status_code=409, detail="Check for updates and select the currently available revision")
+    response = request_console_update("apply", revision=payload.revision)
+    auth_audit(session, "UPDATE_REQUESTED", actor_user_id=console_principal(request)["id"],
+               target=payload.revision, request=request)
+    session.commit()
+    return response
 
 
 @app.get("/api/admin/web-bind")

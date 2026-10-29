@@ -7,6 +7,7 @@ secret_root=/etc/s3-oci-migration/secrets
 runtime_root=/run/s3-oci-migration
 mode_control_root=/var/lib/s3-oci-migration/mode-control
 web_bind_control_root=/var/lib/s3-oci-migration/web-bind-control
+update_control_root=/var/lib/s3-oci-migration/update-control
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 image="${RAIJIN_IMAGE:-localhost/s3-oci-migration:latest}"
 network=s3-oci-migration
@@ -113,10 +114,13 @@ case "$mode" in
       -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
       -e RAIJIN_WEB_BIND_REQUEST_FILE=/run/web-bind-control/request.json \
       -e RAIJIN_WEB_BIND_RESULT_FILE=/run/web-bind-control/result.json \
+      -e RAIJIN_UPDATE_REQUEST_FILE=/run/update-control/request.json \
+      -e RAIJIN_UPDATE_RESULT_FILE=/run/update-control/result.json \
       -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
       -v "$runtime_root:/run/platform-status:ro,z" \
       -v "$mode_control_root:/run/mode-control:rw,z" \
       -v "$web_bind_control_root:/run/web-bind-control:rw,z" \
+      -v "$update_control_root:/run/update-control:rw,z" \
       -v "$oci_runtime_config:/run/oci-runtime/oci-runtime.json:ro,z" \
       "${web_tls_mounts[@]}" \
       "$image" "${web_server_command[@]}"

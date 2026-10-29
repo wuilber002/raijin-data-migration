@@ -10,6 +10,7 @@ oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 deployment_profile_file=/etc/s3-oci-migration/deployment-profile
 web_bind_config=/etc/s3-oci-migration/web-bind.env
 web_auth_config=/etc/s3-oci-migration/web-auth.env
+update_config=/etc/s3-oci-migration/update.env
 temporary_local_secrets_marker=/etc/s3-oci-migration/temporary-local-secrets
 bootstrap_complete=false
 
@@ -92,6 +93,17 @@ RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=admin
 EOF
   chmod 0600 "$web_auth_config"
 fi
+if [[ ! -e "$update_config" ]]; then
+  cat >"$update_config" <<'EOF'
+# Root-owned source update policy. The web console cannot edit this file,
+# select a repository, or supply a Git ref. `origin/main` is intentionally
+# fixed here until signed release tags become the configured channel.
+RAIJIN_UPDATE_ENABLED=true
+RAIJIN_UPDATE_REMOTE=origin
+RAIJIN_UPDATE_REF=refs/remotes/origin/main
+EOF
+  chmod 0600 "$update_config"
+fi
 source "$install_root/scripts/web-auth.sh"
 source "$install_root/scripts/console-auth-lifecycle.sh"
 raijin_load_web_auth
@@ -117,8 +129,10 @@ if [[ "$local_runtime_complete" == true ]]; then
 fi
 
 web_bind_control_root="$data_root/web-bind-control"
-mkdir -p "$data_root/postgres" "$secret_root" "$runtime_root" "$mode_control_root" "$web_bind_control_root"
+update_control_root="$data_root/update-control"
+mkdir -p "$data_root/postgres" "$secret_root" "$runtime_root" "$mode_control_root" "$web_bind_control_root" "$update_control_root"
 chmod 0750 "$web_bind_control_root"
+chmod 0750 "$update_control_root"
 chmod 700 "$secret_root"
 # The web service is loopback-only. SSH is the sole administrative entrypoint,
 # and it accepts only the public key provisioned by Terraform/cloud-init.
@@ -306,6 +320,7 @@ install -m 0750 "$install_root/scripts/console-admin.sh" /usr/local/sbin/raijin-
 install -m 0750 "$install_root/scripts/console-auth-preflight.sh" /usr/local/sbin/raijin-console-auth-preflight
 install -m 0750 "$install_root/scripts/process-mode-request.sh" /usr/local/sbin/s3-oci-process-mode-request
 install -m 0750 "$install_root/scripts/process-web-bind-request.sh" /usr/local/sbin/s3-oci-process-web-bind-request
+install -m 0750 "$install_root/scripts/process-update-request.sh" /usr/local/sbin/s3-oci-process-update-request
 if [[ "$deployment_profile" == LOCAL ]]; then
   # LOCAL is a durable deployment topology, not a Raijin operation mode.
   # Raijin remains in REAL and sees Fujin only through ordinary private
@@ -385,6 +400,32 @@ WantedBy=timers.target
 EOF
 systemctl daemon-reload
 systemctl enable --now s3-oci-web-bind-request.timer
+
+cat >/etc/systemd/system/s3-oci-update-request.service <<'EOF'
+[Unit]
+Description=Process a validated RAIJIN source update request
+After=s3-oci-migration.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/s3-oci-process-update-request
+EOF
+cat >/etc/systemd/system/s3-oci-update-request.timer <<'EOF'
+[Unit]
+Description=Watch for RAIJIN source update requests
+
+[Timer]
+OnBootSec=20
+OnUnitActiveSec=5
+AccuracySec=1
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now s3-oci-update-request.timer
 
 install -m 0750 "$install_root/scripts/backup-postgres.sh" /usr/local/sbin/s3-oci-backup-postgres
 install -m 0750 "$install_root/scripts/restore-postgres.sh" /usr/local/sbin/s3-oci-restore-postgres

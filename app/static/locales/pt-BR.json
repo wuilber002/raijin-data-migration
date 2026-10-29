@@ -697,5 +697,13 @@
   "Última atividade": "Última atividade",
   "As novas senhas não coincidem.": "As novas senhas não coincidem.",
   "troca de senha obrigatória": "troca de senha obrigatória",
-  "sistema": "sistema"
+  "sistema": "sistema",
+  "Atualizações da plataforma": "Atualizações da plataforma",
+  "Consulta uma revisão aprovada no GitHub. A instalação exige fila completamente drenada, backup e validação local de saúde.": "Consulta uma revisão aprovada no GitHub. A instalação exige fila completamente drenada, backup e validação local de saúde.",
+  "Verificar atualizações": "Verificar atualizações",
+  "Instalar atualização": "Instalar atualização",
+  "Revisão instalada": "Revisão instalada",
+  "Revisão disponível": "Revisão disponível",
+  "Estado": "Estado",
+  "A atualização criará um backup e reiniciará a plataforma. Continuar?": "A atualização criará um backup e reiniciará a plataforma. Continuar?"
 }

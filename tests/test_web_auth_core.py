@@ -115,6 +115,27 @@ def test_admin_web_bind_addresses_come_from_host_inventory(tmp_path, monkeypatch
     assert main.console_get_web_bind_addresses()["addresses"][1]["value"] == "10.0.0.12"
 
 
+def test_console_update_requests_are_single_flight_and_status_is_sanitized(tmp_path, monkeypatch):
+    request = tmp_path / "update" / "request.json"
+    result = tmp_path / "update" / "result.json"
+    revision = "a" * 40
+    result.parent.mkdir()
+    result.write_text(
+        '{"state":"AVAILABLE","message":"Ready","current_revision":"' + "b" * 40 +
+        '","available_revision":"' + revision + '","previous_revision":null,"updated_at":"now"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RAIJIN_UPDATE_REQUEST_FILE", str(request))
+    monkeypatch.setenv("RAIJIN_UPDATE_RESULT_FILE", str(result))
+    state = main.console_update_control_state()
+    assert state["state"] == "AVAILABLE"
+    assert state["available_revision"] == revision
+    accepted = main.request_console_update("apply", revision=revision)
+    assert accepted["accepted"] is True and accepted["pending"] is True
+    with pytest.raises(main.HTTPException, match="already being processed"):
+        main.request_console_update("check")
+
+
 def test_totp_accepts_current_window_and_rejects_wrong_pin():
     secret = main.generate_totp_secret()
     timestamp = 1_700_000_000
