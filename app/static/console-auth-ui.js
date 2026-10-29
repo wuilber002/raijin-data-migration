@@ -8,18 +8,52 @@
     try { identity = await apiCall("/api/auth/me"); } catch (_) { return; }
     if (!identity.enabled) return;
     const actions = document.querySelector(".banner-actions");
+    const userMenu = document.createElement("div");
+    userMenu.className = "console-user-menu";
+    const userMenuTrigger = document.createElement("button");
+    userMenuTrigger.type = "button";
+    userMenuTrigger.className = "secondary console-user-menu-trigger";
+    userMenuTrigger.setAttribute("aria-label", "Menu do usuário");
+    userMenuTrigger.setAttribute("aria-haspopup", "menu");
+    userMenuTrigger.setAttribute("aria-expanded", "false");
+    userMenuTrigger.title = "Menu do usuário";
+    userMenuTrigger.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5Zm0 2.1c-4.48 0-8.1 2.18-8.1 4.87V21h16.2v-2.03c0-2.69-3.62-4.87-8.1-4.87Z"/></svg>';
+    const userMenuPanel = document.createElement("div");
+    userMenuPanel.className = "console-user-menu-panel hidden";
+    userMenuPanel.setAttribute("role", "menu");
+    userMenuPanel.setAttribute("aria-label", "Ações do usuário");
+    const userIdentity = document.createElement("div");
+    userIdentity.className = "console-user-menu-identity";
+    userIdentity.textContent = identity.user.username;
+    userIdentity.setAttribute("role", "presentation");
+    const profile = document.createElement("button");
+    profile.type = "button"; profile.className = "console-user-menu-action";
+    profile.textContent = "Meu perfil";
+    profile.setAttribute("role", "menuitem");
     const logout = document.createElement("button");
-    logout.type = "button"; logout.className = "secondary";
-    logout.textContent = `Sign out (${identity.user.username})`;
+    logout.type = "button"; logout.className = "console-user-menu-action";
+    logout.textContent = "Sair";
+    logout.setAttribute("role", "menuitem");
+    userMenuPanel.append(userIdentity, profile, logout);
+    userMenu.append(userMenuTrigger, userMenuPanel);
+    actions?.append(userMenu);
+    const closeUserMenu = () => {
+      userMenuPanel.classList.add("hidden");
+      userMenuTrigger.setAttribute("aria-expanded", "false");
+    };
+    userMenuTrigger.addEventListener("click", event => {
+      event.stopPropagation();
+      const willOpen = userMenuPanel.classList.contains("hidden");
+      userMenuPanel.classList.toggle("hidden", !willOpen);
+      userMenuTrigger.setAttribute("aria-expanded", String(willOpen));
+    });
+    document.addEventListener("click", event => { if (!userMenu.contains(event.target)) closeUserMenu(); });
+    document.addEventListener("keydown", event => { if (event.key === "Escape") closeUserMenu(); });
     logout.addEventListener("click", async () => {
+      closeUserMenu();
       try { await apiCall("/api/auth/logout", {method:"POST"}); }
       finally { location.assign("/login"); }
     });
-    actions?.append(logout);
-    const profile = document.createElement("button");
-    profile.type = "button"; profile.className = "secondary";
-    profile.textContent = "Meu perfil";
-    profile.setAttribute("aria-label", "Gerenciar meu perfil");
     const profileModal = document.createElement("section");
     profileModal.id = "console-profile-modal";
     profileModal.className = "modal hidden";
@@ -27,12 +61,11 @@
     profileModal.setAttribute("aria-modal", "true");
     profileModal.setAttribute("aria-labelledby", "console-profile-title");
     profileModal.innerHTML = `
-      <div class="modal-card">
+      <div class="modal-panel console-profile-panel">
         <div class="modal-header"><h2 id="console-profile-title">Meu perfil</h2><button type="button" class="secondary" data-close-profile>Fechar</button></div>
-        <p class="hint">Atualize somente seus próprios dados. Seu usuário e papel são gerenciados pelo administrador.</p>
+        <p class="hint">Atualize somente seus próprios dados. O usuário é gerenciado pelo administrador.</p>
         <form id="console-profile-form" class="grid">
-          <label class="field"><span>Usuário</span><input name="username" readonly></label>
-          <label class="field"><span>Papel</span><input name="role" readonly></label>
+          <label class="field"><span>Usuário</span><input name="username" disabled aria-describedby="console-profile-username-help"><small id="console-profile-username-help" class="hint">Este dado não pode ser alterado.</small></label>
           <label class="field"><span>Nome</span><input name="display_name" maxlength="128" autocomplete="name"></label>
           <label class="field"><span>E-mail</span><input name="email" type="email" maxlength="320" autocomplete="email"></label>
           <div class="field action"><span class="field-label">Dados pessoais</span><button>Salvar perfil</button></div>
@@ -48,16 +81,18 @@
         <p id="console-profile-message" class="hint" role="status"></p>
       </div>`;
     document.body.append(profileModal);
-    actions?.append(profile);
     const profileMessage = value => { profileModal.querySelector("#console-profile-message").textContent = value || ""; };
     const openProfile = async () => {
       profileMessage("");
       const data = await apiCall("/api/auth/profile");
       const form = profileModal.querySelector("#console-profile-form");
-      ["username", "role", "display_name", "email"].forEach(field => { form.elements[field].value = data[field] || ""; });
+      ["username", "display_name", "email"].forEach(field => { form.elements[field].value = data[field] || ""; });
       if (window.openModal) window.openModal("#console-profile-modal"); else profileModal.classList.remove("hidden");
     };
-    profile.addEventListener("click", () => openProfile().catch(error => profileMessage(error.message)));
+    profile.addEventListener("click", () => {
+      closeUserMenu();
+      openProfile().catch(error => profileMessage(error.message));
+    });
     profileModal.querySelector("[data-close-profile]").addEventListener("click", () => {
       if (window.closeModal) window.closeModal("#console-profile-modal"); else profileModal.classList.add("hidden");
     });
