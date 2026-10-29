@@ -1,10 +1,20 @@
 (() => {
   const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
   const apiCall = (...args) => window.api ? window.api(...args) : Promise.reject(new Error("Console API is not ready"));
-  const uiText = value => window.uiText ? window.uiText(value) : value;
+  const uiText = (value, options) => window.t ? window.t(value, options) : value;
   const localTime = value => value ? new Date(value).toLocaleString(window.raijinLocale?.() || "pt-BR") : "—";
+  const applyAuthTranslations = root => {
+    root.querySelectorAll?.("[data-console-i18n]").forEach(node => { node.textContent = uiText(node.dataset.consoleI18n); });
+    root.querySelectorAll?.("[data-console-i18n-aria-label]").forEach(node => { node.setAttribute("aria-label", uiText(node.dataset.consoleI18nAriaLabel)); });
+    root.querySelectorAll?.("[data-console-i18n-title]").forEach(node => { node.title = uiText(node.dataset.consoleI18nTitle); });
+    root.querySelectorAll?.("[data-console-i18n-placeholder]").forEach(node => { node.placeholder = uiText(node.dataset.consoleI18nPlaceholder); });
+  };
 
   async function install() {
+    // Authentication controls are injected after the application shell. Wait
+    // for its catalog so their first rendering already uses the selected
+    // locale instead of depending on mutation-observer timing.
+    try { await window.raijinI18nReady; } catch (_) { /* fallback to Portuguese source strings */ }
     let identity;
     try { identity = await apiCall("/api/auth/me"); } catch (_) { return; }
     if (!identity.enabled) return;
@@ -14,29 +24,30 @@
     const userMenuTrigger = document.createElement("button");
     userMenuTrigger.type = "button";
     userMenuTrigger.className = "secondary console-user-menu-trigger";
-    userMenuTrigger.setAttribute("aria-label", "Menu do usuário");
+    userMenuTrigger.dataset.consoleI18nAriaLabel = "Menu do usuário";
     userMenuTrigger.setAttribute("aria-haspopup", "menu");
     userMenuTrigger.setAttribute("aria-expanded", "false");
-    userMenuTrigger.title = "Menu do usuário";
+    userMenuTrigger.dataset.consoleI18nTitle = "Menu do usuário";
     userMenuTrigger.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5Zm0 2.1c-4.48 0-8.1 2.18-8.1 4.87V21h16.2v-2.03c0-2.69-3.62-4.87-8.1-4.87Z"/></svg>';
     const userMenuPanel = document.createElement("div");
     userMenuPanel.className = "console-user-menu-panel hidden";
     userMenuPanel.setAttribute("role", "menu");
-    userMenuPanel.setAttribute("aria-label", "Ações do usuário");
+    userMenuPanel.setAttribute("aria-label", uiText("Ações do usuário"));
     const userIdentity = document.createElement("div");
     userIdentity.className = "console-user-menu-identity";
     userIdentity.textContent = identity.user.username;
     userIdentity.setAttribute("role", "presentation");
     const profile = document.createElement("button");
     profile.type = "button"; profile.className = "console-user-menu-action";
-    profile.textContent = "Meu perfil";
+    profile.dataset.consoleI18n = "Meu perfil";
     profile.setAttribute("role", "menuitem");
     const logout = document.createElement("button");
     logout.type = "button"; logout.className = "console-user-menu-action";
-    logout.textContent = "Sair";
+    logout.dataset.consoleI18n = "Sair";
     logout.setAttribute("role", "menuitem");
     userMenuPanel.append(userIdentity, profile, logout);
     userMenu.append(userMenuTrigger, userMenuPanel);
+    applyAuthTranslations(userMenu);
     actions?.append(userMenu);
     const closeUserMenu = () => {
       userMenuPanel.classList.add("hidden");
@@ -63,25 +74,26 @@
     profileModal.setAttribute("aria-labelledby", "console-profile-title");
     profileModal.innerHTML = `
       <div class="modal-panel console-profile-panel">
-        <div class="modal-header"><h2 id="console-profile-title">Meu perfil</h2><button type="button" class="secondary" data-close-profile>Fechar</button></div>
-        <p class="hint">Atualize somente seus próprios dados. O usuário é gerenciado pelo administrador.</p>
+        <div class="modal-header"><h2 id="console-profile-title" data-console-i18n="Meu perfil"></h2><button type="button" class="secondary" data-close-profile data-console-i18n="Fechar"></button></div>
+        <p class="hint" data-console-i18n="Atualize somente seus próprios dados. O usuário é gerenciado pelo administrador."></p>
         <form id="console-profile-form" class="grid">
-          <label class="field"><span>Usuário</span><input name="username" disabled aria-describedby="console-profile-username-help"><small id="console-profile-username-help" class="hint">Este dado não pode ser alterado.</small></label>
-          <label class="field"><span>Nome</span><input name="display_name" maxlength="128" autocomplete="name"></label>
-          <label class="field"><span>E-mail</span><input name="email" type="email" maxlength="320" autocomplete="email"></label>
-          <div class="field action"><span class="field-label">Dados pessoais</span><button>Salvar perfil</button></div>
+          <label class="field"><span data-console-i18n="Usuário"></span><input name="username" disabled aria-describedby="console-profile-username-help"><small id="console-profile-username-help" class="hint" data-console-i18n="Este dado não pode ser alterado."></small></label>
+          <label class="field"><span data-console-i18n="Nome"></span><input name="display_name" maxlength="128" autocomplete="name"></label>
+          <label class="field"><span data-console-i18n="E-mail"></span><input name="email" type="email" maxlength="320" autocomplete="email"></label>
+          <div class="field action"><span class="field-label" data-console-i18n="Dados pessoais"></span><button data-console-i18n="Salvar perfil"></button></div>
         </form>
         <hr>
-        <h3>Trocar senha</h3>
+        <h3 data-console-i18n="Trocar senha"></h3>
         <form id="console-password-form" class="grid">
-          <label class="field"><span>Senha atual</span><input name="current_password" type="password" autocomplete="current-password" required></label>
-          <label class="field"><span>Nova senha</span><input name="new_password" type="password" minlength="14" autocomplete="new-password" required></label>
-          <label class="field"><span>Confirmar nova senha</span><input name="confirmation" type="password" minlength="14" autocomplete="new-password" required></label>
-          <div class="field action"><span class="field-label">Segurança</span><button>Trocar senha</button></div>
+          <label class="field"><span data-console-i18n="Senha atual"></span><input name="current_password" type="password" autocomplete="current-password" required></label>
+          <label class="field"><span data-console-i18n="Nova senha"></span><input name="new_password" type="password" minlength="14" autocomplete="new-password" required></label>
+          <label class="field"><span data-console-i18n="Confirmar nova senha"></span><input name="confirmation" type="password" minlength="14" autocomplete="new-password" required></label>
+          <div class="field action"><span class="field-label" data-console-i18n="Segurança"></span><button data-console-i18n="Trocar senha"></button></div>
         </form>
         <p id="console-profile-message" class="hint" role="status"></p>
       </div>`;
     document.body.append(profileModal);
+    applyAuthTranslations(profileModal);
     let profileMessageSource = "";
     const profileMessage = value => {
       profileMessageSource = value || "";
@@ -117,7 +129,12 @@
         form.reset(); profileMessage("Senha alterada. As demais sessões foram encerradas.");
       } catch (error) { profileMessage(error.message); }
     });
-    document.addEventListener("raijin:language-changed", () => profileMessage(profileMessageSource));
+    document.addEventListener("raijin:language-changed", () => {
+      applyAuthTranslations(userMenu);
+      applyAuthTranslations(profileModal);
+      userMenuPanel.setAttribute("aria-label", uiText("Ações do usuário"));
+      profileMessage(profileMessageSource);
+    });
     if (identity.user.role !== "ADMIN") {
       // Settings contains only tenancy integration and global scheduling
       // controls. Do not make an OPERATOR/VIEWER discover administrative
@@ -140,30 +157,31 @@
     const card = document.createElement("section");
     card.className = "card"; card.id = "console-access-management";
     card.innerHTML = `
-      <h2>Acesso ao console</h2>
-      <p class="hint">Usuários locais, sessões ativas no navegador e evidências de auditoria de autenticação.</p>
+      <h2 data-console-i18n="Acesso ao console"></h2>
+      <p class="hint" data-console-i18n="Usuários locais, sessões ativas no navegador e evidências de auditoria de autenticação."></p>
       <form id="console-auth-policy" class="row">
-        <label class="field"><span>Histórico de reutilização de senha</span><input name="password_history_count" type="number" min="0" max="12" required></label>
-        <span class="hint">Bloqueia a senha atual e esta quantidade de senhas anteriores (padrão: 3).</span>
-        <button>Salvar política</button>
+        <label class="field"><span data-console-i18n="Histórico de reutilização de senha"></span><input name="password_history_count" type="number" min="0" max="12" required></label>
+        <span class="hint" data-console-i18n="Bloqueia a senha atual e esta quantidade de senhas anteriores (padrão: 3)."></span>
+        <button data-console-i18n="Salvar política"></button>
       </form>
       <form id="console-create-user" class="row">
-        <label class="field"><span>Usuário</span><input name="username" pattern="[a-z][a-z0-9_.-]{2,63}" required></label>
-        <label class="field"><span>Senha temporária</span><input name="password" type="password" minlength="14" required></label>
-        <label class="field"><span>Papel</span><select name="role"><option>VIEWER</option><option>OPERATOR</option><option>ADMIN</option></select></label>
-        <button>Criar usuário</button>
+        <label class="field"><span data-console-i18n="Usuário"></span><input name="username" pattern="[a-z][a-z0-9_.-]{2,63}" required></label>
+        <label class="field"><span data-console-i18n="Senha temporária"></span><input name="password" type="password" minlength="14" required></label>
+        <label class="field"><span data-console-i18n="Papel"></span><select name="role"><option>VIEWER</option><option>OPERATOR</option><option>ADMIN</option></select></label>
+        <button data-console-i18n="Criar usuário"></button>
       </form>
-      <div id="console-users" class="report-content">Carregando usuários…</div>
-      <h3>Sessões</h3><div id="console-sessions" class="report-content">Carregando sessões…</div>
-      <h3>Auditoria recente de autenticação</h3>
+      <div id="console-users" class="report-content" data-console-i18n="Carregando usuários…"></div>
+      <h3 data-console-i18n="Sessões"></h3><div id="console-sessions" class="report-content" data-console-i18n="Carregando sessões…"></div>
+      <h3 data-console-i18n="Auditoria recente de autenticação"></h3>
       <form id="console-audit-filter" class="row">
-        <label class="field"><span>Responsável</span><input name="actor" pattern="[a-z][a-z0-9_.-]{2,63}"></label>
-        <label class="field"><span>Evento</span><input name="event_type" placeholder="LOGIN_SUCCEEDED"></label>
-        <label class="field"><span>Resultado</span><select name="result"><option value="">Todos</option><option>SUCCEEDED</option><option>DENIED</option></select></label>
-        <button class="secondary">Filtrar</button>
+        <label class="field"><span data-console-i18n="Responsável"></span><input name="actor" pattern="[a-z][a-z0-9_.-]{2,63}"></label>
+        <label class="field"><span data-console-i18n="Evento"></span><input name="event_type" placeholder="LOGIN_SUCCEEDED"></label>
+        <label class="field"><span data-console-i18n="Resultado"></span><select name="result"><option value="" data-console-i18n="Todos"></option><option>SUCCEEDED</option><option>DENIED</option></select></label>
+        <button class="secondary" data-console-i18n="Filtrar"></button>
       </form>
-      <div id="console-auth-audit" class="report-content">Carregando auditoria…</div>`;
+      <div id="console-auth-audit" class="report-content" data-console-i18n="Carregando auditoria…"></div>`;
     settings.append(card);
+    applyAuthTranslations(card);
 
     const auditQuery = () => {
       const form = card.querySelector("#console-audit-filter");
@@ -180,9 +198,9 @@
         apiCall("/api/admin/auth-settings"),
       ]);
       card.querySelector("#console-auth-policy").elements.password_history_count.value = authSettings.password_history_count;
-      card.querySelector("#console-users").innerHTML = `<table><thead><tr><th>Usuário</th><th>Papel</th><th>Ativo</th><th>Redefinir senha</th><th>Ação</th></tr></thead><tbody>${users.map(user => `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?" · troca de senha obrigatória":""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(window.t?.("Ativar {{username}}", {username:user.username}) || `Ativar ${user.username}`)}"></td><td><input data-field="password" type="password" minlength="14" placeholder="Opcional"></td><td><button type="button" data-save-user="${user.id}">Salvar</button></td></tr>`).join("")}</tbody></table>`;
-      card.querySelector("#console-sessions").innerHTML = `<table><thead><tr><th>Usuário</th><th>Última atividade</th><th>Expira em</th><th>Ação</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`Revogada (${escapeHtml(row.revoke_reason||"")})`:`<button type="button" data-session="${row.id}">Revogar</button>`}</td></tr>`).join("")}</tbody></table>`;
-      card.querySelector("#console-auth-audit").innerHTML = `<table><thead><tr><th>Data e hora</th><th>Responsável</th><th>Evento</th><th>Resultado</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||"sistema")}</td><td>${escapeHtml(row.event_type)}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;
+      card.querySelector("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Ativo")}</th><th>${uiText("Redefinir senha")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(uiText("Ativar {{username}}", {username:user.username}))}"></td><td><input data-field="password" type="password" minlength="14" placeholder="${escapeHtml(uiText("Opcional"))}"></td><td><button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button></td></tr>`).join("")}</tbody></table>`;
+      card.querySelector("#console-sessions").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
+      card.querySelector("#console-auth-audit").innerHTML = `<table><thead><tr><th>${uiText("Data e hora")}</th><th>${uiText("Responsável")}</th><th>${uiText("Evento")}</th><th>${uiText("Resultado")}</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||uiText("sistema"))}</td><td>${escapeHtml(row.event_type)}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;
       card.querySelectorAll("[data-session]").forEach(button => button.addEventListener("click", async () => {
         await apiCall(`/api/admin/sessions/${button.dataset.session}/revoke`, {method:"POST"}); await render();
       }));
@@ -206,7 +224,10 @@
       await render();
     });
     card.querySelector("#console-audit-filter").addEventListener("submit", async event => { event.preventDefault(); await render(); });
-    document.addEventListener("raijin:language-changed", () => render().catch(() => {}));
+    document.addEventListener("raijin:language-changed", () => {
+      applyAuthTranslations(card);
+      render().catch(() => {});
+    });
     await render();
   }
   queueMicrotask(install);

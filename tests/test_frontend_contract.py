@@ -119,6 +119,9 @@ def test_console_auth_menu_and_profile_use_the_shared_translation_catalog():
         assert phrase in english
     assert "raijin:language-changed" in script
     assert "window.raijinLocale?.() || \"pt-BR\"" in script
+    assert "await window.raijinI18nReady" in script
+    assert "applyAuthTranslations(profileModal)" in script
+    assert 'data-console-i18n="Meu perfil"' in script
 
 
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():

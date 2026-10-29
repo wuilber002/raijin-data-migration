@@ -655,5 +655,6 @@
   "Usuários locais, sessões ativas no navegador e evidências de auditoria de autenticação.": "Local users, active browser sessions, and authentication audit evidence.",
   "Última atividade": "Last seen",
   "As novas senhas não coincidem.": "The new passwords do not match.",
-  "troca de senha obrigatória": "password change required"
+  "troca de senha obrigatória": "password change required",
+  "sistema": "system"
 }
