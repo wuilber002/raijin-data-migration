@@ -2317,7 +2317,11 @@ def create_schema() -> None:
         # column is safe and allows a full corporate e-mail login without
         # changing existing identities or the unique index.
         username_column = next(
-            (column for column in inspect(engine).get_columns("console_users") if column["name"] == "username"),
+            # Keep the inspection on this transaction's connection.  An
+            # additive ALTER above holds an ACCESS EXCLUSIVE lock; reflecting
+            # through ``engine`` would check out a second connection and wait
+            # on our own uncommitted lock until the runtime health timeout.
+            (column for column in inspect(connection).get_columns("console_users") if column["name"] == "username"),
             None,
         )
         if engine.dialect.name == "postgresql" and username_column and getattr(username_column["type"], "length", None) != 320:
