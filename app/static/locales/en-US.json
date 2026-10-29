@@ -610,6 +610,7 @@
   "Ações do usuário": "User actions",
   "Acesso ao console": "Console access",
   "Endpoint da console": "Console endpoint",
+  "Gerenciamento de usuários": "User management",
   "HTTPS direto usa certificado autoassinado persistente. HTTP fora do loopback exige os IPs privados /32 dos terminadores TLS.": "Direct HTTPS uses a persistent self-signed certificate. HTTP outside loopback requires the private /32 addresses of TLS terminators.",
   "IP de bind": "Bind IP",
   "Porta": "Port",

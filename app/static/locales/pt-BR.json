@@ -610,6 +610,7 @@
   "Ações do usuário": "Ações do usuário",
   "Acesso ao console": "Acesso ao console",
   "Endpoint da console": "Endpoint da console",
+  "Gerenciamento de usuários": "Gerenciamento de usuários",
   "HTTPS direto usa certificado autoassinado persistente. HTTP fora do loopback exige os IPs privados /32 dos terminadores TLS.": "HTTPS direto usa certificado autoassinado persistente. HTTP fora do loopback exige os IPs privados /32 dos terminadores TLS.",
   "IP de bind": "IP de bind",
   "Porta": "Porta",

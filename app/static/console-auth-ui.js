@@ -357,7 +357,7 @@
       <hr>
       <h3 data-console-i18n="Endpoint da console"></h3>
       <p class="hint" id="console-web-bind-help" data-console-i18n="HTTPS direto usa certificado autoassinado persistente. HTTP fora do loopback exige os IPs privados /32 dos terminadores TLS."></p>
-      <form id="console-web-bind" class="row">
+      <form id="console-web-bind" class="row console-endpoint-form">
         <label class="field"><span data-console-i18n="IP de bind"></span><input name="host" inputmode="numeric" required></label>
         <label class="field"><span data-console-i18n="Porta"></span><input name="port" type="number" min="1" max="65535" required></label>
         <label class="field"><span data-console-i18n="Transporte"></span><select name="transport"><option value="https">HTTPS</option><option value="http">HTTP</option></select></label>
@@ -365,6 +365,8 @@
         <button data-console-i18n="Aplicar endpoint"></button>
       </form>
       <p class="hint" id="console-web-bind-status"></p>
+      <hr class="console-section-divider">
+      <h3 data-console-i18n="Gerenciamento de usuários"></h3>
       <form id="console-create-user" class="row">
         <label class="field"><span data-console-i18n="Usuário"></span><input name="username" pattern="[a-z][a-z0-9_.-]{2,63}" required></label>
         <label class="field"><span data-console-i18n="Senha temporária"></span><input name="password" type="password" minlength="14" required></label>
@@ -372,6 +374,7 @@
         <button data-console-i18n="Criar usuário"></button>
       </form>
       <div id="console-users" class="report-content" data-console-i18n="Carregando usuários…"></div>
+      <hr class="console-section-divider">
       <h3 data-console-i18n="Sessões"></h3><div id="console-sessions" class="report-content" data-console-i18n="Carregando sessões…"></div>
       <h3 data-console-i18n="Auditoria recente de autenticação"></h3>
       <form id="console-audit-filter" class="row">
