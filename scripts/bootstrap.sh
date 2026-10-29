@@ -91,6 +91,7 @@ EOF
   chmod 0600 "$web_auth_config"
 fi
 source "$install_root/scripts/web-auth.sh"
+source "$install_root/scripts/console-auth-lifecycle.sh"
 raijin_load_web_auth
 local_runtime_complete=true
 for container in s3-oci-postgres s3-oci-app s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer s3-oci-fujin-local-dns s3-oci-local-ui-gateway; do
@@ -175,12 +176,6 @@ fi
 if [[ "$postgres_secret_source" == local ]]; then
   install -o root -g root -m 0600 /dev/null "$temporary_local_secrets_marker"
 fi
-if [[ "$RAIJIN_WEB_AUTH_MODE" == local ]]; then
-  python3 "$install_root/scripts/fetch-oci-secret.py" \
-    --runtime-config "$oci_runtime_config" \
-    --secret-name console_bootstrap_password \
-    --output "$secret_root/console_bootstrap_password"
-fi
 postgres_secret_mounts=(
   -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z"
 )
@@ -224,6 +219,30 @@ done
 if [[ "$postgres_ready" != true ]]; then
   echo "PostgreSQL did not become ready" >&2
   exit 1
+fi
+
+if [[ "$RAIJIN_WEB_AUTH_MODE" == local && "$(raijin_console_auth_lifecycle_state)" == BOOTSTRAP_REQUIRED ]]; then
+  # Initial administrator material is intentionally never fetched from Vault:
+  # it must originate from a root-owned local file and the launcher will bind
+  # the console to loopback for this one-time ceremony.
+  python3 - "$oci_runtime_config" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    runtime = json.load(source)
+local_path = (runtime.get("secret_file_paths") or {}).get("console_bootstrap_password")
+ocid = (runtime.get("secret_ocids") or {}).get("console_bootstrap_password")
+if ocid or not isinstance(local_path, str) or not os.path.isabs(local_path):
+    raise SystemExit(
+        "Initial console bootstrap requires secret_file_paths.console_bootstrap_password; Vault is not allowed"
+    )
+PY
+  python3 "$install_root/scripts/fetch-oci-secret.py" \
+    --runtime-config "$oci_runtime_config" \
+    --secret-name console_bootstrap_password \
+    --output "$secret_root/console_bootstrap_password"
 fi
 
 if [[ "$postgres_secret_source" == vault && -f "$temporary_local_secrets_marker" ]]; then

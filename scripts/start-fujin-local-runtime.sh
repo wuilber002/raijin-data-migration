@@ -18,6 +18,7 @@ local_oci_runtime="${RAIJIN_LOCAL_OCI_RUNTIME_CONFIG:-/etc/s3-oci-migration/oci-
 # shellcheck source=web-bind.sh
 source "$install_root/scripts/web-bind.sh"
 raijin_load_web_bind
+source "$install_root/scripts/console-auth-lifecycle.sh"
 # An old release directory can launch the compatible disabled mode while the
 # host is being upgraded. Local authentication is always opt-in, never an
 # implicit downgrade or activation during that transition.
@@ -32,25 +33,6 @@ else
   RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=30
   RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=720
   RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=admin
-fi
-
-web_auth_environment=(
-  -e "RAIJIN_WEB_BIND_HOST=$RAIJIN_WEB_BIND_HOST"
-  -e "RAIJIN_WEB_AUTH_MODE=$RAIJIN_WEB_AUTH_MODE"
-  -e "RAIJIN_WEB_EXTERNAL_HTTPS=$RAIJIN_WEB_EXTERNAL_HTTPS"
-  -e "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=$RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS"
-  -e "RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES"
-  -e "RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES"
-  -e "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=$RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME"
-)
-web_auth_secret_mounts=()
-if [[ "$RAIJIN_WEB_AUTH_MODE" == local ]]; then
-  [[ -s "$secret_root/console_bootstrap_password" ]] || {
-    echo "Local web authentication requires console_bootstrap_password" >&2
-    exit 2
-  }
-  web_auth_environment+=( -e RAIJIN_WEB_AUTH_BOOTSTRAP_PASSWORD_FILE=/run/secrets/console_bootstrap_password )
-  web_auth_secret_mounts+=( -v "$secret_root/console_bootstrap_password:/run/secrets/console_bootstrap_password:ro,z" )
 fi
 
 [[ -s "$local_oci_runtime" ]] || {
@@ -87,6 +69,36 @@ for attempt in $(seq 1 30); do
   [[ "$attempt" -lt 30 ]] || { echo "PostgreSQL did not become ready" >&2; exit 1; }
   sleep 2
 done
+
+console_auth_lifecycle=READY
+if [[ "$RAIJIN_WEB_AUTH_MODE" == local ]]; then
+  console_auth_lifecycle="$(raijin_console_auth_lifecycle_state)"
+  if [[ "$console_auth_lifecycle" == BOOTSTRAP_REQUIRED ]]; then
+    raijin_force_loopback_web_bind "$RAIJIN_WEB_BIND_PORT"
+  elif [[ -e "$secret_root/console_bootstrap_password" ]]; then
+    echo "Console bootstrap file is still present; keeping the web bind on 127.0.0.1." >&2
+    raijin_force_loopback_web_bind "$RAIJIN_WEB_BIND_PORT"
+  fi
+fi
+web_auth_environment=(
+  -e "RAIJIN_WEB_BIND_HOST=$RAIJIN_WEB_BIND_HOST"
+  -e "RAIJIN_WEB_AUTH_MODE=$RAIJIN_WEB_AUTH_MODE"
+  -e "RAIJIN_WEB_EXTERNAL_HTTPS=$RAIJIN_WEB_EXTERNAL_HTTPS"
+  -e "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=$RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS"
+  -e "RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES"
+  -e "RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES"
+  -e "RAIJIN_WEB_AUTH_BOOTSTRAP_REQUIRED=$([[ "$console_auth_lifecycle" == BOOTSTRAP_REQUIRED ]] && echo true || echo false)"
+  -e "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=$RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME"
+)
+web_auth_secret_mounts=()
+if [[ "$RAIJIN_WEB_AUTH_MODE" == local && "$console_auth_lifecycle" == BOOTSTRAP_REQUIRED ]]; then
+  [[ -s "$secret_root/console_bootstrap_password" ]] || {
+    echo "Initial local web authentication requires console_bootstrap_password from a protected local file" >&2
+    exit 2
+  }
+  web_auth_environment+=( -e RAIJIN_WEB_AUTH_BOOTSTRAP_PASSWORD_FILE=/run/secrets/console_bootstrap_password )
+  web_auth_secret_mounts+=( -v "$secret_root/console_bootstrap_password:/run/secrets/console_bootstrap_password:ro,z" )
+fi
 
 podman network exists "$data_network" 2>/dev/null || podman network create --internal --subnet 172.30.0.0/24 "$data_network"
 podman network exists "$ui_network" 2>/dev/null || podman network create --internal "$ui_network"

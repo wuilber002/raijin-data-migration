@@ -102,6 +102,7 @@ class WebAuthSettings:
     trusted_proxy_networks: tuple[str, ...]
     session_idle_minutes: int
     session_absolute_minutes: int
+    bootstrap_required: bool = True
     bootstrap_username: str | None = None
     bootstrap_password_file: str | None = None
 
@@ -138,6 +139,10 @@ class WebAuthSettings:
             raise WebAuthConfigurationError(
                 "RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES must not be lower than idle timeout"
             )
+        bootstrap_required = _boolean(
+            values.get("RAIJIN_WEB_AUTH_BOOTSTRAP_REQUIRED", "true"),
+            "RAIJIN_WEB_AUTH_BOOTSTRAP_REQUIRED",
+        )
         bootstrap_username = (values.get("RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME") or "").strip().lower() or None
         bootstrap_password_file = (values.get("RAIJIN_WEB_AUTH_BOOTSTRAP_PASSWORD_FILE") or "").strip() or None
         if bootstrap_username and not USERNAME_PATTERN.fullmatch(bootstrap_username):
@@ -154,9 +159,13 @@ class WebAuthSettings:
                     "local web authentication on a non-loopback bind requires external HTTPS "
                     "and RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS"
                 )
-        if mode is WebAuthMode.LOCAL and (not bootstrap_username or not bootstrap_password_file):
+        if mode is WebAuthMode.LOCAL and bootstrap_required and not loopback_bind:
             raise WebAuthConfigurationError(
-                "local web authentication requires bootstrap username and password file references"
+                "initial local web-auth bootstrap requires RAIJIN_WEB_BIND_HOST=127.0.0.1 or ::1"
+            )
+        if mode is WebAuthMode.LOCAL and bootstrap_required and (not bootstrap_username or not bootstrap_password_file):
+            raise WebAuthConfigurationError(
+                "initial local web authentication requires bootstrap username and password file references"
             )
         return cls(
             mode=mode,
@@ -165,6 +174,7 @@ class WebAuthSettings:
             trusted_proxy_networks=trusted_proxy_networks,
             session_idle_minutes=idle,
             session_absolute_minutes=absolute,
+            bootstrap_required=bootstrap_required,
             bootstrap_username=bootstrap_username,
             bootstrap_password_file=bootstrap_password_file,
         )

@@ -3,14 +3,14 @@
 ## Ativação controlada
 
 1. Faça o backup PostgreSQL normal e confirme que o arquivo pode ser lido.
-2. Deixe o bind em `127.0.0.1` ou em rede privada. Para proxy externo, defina
-   HTTPS e somente os CIDRs do proxy em `web-auth.env`.
-3. Em `oci-runtime.json`, configure exatamente uma referência para
-   `console_bootstrap_password`: `secret_ocids` (Vault) ou `secret_file_paths`
-   (arquivo root-owned `0600`).
+2. Configure provisoriamente o bind em `127.0.0.1`. Mesmo que `web-bind.env`
+   contenha outro endereço, o primeiro bootstrap será forçado para loopback.
+3. Em `oci-runtime.json`, configure `console_bootstrap_password` somente em
+   `secret_file_paths`, usando arquivo local root-owned `0600`; Vault não é
+   aceito nessa etapa.
 4. Em `/etc/s3-oci-migration/web-auth.env`, configure
    `RAIJIN_WEB_AUTH_MODE=local` e o usuário bootstrap em letras minúsculas.
-5. Materialize a referência e valide sem escrever usuários:
+5. Valide sem escrever usuários:
 
    ```bash
    sudo /opt/s3-oci-migration/release/scripts/fetch-oci-secret.py \
@@ -28,7 +28,11 @@
    bloqueia a senha atual e também a quantidade configurada de senhas
    anteriores (0–12); somente hashes Argon2id dessas senhas anteriores são
    mantidos.
-7. Confirme que uma janela anônima recebe `401` da API e que um `VIEWER` não
+7. Remova o arquivo local inicial, a referência dele em `oci-runtime.json` e
+   `/etc/s3-oci-migration/secrets/console_bootstrap_password`. Depois disso,
+   configure o bind definitivo; bind externo ainda exige HTTPS e CIDRs exatos
+   de proxy confiável em `web-auth.env`.
+8. Confirme que uma janela anônima recebe `401` da API e que um `VIEWER` não
    consegue executar uma mutação. Registre o aceite.
 
 ## Perfil individual

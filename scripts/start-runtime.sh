@@ -16,6 +16,7 @@ network=s3-oci-migration
 # shellcheck source=web-bind.sh
 source "$install_root/scripts/web-bind.sh"
 raijin_load_web_bind
+source "$install_root/scripts/console-auth-lifecycle.sh"
 # Older release directories can be used by the pre-auth update workflow. Keep
 # their launcher usable with the compatibility-safe disabled defaults.
 if [[ -r "$install_root/scripts/web-auth.sh" ]]; then
@@ -31,6 +32,21 @@ else
   RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=admin
 fi
 
+console_auth_lifecycle=READY
+if [[ "$RAIJIN_WEB_AUTH_MODE" == local ]]; then
+  console_auth_lifecycle="$(raijin_console_auth_lifecycle_state)"
+  if [[ "$console_auth_lifecycle" == BOOTSTRAP_REQUIRED ]]; then
+    # The first administrator credential is intentionally local-only even if
+    # web-bind.env already asks for a public/private interface.
+    raijin_force_loopback_web_bind "$RAIJIN_WEB_BIND_PORT"
+  elif [[ -e "$secret_root/console_bootstrap_password" ]]; then
+    # A completed bootstrap cannot expose a host interface until the temporary
+    # local bootstrap file has been retired by the administrator.
+    echo "Console bootstrap file is still present; keeping the web bind on 127.0.0.1." >&2
+    raijin_force_loopback_web_bind "$RAIJIN_WEB_BIND_PORT"
+  fi
+fi
+
 web_auth_environment=(
   -e "RAIJIN_WEB_BIND_HOST=$RAIJIN_WEB_BIND_HOST"
   -e "RAIJIN_WEB_AUTH_MODE=$RAIJIN_WEB_AUTH_MODE"
@@ -38,11 +54,12 @@ web_auth_environment=(
   -e "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=$RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS"
   -e "RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES"
   -e "RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES"
+  -e "RAIJIN_WEB_AUTH_BOOTSTRAP_REQUIRED=$([[ "$console_auth_lifecycle" == BOOTSTRAP_REQUIRED ]] && echo true || echo false)"
   -e "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=$RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME"
 )
 
 web_auth_secret_mounts=()
-if [[ "$RAIJIN_WEB_AUTH_MODE" == local ]]; then
+if [[ "$RAIJIN_WEB_AUTH_MODE" == local && "$console_auth_lifecycle" == BOOTSTRAP_REQUIRED ]]; then
   [[ -s "$secret_root/console_bootstrap_password" ]] || {
     echo "Local web authentication requires console_bootstrap_password" >&2
     exit 2

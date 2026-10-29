@@ -137,9 +137,10 @@ RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=720
 RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=admin
 ```
 
-Para ativar login local, crie a referência `console_bootstrap_password` em
-`oci-runtime.json` (Vault ou arquivo local protegido), altere somente
-`RAIJIN_WEB_AUTH_MODE=local` e valide antes do restart:
+Para ativar login local pela primeira vez, crie `console_bootstrap_password`
+**somente** em `secret_file_paths` de `oci-runtime.json`, apontando para um
+arquivo local root-owned `0600`. Altere somente `RAIJIN_WEB_AUTH_MODE=local` e
+valide antes do restart:
 
 ```bash
 sudo /usr/local/sbin/raijin-console-auth-preflight
@@ -147,10 +148,12 @@ sudo systemctl restart s3-oci-migration.service
 ```
 
 O primeiro início cria somente o usuário bootstrap como `ADMIN`, com senha
-Argon2id, e exige troca de senha no primeiro login. A credencial bootstrap não
-sobrescreve usuários já existentes. O modo `local` só aceita bind fora de
-loopback quando `RAIJIN_WEB_EXTERNAL_HTTPS=true` e os CIDRs exatos do proxy
-reverso confiável forem informados. Nunca publique `0.0.0.0` diretamente.
+Argon2id, e exige troca de senha no primeiro login. Enquanto essa troca não
+terminar, o Raijin força o bind para `127.0.0.1`, ignorando temporariamente
+`web-bind.env`. Depois, invalide e remova o arquivo local e sua referência em
+`oci-runtime.json`; só então um bind configurado fora de loopback poderá ser
+usado, ainda exigindo `RAIJIN_WEB_EXTERNAL_HTTPS=true` e os CIDRs exatos do
+proxy reverso confiável. Nunca publique `0.0.0.0` diretamente.
 
 O rollback é explícito: mantenha o serviço em bind privado/loopback, mude
 `RAIJIN_WEB_AUTH_MODE=disabled` e reinicie. As tabelas de usuários, sessões e
@@ -192,19 +195,18 @@ Substitua todos os valores entre `<...>` e proteja o arquivo:
   "destination_compartment_names": {
     "<DESTINATION_COMPARTMENT_OCID>": "<DESTINATION_COMPARTMENT_NAME>"
   },
-  "secret_ocids": {
-    "postgres_password": "<POSTGRES_SECRET_OCID>",
-    "console_bootstrap_password": "<CONSOLE_BOOTSTRAP_SECRET_OCID>"
+  "secret_ocids": {"postgres_password": "<POSTGRES_SECRET_OCID>"},
+  "secret_file_paths": {
+    "console_bootstrap_password": "/etc/s3-oci-migration/bootstrap-console-password"
   },
-  "secret_file_paths": {},
   "secrets_compartment_ocid": "<SECRETS_COMPARTMENT_OCID>",
   "secret_compartment_ocids": ["<SECRETS_COMPARTMENT_OCID>"]
 }
 ```
 
-Cada nome de Secret deve estar em exatamente uma das duas seções. Para um
-bootstrap offline temporário, mantenha `secret_ocids` sem o nome e use um
-caminho absoluto root-owned `0600` em `secret_file_paths`:
+Cada nome de Secret deve estar em exatamente uma das duas seções. O bootstrap
+inicial da console sempre usa um caminho absoluto root-owned `0600` em
+`secret_file_paths`:
 
 ```json
 {
@@ -215,11 +217,11 @@ caminho absoluto root-owned `0600` em `secret_file_paths`:
 }
 ```
 
-Depois que o Vault estiver disponível, mova apenas
-`console_bootstrap_password` de `secret_file_paths` para `secret_ocids` e
-execute novamente o bootstrap. O arquivo materializado em
-`/etc/s3-oci-migration/secrets/` é atualizado sem alterar usuários ou dados de
-migração.
+Após a primeira troca de senha do administrador, remova o arquivo local de
+bootstrap e a referência `console_bootstrap_password`; ele não deve ser movido
+para Vault nem reutilizado. O arquivo materializado correspondente em
+`/etc/s3-oci-migration/secrets/` também deve ser removido antes de expor um
+bind não-loopback.
 
 ```bash
 sudo chmod 0600 /etc/s3-oci-migration/oci-runtime.json

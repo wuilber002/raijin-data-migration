@@ -579,6 +579,9 @@ def test_oracle_linux_podman_launcher_executes_the_private_topology_in_dry_run(t
     (install / "scripts" / "web-bind.sh").write_text(
         Path("scripts/web-bind.sh").read_text(encoding="utf-8"), encoding="utf-8"
     )
+    (install / "scripts" / "console-auth-lifecycle.sh").write_text(
+        Path("scripts/console-auth-lifecycle.sh").read_text(encoding="utf-8"), encoding="utf-8"
+    )
     data = tmp_path / "data"; (data / "fujin-payloads").mkdir(parents=True)
     secret = tmp_path / "secrets"; secret.mkdir(); (secret / "fujin_local_admin_token").write_text("token", encoding="utf-8")
     runtime = tmp_path / "oci-local.json"; runtime.write_text("{}", encoding="utf-8")

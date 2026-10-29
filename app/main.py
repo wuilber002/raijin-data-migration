@@ -2159,6 +2159,10 @@ def ensure_console_auth_bootstrap() -> None:
             session.add(ConsoleAuthSettings(id=1))
         existing = session.scalar(select(ConsoleUser.id).limit(1))
         if existing is None:
+            if not web_auth_settings.bootstrap_required:
+                raise RuntimeError(
+                    "Local web authentication has no console user; bootstrap must be re-enabled on loopback"
+                )
             password = read_password_file(str(web_auth_settings.bootstrap_password_file))
             user = ConsoleUser(
                 username=str(web_auth_settings.bootstrap_username),
