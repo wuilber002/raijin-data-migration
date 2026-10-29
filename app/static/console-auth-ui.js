@@ -16,7 +16,22 @@
       finally { location.assign("/login"); }
     });
     actions?.append(logout);
-    if (identity.user.role !== "ADMIN") return;
+    if (identity.user.role !== "ADMIN") {
+      // Settings contains only tenancy integration and global scheduling
+      // controls. Do not make an OPERATOR/VIEWER discover administrative
+      // integration blocks that the server must correctly deny anyway.
+      document.querySelector('[data-view="settings"]')?.classList.add("hidden");
+      if (document.getElementById("view-settings")?.classList.contains("active")) {
+        window.showView?.("dashboard");
+      }
+      // An initial settings route can start its asynchronous loaders before
+      // this identity check completes. Later route/language refreshes must
+      // not issue those administrative reads at all.
+      ["loadOciBuckets", "loadAwsConnections", "loadAwsSecrets"].forEach(name => {
+        if (typeof window[name] === "function") window[name] = async () => {};
+      });
+      return;
+    }
 
     const settings = document.getElementById("view-settings");
     if (!settings) return;
