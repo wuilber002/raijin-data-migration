@@ -130,6 +130,11 @@ def test_console_audit_labels_the_target_user_for_user_created_events():
     assert '`${row.event_type} (${row.target})`' in script
 
 
+def test_dashboard_versions_the_injected_console_auth_asset_to_avoid_stale_ui():
+    main = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    assert 'console-auth-ui.js?v={RAIJIN_BUILD_REVISION}' in main
+
+
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():
     catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")

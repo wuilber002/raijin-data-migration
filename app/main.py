@@ -4314,7 +4314,10 @@ def dashboard() -> HTMLResponse:
                    .replace("{{RAIJIN_VERSION}}", RAIJIN_SERVICE_VERSION)
                    .replace("{{RAIJIN_BUILD_REVISION}}", RAIJIN_BUILD_REVISION)
                    .replace("{{FUJIN_VERSION}}", SIMULATOR_SERVICE_VERSION)
-                   .replace("</body>", '<script src="/static/console-auth-ui.js"></script></body>'))
+                   # This asset is injected after the static page is read.
+                   # Give it the deployed revision so a browser cannot retain
+                   # an older auth/profile UI after a rolling update.
+                   .replace("</body>", f'<script src="/static/console-auth-ui.js?v={RAIJIN_BUILD_REVISION}"></script></body>'))
     # The console carries its CSS and JavaScript inline.  A cached document
     # would otherwise mix an old UI with fresh API data after a rollout.
     return HTMLResponse(content=content, headers={"Cache-Control": "no-store"})
