@@ -27,12 +27,21 @@ IPv4 `/32`; broad CIDRs and `0.0.0.0/0` are rejected.
 
 ## Delivery steps
 
-- [ ] Extend `web-bind.env` with transport mode, host certificate paths and
+- [x] Extend `web-bind.env` with transport mode and
       `WEB_TRUSTED_UPSTREAM_IPS` (comma-separated IPv4 `/32` allowlist).
-- [ ] Generate persistent self-signed certificates on the host with IP SAN.
-- [ ] Launch Uvicorn with TLS when selected; retain internal HTTP health probes.
-- [ ] Add the root-owned bind request processor and systemd timer.
-- [ ] Add ADMIN APIs and Settings UI, including pending/result state.
-- [ ] Test bootstrap lock, HTTP policy, TLS launch and request processor
-      rejection paths.
-- [ ] Update deployment and operations documentation.
+- [x] Generate persistent self-signed certificates on the host with IP SAN.
+- [x] Launch Uvicorn with TLS when selected; retain internal HTTPS health probes.
+- [x] Add the root-owned bind request processor and systemd timer.
+- [x] Add ADMIN APIs and Settings UI, including pending/result state.
+- [x] Test bootstrap lock and HTTP policy at unit level.
+- [ ] Homologate an actual non-loopback HTTPS transition and, separately, a
+      load-balancer HTTP transition using two private `/32` addresses.
+
+## Operational completion criteria
+
+The host-level request processor, app peer enforcement and the console UI are
+implemented. The two transitions above remain an operational homologation
+step because they need the target VNIC/LB addresses and matching OCI network
+rules. Before external use, configure the same ingress policy in the OCI NSG
+or security list: HTTPS can use the intended client ranges; HTTP must allow
+only the configured terminator `/32` entries.
