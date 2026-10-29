@@ -294,6 +294,18 @@ def test_console_username_accepts_existing_aliases_and_corporate_email_logins():
         main.normalize_username("igor.nicoli@oracle")
 
 
+def test_only_administrators_without_mfa_receive_enrollment_recommendation():
+    password_hash = PasswordHasher().hash("a secure test password")
+    admin_without_mfa = main.ConsoleUser(username="admin", password_hash=password_hash, role=ConsoleRole.ADMIN)
+    admin_with_mfa = main.ConsoleUser(username="admin-mfa", password_hash=password_hash,
+                                      role=ConsoleRole.ADMIN, mfa_enabled=True)
+    operator_without_mfa = main.ConsoleUser(username="operator", password_hash=password_hash,
+                                            role=ConsoleRole.OPERATOR)
+    assert main.admin_mfa_enrollment_recommended(admin_without_mfa)
+    assert not main.admin_mfa_enrollment_recommended(admin_with_mfa)
+    assert not main.admin_mfa_enrollment_recommended(operator_without_mfa)
+
+
 def test_bootstrap_revokes_existing_sessions_after_service_restart(tmp_path, monkeypatch):
     bootstrap = tmp_path / "bootstrap-password"
     bootstrap.write_text("a locally protected bootstrap password", encoding="utf-8")

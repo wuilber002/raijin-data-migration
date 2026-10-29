@@ -613,6 +613,7 @@
   "Endpoint da console": "Endpoint da console",
   "Gerenciamento de usuários": "Gerenciamento de usuários",
   "Autenticação em duas etapas": "Autenticação em duas etapas",
+  "Esta conta administrativa precisa ativar a autenticação em duas etapas.": "Esta conta administrativa precisa ativar a autenticação em duas etapas.",
   "Adicione esta chave ao seu aplicativo autenticador e informe o código de seis dígitos para confirmar.": "Adicione esta chave ao seu aplicativo autenticador e informe o código de seis dígitos para confirmar.",
   "Chave de configuração": "Chave de configuração",
   "Código de autenticação": "Código de autenticação",

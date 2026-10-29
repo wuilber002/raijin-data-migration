@@ -2190,7 +2190,7 @@ async def console_authentication_guard(request: FastAPIRequest, call_next):
                     utc_timestamp(browser_session.expires_at) > now:
                 user = browser_session.user
                 principal = {"id": user.id, "username": user.username, "role": user.role,
-                             "must_change_password": user.must_change_password}
+                             "must_change_password": user.must_change_password, "mfa_enabled": user.mfa_enabled}
                 session_id, csrf_hash = browser_session.id, browser_session.csrf_hash
                 if (now - utc_timestamp(browser_session.last_seen_at)).total_seconds() >= 60:
                     browser_session.last_seen_at = now
@@ -4075,6 +4075,11 @@ def console_user_view(user: ConsoleUser) -> dict:
             "last_login_at": user.last_login_at, "created_at": user.created_at}
 
 
+def admin_mfa_enrollment_recommended(user: ConsoleUser) -> bool:
+    """MFA stays optional at this stage, but is continuously prompted for ADMIN."""
+    return user.role == ConsoleRole.ADMIN and not user.mfa_enabled
+
+
 CONSOLE_EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
@@ -4321,7 +4326,8 @@ def console_login(payload: ConsoleLoginRequest, request: FastAPIRequest,
         ConsoleAuthAuditEvent.created_at < now - timedelta(days=CONSOLE_AUTH_EVENT_RETENTION_DAYS)))
     session.commit()
     response = JSONResponse(jsonable_encoder({"user": console_user_view(user), "csrf_token": csrf,
-                                              "must_change_password": user.must_change_password}))
+                                              "must_change_password": user.must_change_password,
+                                              "mfa_enrollment_recommended": admin_mfa_enrollment_recommended(user)}))
     set_console_cookies(response, token, csrf)
     return response
 
@@ -4354,7 +4360,8 @@ def console_verify_mfa(payload: ConsoleMfaVerifyRequest, request: FastAPIRequest
                detail={"mfa": True})
     session.commit()
     response = JSONResponse(jsonable_encoder({"user": console_user_view(user), "csrf_token": csrf,
-                                              "must_change_password": user.must_change_password}))
+                                              "must_change_password": user.must_change_password,
+                                              "mfa_enrollment_recommended": admin_mfa_enrollment_recommended(user)}))
     set_console_cookies(response, token, csrf)
     return response
 
@@ -4365,7 +4372,8 @@ def console_auth_me(request: FastAPIRequest) -> dict:
         return {"enabled": False}
     principal = console_principal(request)
     csrf = request.cookies.get(CONSOLE_CSRF_COOKIE, "")
-    return {"enabled": True, "user": principal, "csrf_token": csrf}
+    return {"enabled": True, "user": principal, "csrf_token": csrf,
+            "mfa_enrollment_recommended": principal["role"] == ConsoleRole.ADMIN and not principal["mfa_enabled"]}
 
 
 @app.get("/api/auth/profile")
@@ -4497,7 +4505,8 @@ def console_change_password(payload: ConsolePasswordChange, request: FastAPIRequ
             ).touch(exist_ok=True)
         except OSError:
             pass
-    response = JSONResponse(jsonable_encoder({"user": console_user_view(user), "csrf_token": csrf}))
+    response = JSONResponse(jsonable_encoder({"user": console_user_view(user), "csrf_token": csrf,
+                                              "mfa_enrollment_recommended": admin_mfa_enrollment_recommended(user)}))
     set_console_cookies(response, token, csrf)
     return response
 

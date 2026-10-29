@@ -315,6 +315,23 @@
       closeUserMenu();
       openProfile().catch(error => profileMessage(error.message));
     });
+    let adminMfaAlert;
+    const renderAdminMfaAlert = enabled => {
+      if (!adminMfaAlert) return;
+      adminMfaAlert.classList.toggle("hidden", Boolean(enabled));
+      adminMfaAlert.querySelector("span").textContent = uiText("Esta conta administrativa precisa ativar a autenticação em duas etapas.");
+      adminMfaAlert.querySelector("button").textContent = uiText("Configurar autenticador");
+    };
+    if (identity.user.role === "ADMIN" && identity.mfa_enrollment_recommended) {
+      adminMfaAlert = document.createElement("section");
+      adminMfaAlert.className = "alert warning console-admin-mfa-alert";
+      adminMfaAlert.setAttribute("role", "alert");
+      adminMfaAlert.style.cssText = "position:fixed;z-index:28;top:138px;left:50%;width:min(900px,calc(100vw - 2rem));margin:0;transform:translateX(-50%);box-shadow:0 8px 22px #0007;display:flex;align-items:center;justify-content:space-between;gap:.75rem;";
+      adminMfaAlert.innerHTML = `<span></span><button type="button" class="secondary"></button>`;
+      adminMfaAlert.querySelector("button").addEventListener("click", () => openProfile().catch(error => profileMessage(error.message)));
+      document.body.append(adminMfaAlert);
+      renderAdminMfaAlert(false);
+    }
     profileModal.querySelector("[data-close-profile]").addEventListener("click", () => {
       if (window.closeModal) window.closeModal("#console-profile-modal"); else profileModal.classList.add("hidden");
     });
@@ -359,6 +376,7 @@
         profileModal.querySelector("#console-mfa-start").classList.add("hidden");
         profileModal.querySelector("#console-mfa-state").textContent = uiText("Autenticador configurado.");
         profileMessage("Autenticação em duas etapas ativada.");
+        renderAdminMfaAlert(true);
       } catch (error) { profileMessage(error.message); }
     });
     document.addEventListener("raijin:language-changed", () => {
@@ -366,6 +384,7 @@
       applyAuthTranslations(profileModal);
       userMenuPanel.setAttribute("aria-label", uiText("Ações do usuário"));
       profileMessage(profileMessageSource);
+      if (adminMfaAlert && !adminMfaAlert.classList.contains("hidden")) renderAdminMfaAlert(false);
     });
     if (identity.user.role !== "ADMIN") {
       // Settings contains only tenancy integration and global scheduling

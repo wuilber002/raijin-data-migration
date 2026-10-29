@@ -613,6 +613,7 @@
   "Endpoint da console": "Console endpoint",
   "Gerenciamento de usuários": "User management",
   "Autenticação em duas etapas": "Two-step authentication",
+  "Esta conta administrativa precisa ativar a autenticação em duas etapas.": "This administrative account must enable two-step authentication.",
   "Escaneie o QR Code com seu aplicativo autenticador.": "Scan the QR Code with your authenticator app.",
   "QR Code para configurar o autenticador": "QR Code to set up the authenticator",
   "Informe um código de seis dígitos.": "Enter a six-digit code.",
