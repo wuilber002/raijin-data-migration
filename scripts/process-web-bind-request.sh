@@ -28,6 +28,10 @@ try:
     ))
     for row in rows:
         name = str(row.get("ifname") or "interface")
+        # Container bridges are host-local plumbing, not operator-facing
+        # listener choices. Keep physical/VNIC and ordinary named interfaces.
+        if name == "lo" or name.startswith(("podman", "docker", "cni", "veth", "br-")):
+            continue
         for info in row.get("addr_info") or []:
             address = str(info.get("local") or "")
             if info.get("family") != "inet" or address in {"", "127.0.0.1"}:
