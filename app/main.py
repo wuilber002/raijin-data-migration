@@ -1162,7 +1162,7 @@ class ConsoleUser(Base):
     __tablename__ = "console_users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    username: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(512))
     role: Mapped[str] = mapped_column(String(16), default=ConsoleRole.VIEWER, index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -1936,7 +1936,7 @@ class DeepAuditStart(BaseModel):
 
 
 class ConsoleLoginRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=64)
+    username: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=1024)
 
 
@@ -1960,7 +1960,7 @@ class ConsoleProfileUpdate(BaseModel):
 
 
 class ConsoleUserCreate(BaseModel):
-    username: str = Field(min_length=3, max_length=64)
+    username: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=14, max_length=1024)
     role: ConsoleRole = ConsoleRole.VIEWER
     must_change_password: bool = True
@@ -2286,6 +2286,15 @@ def create_schema() -> None:
         }.items():
             if column not in existing_console_user_columns:
                 connection.execute(text(f"ALTER TABLE console_users ADD COLUMN {column} {sql_type}"))
+        # Console usernames originally fit only short aliases. Widening this
+        # column is safe and allows a full corporate e-mail login without
+        # changing existing identities or the unique index.
+        username_column = next(
+            (column for column in inspect(engine).get_columns("console_users") if column["name"] == "username"),
+            None,
+        )
+        if engine.dialect.name == "postgresql" and username_column and getattr(username_column["type"], "length", None) != 320:
+            connection.execute(text("ALTER TABLE console_users ALTER COLUMN username TYPE VARCHAR(320)"))
     ensure_console_auth_bootstrap()
     # Lightweight additive migrations keep the single-VM deployment upgradeable. No
     # destructive schema operation is performed automatically.

@@ -251,6 +251,13 @@ def test_console_profile_normalization_is_safe_and_does_not_change_username():
         main.normalize_console_profile("Ana", "not-an-email")
 
 
+def test_console_username_accepts_existing_aliases_and_corporate_email_logins():
+    assert main.normalize_username("operator-hml") == "operator-hml"
+    assert main.normalize_username("Igor.Nicoli@Oracle.Com") == "igor.nicoli@oracle.com"
+    with pytest.raises(ValueError, match="email address"):
+        main.normalize_username("igor.nicoli@oracle")
+
+
 def test_bootstrap_revokes_existing_sessions_after_service_restart(tmp_path, monkeypatch):
     bootstrap = tmp_path / "bootstrap-password"
     bootstrap.write_text("a locally protected bootstrap password", encoding="utf-8")

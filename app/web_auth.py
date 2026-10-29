@@ -39,7 +39,15 @@ class ConsoleRole(StrEnum):
     VIEWER = "VIEWER"
 
 
+# Retain the concise operational usernames used by existing installations,
+# while allowing an individual's normalized corporate e-mail address to be
+# their login identity. E-mail aliases remain an identity, not a contact field.
 USERNAME_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{2,63}$")
+EMAIL_LOGIN_PATTERN = re.compile(
+    r"^[a-z0-9][a-z0-9._+-]{0,63}@"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
 MINIMUM_PASSWORD_LENGTH = 14
 # A small denylist is intentionally a floor, not a substitute for length and
 # future breached-password screening. It rejects the obvious credentials that
@@ -151,9 +159,9 @@ class WebAuthSettings:
         )
         bootstrap_username = (values.get("RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME") or "").strip().lower() or None
         bootstrap_password_file = (values.get("RAIJIN_WEB_AUTH_BOOTSTRAP_PASSWORD_FILE") or "").strip() or None
-        if bootstrap_username and not USERNAME_PATTERN.fullmatch(bootstrap_username):
+        if bootstrap_username and not valid_console_username(bootstrap_username):
             raise WebAuthConfigurationError(
-                "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME must be 3-64 lowercase username characters"
+                "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME must be a supported lowercase username or email login"
             )
         if bootstrap_password_file and not Path(bootstrap_password_file).is_absolute():
             raise WebAuthConfigurationError(
@@ -197,10 +205,14 @@ def load_web_auth_settings(environ: dict[str, str] | None = None) -> WebAuthSett
     return WebAuthSettings.from_environ(environ)
 
 
+def valid_console_username(value: str) -> bool:
+    return bool(USERNAME_PATTERN.fullmatch(value) or EMAIL_LOGIN_PATTERN.fullmatch(value))
+
+
 def normalize_username(value: str) -> str:
     username = str(value or "").strip().lower()
-    if not USERNAME_PATTERN.fullmatch(username):
-        raise ValueError("Username must contain 3-64 lowercase letters, numbers, dots, hyphens, or underscores")
+    if len(username) > 320 or not valid_console_username(username):
+        raise ValueError("Username must be a supported lowercase username or email address")
     return username
 
 

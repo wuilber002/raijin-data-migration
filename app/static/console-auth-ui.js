@@ -414,7 +414,7 @@
       <hr class="console-section-divider">
       <h3 data-console-i18n="Gerenciamento de usuários"></h3>
       <form id="console-create-user" class="row">
-        <label class="field"><span data-console-i18n="Usuário"></span><input name="username" pattern="[a-z][a-z0-9_.-]{2,63}" required></label>
+        <label class="field"><span data-console-i18n="Usuário"></span><input name="username" pattern="(?:[a-z][a-z0-9_.-]{2,63}|[a-z0-9][a-z0-9._+-]{0,63}@[a-z0-9-]+(?:\.[a-z0-9-]+)+)" required></label>
         <label class="field"><span data-console-i18n="Senha temporária"></span><input name="password" type="password" minlength="14" required></label>
         <label class="field"><span data-console-i18n="Papel"></span><select name="role"><option>VIEWER</option><option>OPERATOR</option><option>ADMIN</option></select></label>
         <button data-console-i18n="Criar usuário"></button>
