@@ -281,10 +281,12 @@
         <p class="hint" id="console-mfa-state"></p>
         <div id="console-mfa-enrollment" class="hidden">
           <p class="hint" data-console-i18n="Adicione esta chave ao seu aplicativo autenticador e informe o código de seis dígitos para confirmar."></p>
+          <div class="console-mfa-fields">
+            <label class="field"><span data-console-i18n="Chave de configuração"></span><input id="console-mfa-secret" readonly></label>
+            <label class="field"><span data-console-i18n="Código de autenticação"></span><input id="console-mfa-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
+          </div>
+          <div class="console-mfa-actions"><button type="button" id="console-mfa-confirm" data-console-i18n="Ativar autenticação em duas etapas"></button><button type="button" id="console-mfa-restart" class="secondary" data-console-i18n="Configurar autenticador"></button></div>
           <figure class="console-mfa-qr"><img id="console-mfa-qr" alt="" width="224" height="224"><figcaption data-console-i18n="Escaneie o QR Code com seu aplicativo autenticador."></figcaption></figure>
-          <label class="field"><span data-console-i18n="Chave de configuração"></span><input id="console-mfa-secret" readonly></label>
-          <label class="field"><span data-console-i18n="Código de autenticação"></span><input id="console-mfa-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
-          <button type="button" id="console-mfa-confirm" data-console-i18n="Ativar autenticação em duas etapas"></button>
         </div>
         <button type="button" id="console-mfa-start" data-console-i18n="Configurar autenticador"></button>
         <div id="console-mfa-recovery" class="hidden"><p class="warning" data-console-i18n="Guarde estes códigos de recuperação em local seguro. Eles não serão exibidos novamente."></p><code id="console-mfa-recovery-codes"></code></div>
@@ -304,6 +306,9 @@
       ["username", "display_name", "email"].forEach(field => { form.elements[field].value = data[field] || ""; });
       profileModal.querySelector("#console-mfa-state").textContent = data.mfa_enabled ? uiText("Autenticador configurado.") : uiText("Nenhum autenticador configurado.");
       profileModal.querySelector("#console-mfa-start").classList.toggle("hidden", Boolean(data.mfa_enabled));
+      profileModal.querySelector("#console-mfa-enrollment").classList.add("hidden");
+      profileModal.querySelector("#console-mfa-recovery").classList.add("hidden");
+      profileModal.querySelector("#console-mfa-code").value = "";
       if (window.openModal) window.openModal("#console-profile-modal"); else profileModal.classList.remove("hidden");
     };
     profile.addEventListener("click", () => {
@@ -329,7 +334,7 @@
         form.reset(); profileMessage("Senha alterada. As demais sessões foram encerradas.");
       } catch (error) { profileMessage(error.message); }
     });
-    profileModal.querySelector("#console-mfa-start").addEventListener("click", async () => {
+    const startMfaEnrollment = async () => {
       try {
         const data = await apiCall("/api/auth/mfa/enrollment", {method:"POST"});
         profileModal.querySelector("#console-mfa-secret").value = data.secret;
@@ -337,12 +342,16 @@
         qr.src = `${data.qr_code_url}?v=${Date.now()}`;
         qr.alt = uiText("QR Code para configurar o autenticador");
         profileModal.querySelector("#console-mfa-enrollment").classList.remove("hidden");
+        profileModal.querySelector("#console-mfa-start").classList.add("hidden");
         profileMessage("Informe o código exibido no autenticador para concluir a ativação.");
       } catch (error) { profileMessage(error.message); }
-    });
+    };
+    profileModal.querySelector("#console-mfa-start").addEventListener("click", startMfaEnrollment);
+    profileModal.querySelector("#console-mfa-restart").addEventListener("click", startMfaEnrollment);
     profileModal.querySelector("#console-mfa-confirm").addEventListener("click", async () => {
       try {
         const code = profileModal.querySelector("#console-mfa-code").value;
+        if (!/^\d{6}$/.test(code)) { profileMessage("Informe um código de seis dígitos."); return; }
         const data = await apiCall("/api/auth/mfa/enrollment/confirm", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({code})});
         profileModal.querySelector("#console-mfa-recovery-codes").textContent = data.recovery_codes.join("  ");
         profileModal.querySelector("#console-mfa-recovery").classList.remove("hidden");
