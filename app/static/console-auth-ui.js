@@ -279,21 +279,18 @@
         <hr>
         <h3 data-console-i18n="Autenticação em duas etapas"></h3>
         <p class="hint" id="console-mfa-state"></p>
-        <div id="console-mfa-enrollment" class="hidden">
-          <p class="hint" data-console-i18n="Adicione esta chave ao seu aplicativo autenticador e informe o código de seis dígitos para confirmar."></p>
-          <div class="console-mfa-fields">
-            <label class="field"><span data-console-i18n="Chave de configuração"></span><input id="console-mfa-secret" readonly></label>
-            <label class="field"><span data-console-i18n="Código de autenticação"></span><input id="console-mfa-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
-          </div>
-          <div class="console-mfa-actions"><button type="button" id="console-mfa-confirm" data-console-i18n="Ativar autenticação em duas etapas"></button><button type="button" id="console-mfa-restart" class="secondary" data-console-i18n="Configurar autenticador"></button></div>
-          <figure class="console-mfa-qr"><img id="console-mfa-qr" alt="" width="224" height="224"><figcaption data-console-i18n="Escaneie o QR Code com seu aplicativo autenticador."></figcaption></figure>
-        </div>
+        <div id="console-mfa-authenticators" class="report-content"></div>
         <button type="button" id="console-mfa-start" data-console-i18n="Configurar autenticador"></button>
-        <div id="console-mfa-recovery" class="hidden"><p class="warning" data-console-i18n="Guarde estes códigos de recuperação em local seguro. Eles não serão exibidos novamente."></p><code id="console-mfa-recovery-codes"></code></div>
         <p id="console-profile-message" class="hint" role="status"></p>
       </div>`;
     document.body.append(profileModal);
     applyAuthTranslations(profileModal);
+    const mfaModal = document.createElement("section");
+    mfaModal.id = "console-mfa-enrollment-modal";
+    mfaModal.className = "modal hidden";
+    mfaModal.setAttribute("role", "dialog"); mfaModal.setAttribute("aria-modal", "true");
+    mfaModal.innerHTML = `<div class="modal-panel console-profile-panel"><div class="modal-header"><h2 data-console-i18n="Autenticação em duas etapas"></h2><button type="button" class="secondary" data-close-mfa data-console-i18n="Fechar"></button></div><p class="hint" data-console-i18n="Adicione esta chave ao seu aplicativo autenticador e informe o código de seis dígitos para confirmar."></p><div class="console-mfa-fields"><label class="field"><span data-console-i18n="Chave de configuração"></span><input id="console-mfa-secret" readonly></label><label class="field"><span data-console-i18n="Código de autenticação"></span><input id="console-mfa-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label></div><figure class="console-mfa-qr"><img id="console-mfa-qr" alt="" width="224" height="224"><figcaption data-console-i18n="Escaneie o QR Code com seu aplicativo autenticador."></figcaption></figure><div class="console-mfa-actions"><button type="button" id="console-mfa-confirm" data-console-i18n="Ativar autenticação em duas etapas"></button></div><div id="console-mfa-recovery" class="hidden"><p class="warning" data-console-i18n="Guarde estes códigos de recuperação em local seguro. Eles não serão exibidos novamente."></p><code id="console-mfa-recovery-codes"></code></div><p id="console-mfa-message" class="hint" role="status"></p></div>`;
+    document.body.append(mfaModal); applyAuthTranslations(mfaModal);
     let profileMessageSource = "";
     const profileMessage = value => {
       profileMessageSource = value || "";
@@ -305,10 +302,17 @@
       const form = profileModal.querySelector("#console-profile-form");
       ["username", "display_name", "email"].forEach(field => { form.elements[field].value = data[field] || ""; });
       profileModal.querySelector("#console-mfa-state").textContent = data.mfa_enabled ? uiText("Autenticador configurado.") : uiText("Nenhum autenticador configurado.");
-      profileModal.querySelector("#console-mfa-start").classList.toggle("hidden", Boolean(data.mfa_enabled));
-      profileModal.querySelector("#console-mfa-enrollment").classList.add("hidden");
-      profileModal.querySelector("#console-mfa-recovery").classList.add("hidden");
-      profileModal.querySelector("#console-mfa-code").value = "";
+      const authenticators = Array.isArray(data.mfa_authenticators) ? data.mfa_authenticators : [];
+      const list = profileModal.querySelector("#console-mfa-authenticators");
+      list.innerHTML = authenticators.length ? `<table><thead><tr><th>${uiText("Autenticador")}</th><th>${uiText("Último uso")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${authenticators.map(item => `<tr><td>${escapeHtml(item.label)}</td><td>${localTime(item.last_used_at)}</td><td><button type="button" class="danger" data-remove-mfa="${item.id}">${uiText("Remover")}</button></td></tr>`).join("")}</tbody></table>` : "";
+      list.querySelectorAll("[data-remove-mfa]").forEach(button => button.addEventListener("click", async () => {
+        if (!window.confirm(uiText("Remover este autenticador? As outras sessões serão encerradas."))) return;
+        try { await apiCall(`/api/auth/mfa/authenticators/${button.dataset.removeMfa}`, {method:"DELETE"}); await openProfile(); renderAdminMfaAlert(false); }
+        catch (error) { profileMessage(error.message); }
+      }));
+      const start = profileModal.querySelector("#console-mfa-start");
+      start.disabled = authenticators.length >= 2;
+      start.title = authenticators.length >= 2 ? uiText("O limite de dois autenticadores já foi atingido.") : "";
       if (window.openModal) window.openModal("#console-profile-modal"); else profileModal.classList.remove("hidden");
     };
     profile.addEventListener("click", () => {
@@ -328,7 +332,7 @@
       adminMfaAlert = document.createElement("section");
       adminMfaAlert.className = "alert warning console-admin-mfa-alert";
       adminMfaAlert.setAttribute("role", "alert");
-      adminMfaAlert.style.cssText = "position:fixed;z-index:31;top:78px;left:0;width:100%;margin:0;padding:.55rem max(1.4rem,calc((100vw - 1440px)/2 + 2rem));border:0;border-bottom:1px solid #f87171;border-radius:0;background:#991b1b;color:#fee2e2;box-shadow:0 5px 14px #0008;display:flex;align-items:center;justify-content:space-between;gap:.75rem;font-weight:800;";
+      adminMfaAlert.style.cssText = "position:fixed;z-index:29;top:78px;left:0;width:100%;margin:0;padding:.55rem max(1.4rem,calc((100vw - 1440px)/2 + 2rem));border:0;border-bottom:1px solid #f87171;border-radius:0;background:#991b1b;color:#fee2e2;box-shadow:0 5px 14px #0008;display:flex;align-items:center;justify-content:space-between;gap:.75rem;font-weight:800;";
       adminMfaAlert.innerHTML = `<span></span><button type="button" class="secondary"></button>`;
       adminMfaAlert.querySelector("button").addEventListener("click", () => openProfile().catch(error => profileMessage(error.message)));
       document.body.append(adminMfaAlert);
@@ -354,37 +358,40 @@
         form.reset(); profileMessage("Senha alterada. As demais sessões foram encerradas.");
       } catch (error) { profileMessage(error.message); }
     });
+    const mfaMessage = value => { mfaModal.querySelector("#console-mfa-message").textContent = value ? uiText(value) : ""; };
     const startMfaEnrollment = async () => {
       try {
         const data = await apiCall("/api/auth/mfa/enrollment", {method:"POST"});
-        profileModal.querySelector("#console-mfa-secret").value = data.secret;
-        const qr = profileModal.querySelector("#console-mfa-qr");
+        mfaModal.querySelector("#console-mfa-secret").value = data.secret;
+        const qr = mfaModal.querySelector("#console-mfa-qr");
         qr.src = `${data.qr_code_url}?v=${Date.now()}`;
         qr.alt = uiText("QR Code para configurar o autenticador");
-        profileModal.querySelector("#console-mfa-enrollment").classList.remove("hidden");
-        profileModal.querySelector("#console-mfa-start").classList.add("hidden");
-        profileMessage("Informe o código exibido no autenticador para concluir a ativação.");
-      } catch (error) { profileMessage(error.message); }
+        mfaMessage("Informe o código exibido no autenticador para concluir a ativação.");
+      } catch (error) { mfaMessage(error.message); }
     };
-    profileModal.querySelector("#console-mfa-start").addEventListener("click", startMfaEnrollment);
-    profileModal.querySelector("#console-mfa-restart").addEventListener("click", startMfaEnrollment);
-    profileModal.querySelector("#console-mfa-confirm").addEventListener("click", async () => {
+    profileModal.querySelector("#console-mfa-start").addEventListener("click", () => {
+      mfaModal.querySelector("#console-mfa-secret").value = "";
+      mfaModal.querySelector("#console-mfa-code").value = ""; mfaModal.querySelector("#console-mfa-qr").removeAttribute("src");
+      mfaModal.querySelector("#console-mfa-recovery").classList.add("hidden"); mfaMessage("");
+      if (window.openModal) window.openModal("#console-mfa-enrollment-modal"); else mfaModal.classList.remove("hidden");
+      startMfaEnrollment();
+    });
+    mfaModal.querySelector("[data-close-mfa]").addEventListener("click", () => { if (window.closeModal) window.closeModal("#console-mfa-enrollment-modal"); else mfaModal.classList.add("hidden"); openProfile().catch(() => {}); });
+    mfaModal.querySelector("#console-mfa-confirm").addEventListener("click", async () => {
       try {
-        const code = profileModal.querySelector("#console-mfa-code").value;
-        if (!/^\d{6}$/.test(code)) { profileMessage("Informe um código de seis dígitos."); return; }
+        const code = mfaModal.querySelector("#console-mfa-code").value;
+        if (!/^\d{6}$/.test(code)) { mfaMessage("Informe um código de seis dígitos."); return; }
         const data = await apiCall("/api/auth/mfa/enrollment/confirm", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({code})});
-        profileModal.querySelector("#console-mfa-recovery-codes").textContent = data.recovery_codes.join("  ");
-        profileModal.querySelector("#console-mfa-recovery").classList.remove("hidden");
-        profileModal.querySelector("#console-mfa-enrollment").classList.add("hidden");
-        profileModal.querySelector("#console-mfa-start").classList.add("hidden");
-        profileModal.querySelector("#console-mfa-state").textContent = uiText("Autenticador configurado.");
-        profileMessage("Autenticação em duas etapas ativada.");
+        mfaModal.querySelector("#console-mfa-recovery-codes").textContent = data.recovery_codes.join("  ");
+        mfaModal.querySelector("#console-mfa-recovery").classList.remove("hidden");
+        mfaMessage("Autenticação em duas etapas ativada.");
         renderAdminMfaAlert(true);
-      } catch (error) { profileMessage(error.message); }
+      } catch (error) { mfaMessage(error.message); }
     });
     document.addEventListener("raijin:language-changed", () => {
       applyAuthTranslations(userMenu);
       applyAuthTranslations(profileModal);
+      applyAuthTranslations(mfaModal);
       userMenuPanel.setAttribute("aria-label", uiText("Ações do usuário"));
       profileMessage(profileMessageSource);
       if (adminMfaAlert && !adminMfaAlert.classList.contains("hidden")) renderAdminMfaAlert(false);

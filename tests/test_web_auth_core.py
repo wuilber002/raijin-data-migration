@@ -306,6 +306,34 @@ def test_only_administrators_without_mfa_receive_enrollment_recommendation():
     assert not main.admin_mfa_enrollment_recommended(operator_without_mfa)
 
 
+def test_legacy_mfa_is_migrated_and_a_user_can_remove_one_of_two_authenticators(tmp_path, monkeypatch):
+    database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'multiple-mfa.db'}")
+    monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))
+    main.Base.metadata.create_all(database)
+    with main.SessionLocal() as session:
+        user = main.ConsoleUser(username="admin", password_hash=PasswordHasher().hash("a secure test password"),
+                                role=ConsoleRole.ADMIN, mfa_enabled=True,
+                                mfa_secret_encrypted=main.mfa_encrypt("JBSWY3DPEHPK3PXP"))
+        session.add(user); session.commit()
+        main.migrate_legacy_mfa_authenticators()
+        authenticators = main.console_mfa_authenticators(session, user.id)
+        assert [item.label for item in authenticators] == ["Authenticator 1"]
+        second = main.ConsoleMfaAuthenticator(user_id=user.id, label="Authenticator 2",
+                                              secret_encrypted=main.mfa_encrypt("KRSXG5A="))
+        session.add(second); session.flush()
+        _, _csrf = main.create_console_session(session, user); session.flush()
+        current = session.scalar(select(main.ConsoleSession).where(main.ConsoleSession.user_id == user.id))
+        request = SimpleNamespace(state=SimpleNamespace(console_principal={"id": user.id},
+                                                        console_session_id=current.id), client=None, headers={})
+        result = main.console_remove_mfa_authenticator(second.id, request, session)
+        assert result["mfa_enabled"] is True
+        assert len(result["mfa_authenticators"]) == 1
+        remaining_id = result["mfa_authenticators"][0]["id"]
+        result = main.console_remove_mfa_authenticator(remaining_id, request, session)
+        assert result["mfa_enabled"] is False
+        assert result["mfa_authenticators"] == []
+
+
 def test_bootstrap_revokes_existing_sessions_after_service_restart(tmp_path, monkeypatch):
     bootstrap = tmp_path / "bootstrap-password"
     bootstrap.write_text("a locally protected bootstrap password", encoding="utf-8")

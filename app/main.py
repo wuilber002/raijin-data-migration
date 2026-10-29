@@ -1171,6 +1171,7 @@ class ConsoleUser(Base):
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     mfa_secret_encrypted: Mapped[str | None] = mapped_column(String(512), nullable=True)
     mfa_pending_secret_encrypted: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    mfa_pending_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -1227,6 +1228,19 @@ class ConsoleMfaRecoveryCode(Base):
     code_hash: Mapped[str] = mapped_column(String(64), unique=True)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ConsoleMfaAuthenticator(Base):
+    """One named TOTP authenticator. A console account may hold at most two."""
+    __tablename__ = "console_mfa_authenticators"
+    __table_args__ = (Index("ix_console_mfa_authenticator_user", "user_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("console_users.id"), index=True)
+    label: Mapped[str] = mapped_column(String(64))
+    secret_encrypted: Mapped[str] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ConsoleAuthAuditEvent(Base):
@@ -1952,6 +1966,10 @@ class ConsoleMfaEnrollConfirm(BaseModel):
     code: str = Field(min_length=6, max_length=12)
 
 
+class ConsoleMfaEnrollStart(BaseModel):
+    label: str | None = Field(default=None, max_length=64)
+
+
 class ConsolePasswordChange(BaseModel):
     current_password: str = Field(default="", max_length=1024)
     new_password: str = Field(min_length=14, max_length=1024)
@@ -2290,6 +2308,7 @@ def create_schema() -> None:
             "email": "VARCHAR(320)",
             "mfa_secret_encrypted": "VARCHAR(512)",
             "mfa_pending_secret_encrypted": "VARCHAR(512)",
+            "mfa_pending_label": "VARCHAR(64)",
             "mfa_enabled": "BOOLEAN NOT NULL DEFAULT FALSE",
         }.items():
             if column not in existing_console_user_columns:
@@ -2320,6 +2339,7 @@ def create_schema() -> None:
                 "WHERE actor_user_id IS NOT NULL AND actor_username IS NULL"
             ))
     ensure_console_auth_bootstrap()
+    migrate_legacy_mfa_authenticators()
     # Lightweight additive migrations keep the single-VM deployment upgradeable. No
     # destructive schema operation is performed automatically.
     expected_columns = {
@@ -4093,9 +4113,12 @@ def normalize_console_profile(display_name: str | None, email: str | None) -> tu
     return name, address
 
 
-def console_profile_view(user: ConsoleUser) -> dict:
+def console_profile_view(user: ConsoleUser, session: Session | None = None) -> dict:
+    authenticators = console_mfa_authenticators(session, user.id) if session else []
     return {"username": user.username, "role": user.role, "display_name": user.display_name,
-            "email": user.email, "last_login_at": user.last_login_at, "mfa_enabled": user.mfa_enabled}
+            "email": user.email, "last_login_at": user.last_login_at, "mfa_enabled": user.mfa_enabled,
+            "mfa_authenticators": [{"id": item.id, "label": item.label, "created_at": item.created_at,
+                                    "last_used_at": item.last_used_at} for item in authenticators]}
 
 
 MAX_CONSOLE_PASSWORD_HISTORY = 12
@@ -4234,6 +4257,32 @@ def generate_recovery_codes(session: Session, user: ConsoleUser) -> list[str]:
     return codes
 
 
+def migrate_legacy_mfa_authenticators() -> None:
+    """Move the pre-multiple-authenticator secret into the additive table."""
+    with SessionLocal() as session:
+        users = session.scalars(select(ConsoleUser).where(
+            ConsoleUser.mfa_secret_encrypted.is_not(None)
+        )).all()
+        changed = False
+        for user in users:
+            exists = session.scalar(select(ConsoleMfaAuthenticator.id).where(
+                ConsoleMfaAuthenticator.user_id == user.id
+            ).limit(1))
+            if not exists:
+                session.add(ConsoleMfaAuthenticator(user_id=user.id, label="Authenticator 1",
+                                                    secret_encrypted=user.mfa_secret_encrypted))
+                user.mfa_enabled = True
+                changed = True
+        if changed:
+            session.commit()
+
+
+def console_mfa_authenticators(session: Session, user_id: int) -> list[ConsoleMfaAuthenticator]:
+    return list(session.scalars(select(ConsoleMfaAuthenticator).where(
+        ConsoleMfaAuthenticator.user_id == user_id
+    ).order_by(ConsoleMfaAuthenticator.created_at, ConsoleMfaAuthenticator.id)))
+
+
 def totp_enrollment_uri(user: ConsoleUser, secret: str) -> str:
     """Build the standard URI consumed by authenticator applications."""
     from urllib.parse import quote
@@ -4244,11 +4293,20 @@ def totp_enrollment_uri(user: ConsoleUser, secret: str) -> str:
 
 
 def mfa_verified_or_recovery(session: Session, user: ConsoleUser, code: str) -> bool:
-    try:
-        if verify_totp(mfa_decrypt(user.mfa_secret_encrypted), code):
-            return True
-    except ValueError:
-        return False
+    authenticators = console_mfa_authenticators(session, user.id)
+    if not authenticators and user.mfa_secret_encrypted:
+        # Compatibility for an in-flight upgraded process before its startup
+        # migration has materialized the legacy secret.
+        authenticators = [ConsoleMfaAuthenticator(secret_encrypted=user.mfa_secret_encrypted,
+                                                   user_id=user.id, label="Authenticator 1")]
+    for authenticator in authenticators:
+        try:
+            if verify_totp(mfa_decrypt(authenticator.secret_encrypted), code):
+                if authenticator.id is not None:
+                    authenticator.last_used_at = utcnow()
+                return True
+        except ValueError:
+            continue
     candidate = hash_opaque_token(re.sub(r"[\s-]", "", str(code)).upper())
     recovery = session.scalar(select(ConsoleMfaRecoveryCode).where(
         ConsoleMfaRecoveryCode.user_id == user.id, ConsoleMfaRecoveryCode.code_hash == candidate,
@@ -4381,7 +4439,7 @@ def console_get_profile(request: FastAPIRequest, session: Session = Depends(get_
     user = session.get(ConsoleUser, console_principal(request)["id"])
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
-    return console_profile_view(user)
+    return console_profile_view(user, session)
 
 
 @app.patch("/api/auth/profile")
@@ -4398,17 +4456,27 @@ def console_update_profile(payload: ConsoleProfileUpdate, request: FastAPIReques
     auth_audit(session, "PROFILE_UPDATED", actor_user_id=user.id, target=user.username,
                request=request, detail={"fields": ["display_name", "email"]})
     session.commit()
-    return console_profile_view(user)
+    return console_profile_view(user, session)
 
 
 @app.post("/api/auth/mfa/enrollment")
-def console_start_mfa_enrollment(request: FastAPIRequest, session: Session = Depends(get_session)) -> dict:
+def console_start_mfa_enrollment(request: FastAPIRequest,
+                                 payload: ConsoleMfaEnrollStart = ConsoleMfaEnrollStart(),
+                                 session: Session = Depends(get_session)) -> dict:
     user = session.get(ConsoleUser, console_principal(request)["id"])
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
+    existing = console_mfa_authenticators(session, user.id)
+    if len(existing) >= 2:
+        raise HTTPException(status_code=409, detail="A maximum of two authenticators is allowed")
+    label = str(payload.label or "").strip() or f"Authenticator {len(existing) + 1}"
+    if any(ord(character) < 32 for character in label):
+        raise HTTPException(status_code=422, detail="Authenticator label contains invalid characters")
     secret = generate_totp_secret()
     user.mfa_pending_secret_encrypted = mfa_encrypt(secret)
-    auth_audit(session, "MFA_ENROLLMENT_STARTED", actor_user_id=user.id, target=user.username, request=request)
+    user.mfa_pending_label = label
+    auth_audit(session, "MFA_ENROLLMENT_STARTED", actor_user_id=user.id, target=user.username, request=request,
+               detail={"label": label})
     session.commit()
     return {"secret": secret, "otpauth_uri": totp_enrollment_uri(user, secret), "issuer": "RAIJIN",
             "username": user.username, "qr_code_url": "/api/auth/mfa/enrollment/qr"}
@@ -4445,11 +4513,40 @@ def console_confirm_mfa_enrollment(payload: ConsoleMfaEnrollConfirm, request: Fa
                    result="DENIED", request=request)
         session.commit()
         raise HTTPException(status_code=422, detail="Invalid authentication code")
-    user.mfa_secret_encrypted, user.mfa_pending_secret_encrypted, user.mfa_enabled = mfa_encrypt(secret), None, True
+    authenticators = console_mfa_authenticators(session, user.id)
+    if len(authenticators) >= 2:
+        raise HTTPException(status_code=409, detail="A maximum of two authenticators is allowed")
+    label = user.mfa_pending_label or f"Authenticator {len(authenticators) + 1}"
+    session.add(ConsoleMfaAuthenticator(user_id=user.id, label=label, secret_encrypted=mfa_encrypt(secret)))
+    user.mfa_pending_secret_encrypted, user.mfa_pending_label, user.mfa_enabled = None, None, True
     recovery_codes = generate_recovery_codes(session, user)
     auth_audit(session, "MFA_ENABLED", actor_user_id=user.id, target=user.username, request=request)
     session.commit()
-    return {"enabled": True, "recovery_codes": recovery_codes}
+    return {"enabled": True, "recovery_codes": recovery_codes, "authenticator_label": label}
+
+
+@app.delete("/api/auth/mfa/authenticators/{authenticator_id}")
+def console_remove_mfa_authenticator(authenticator_id: int, request: FastAPIRequest,
+                                     session: Session = Depends(get_session)) -> dict:
+    user = session.get(ConsoleUser, console_principal(request)["id"])
+    authenticator = session.get(ConsoleMfaAuthenticator, authenticator_id)
+    if not user or not authenticator or authenticator.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Authenticator not found")
+    label = authenticator.label
+    remaining = len(console_mfa_authenticators(session, user.id)) - 1
+    session.delete(authenticator)
+    user.mfa_enabled = remaining > 0
+    if remaining == 0:
+        user.mfa_secret_encrypted = None
+        session.execute(delete(ConsoleMfaRecoveryCode).where(ConsoleMfaRecoveryCode.user_id == user.id))
+    session.execute(delete(ConsoleMfaChallenge).where(ConsoleMfaChallenge.user_id == user.id))
+    session.execute(update(ConsoleSession).where(ConsoleSession.user_id == user.id,
+        ConsoleSession.id != request.state.console_session_id,
+        ConsoleSession.revoked_at.is_(None)).values(revoked_at=utcnow(), revoke_reason="mfa_authenticator_removed"))
+    auth_audit(session, "MFA_AUTHENTICATOR_REMOVED", actor_user_id=user.id, target=user.username,
+               request=request, detail={"label": label, "remaining": remaining})
+    session.commit()
+    return console_profile_view(user, session)
 
 
 @app.post("/api/auth/logout")
@@ -4713,6 +4810,7 @@ def console_delete_user(user_id: int, request: FastAPIRequest,
     session.execute(delete(ConsoleSession).where(ConsoleSession.user_id == user.id))
     session.execute(delete(ConsoleMfaChallenge).where(ConsoleMfaChallenge.user_id == user.id))
     session.execute(delete(ConsoleMfaRecoveryCode).where(ConsoleMfaRecoveryCode.user_id == user.id))
+    session.execute(delete(ConsoleMfaAuthenticator).where(ConsoleMfaAuthenticator.user_id == user.id))
     session.execute(delete(ConsolePasswordHistory).where(ConsolePasswordHistory.user_id == user.id))
     session.delete(user)
     auth_audit(session, "USER_DELETED", actor_user_id=actor["id"], target=username,
@@ -4732,7 +4830,9 @@ def console_reset_user_mfa(user_id: int, request: FastAPIRequest,
         raise HTTPException(status_code=422, detail="Use a new enrollment from your profile to change your own MFA")
     user.mfa_secret_encrypted = None
     user.mfa_pending_secret_encrypted = None
+    user.mfa_pending_label = None
     user.mfa_enabled = False
+    session.execute(delete(ConsoleMfaAuthenticator).where(ConsoleMfaAuthenticator.user_id == user.id))
     session.execute(delete(ConsoleMfaRecoveryCode).where(ConsoleMfaRecoveryCode.user_id == user.id))
     session.execute(update(ConsoleSession).where(ConsoleSession.user_id == user.id,
         ConsoleSession.revoked_at.is_(None)).values(revoked_at=utcnow(), revoke_reason="mfa_reset"))
