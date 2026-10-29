@@ -67,6 +67,7 @@ def test_safe_dashboard_configuration_reads_are_available_to_viewers():
     assert main.auth_route_requirement("/api/activity-refresh-settings", "PUT") is ConsoleRole.ADMIN
     assert main.auth_route_requirement("/api/auth/profile", "GET") is ConsoleRole.VIEWER
     assert main.auth_route_requirement("/api/auth/profile", "PATCH") is ConsoleRole.VIEWER
+    assert main.auth_route_requirement("/api/console-presence/heartbeat", "POST") is ConsoleRole.VIEWER
 
 
 def test_password_policy_rejects_obvious_common_bootstrap_passwords():

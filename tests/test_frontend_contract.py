@@ -135,6 +135,15 @@ def test_dashboard_versions_the_injected_console_auth_asset_to_avoid_stale_ui():
     assert 'console-auth-ui.js?v={RAIJIN_BUILD_REVISION}' in main
 
 
+def test_console_hides_admin_settings_navigation_for_non_admin_roles():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert 'class="gear secondary" data-required-role="ADMIN" data-hide-when-denied' in page
+    assert 'id="activity-auto-refresh" data-required-role="ADMIN"' in page
+    assert "applyRoleControls(identity.user.role)" in script
+    assert "gear[data-required-role=\"ADMIN\"]" in script
+
+
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():
     catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")

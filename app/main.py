@@ -2037,6 +2037,11 @@ def auth_route_requirement(path: str, method: str) -> ConsoleRole | str | None:
         return None
     if path in {"/api/auth/me", "/api/auth/logout", "/api/auth/password", "/api/auth/profile"}:
         return ConsoleRole.VIEWER
+    # Presence is a low-volume, anonymous console metric. It is emitted by
+    # every authenticated browser and must not turn a VIEWER heartbeat into a
+    # recurring authorization-denied audit event.
+    if path == "/api/console-presence/heartbeat":
+        return ConsoleRole.VIEWER
     if path.startswith("/api/tasks/") and method != "GET" and path != "/api/tasks/recover":
         return "INTERNAL"
     if path.startswith("/api/admin/"):

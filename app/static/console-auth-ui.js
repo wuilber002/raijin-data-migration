@@ -3,11 +3,24 @@
   const apiCall = (...args) => window.api ? window.api(...args) : Promise.reject(new Error("Console API is not ready"));
   const uiText = (value, options) => window.t ? window.t(value, options) : value;
   const localTime = value => value ? new Date(value).toLocaleString(window.raijinLocale?.() || "pt-BR") : "—";
+  const roleRank = {VIEWER: 1, OPERATOR: 2, ADMIN: 3};
   const applyAuthTranslations = root => {
     root.querySelectorAll?.("[data-console-i18n]").forEach(node => { node.textContent = uiText(node.dataset.consoleI18n); });
     root.querySelectorAll?.("[data-console-i18n-aria-label]").forEach(node => { node.setAttribute("aria-label", uiText(node.dataset.consoleI18nAriaLabel)); });
     root.querySelectorAll?.("[data-console-i18n-title]").forEach(node => { node.title = uiText(node.dataset.consoleI18nTitle); });
     root.querySelectorAll?.("[data-console-i18n-placeholder]").forEach(node => { node.placeholder = uiText(node.dataset.consoleI18nPlaceholder); });
+  };
+  const applyRoleControls = role => {
+    const currentRank = roleRank[role] || 0;
+    document.querySelectorAll("[data-required-role]").forEach(control => {
+      const permitted = currentRank >= (roleRank[control.dataset.requiredRole] || Infinity);
+      if (control.dataset.hideWhenDenied !== undefined) {
+        control.classList.toggle("hidden", !permitted);
+        return;
+      }
+      if ("disabled" in control) control.disabled = !permitted;
+      control.setAttribute("aria-disabled", String(!permitted));
+    });
   };
 
   async function install() {
@@ -18,6 +31,8 @@
     let identity;
     try { identity = await apiCall("/api/auth/me"); } catch (_) { return; }
     if (!identity.enabled) return;
+    window.raijinConsoleRole = identity.user.role;
+    applyRoleControls(identity.user.role);
     const actions = document.querySelector(".banner-actions");
     const userMenu = document.createElement("div");
     userMenu.className = "console-user-menu";
@@ -140,6 +155,7 @@
       // controls. Do not make an OPERATOR/VIEWER discover administrative
       // integration blocks that the server must correctly deny anyway.
       document.querySelector('[data-view="settings"]')?.classList.add("hidden");
+      document.querySelector('.gear[data-required-role="ADMIN"]')?.classList.add("hidden");
       if (document.getElementById("view-settings")?.classList.contains("active")) {
         window.showView?.("dashboard");
       }
