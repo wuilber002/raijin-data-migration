@@ -91,6 +91,8 @@ CONSOLE_LOGIN_WINDOW_SECONDS = 15 * 60
 CONSOLE_LOGIN_MAX_FAILURES = 10
 CONSOLE_LOGIN_SOFT_FAILURES = 5
 CONSOLE_LOGIN_SOFT_WINDOW_SECONDS = 60
+CONSOLE_AUTH_ALERT_WINDOW_SECONDS = 15 * 60
+CONSOLE_AUTH_DENIED_ALERT_THRESHOLD = 5
 CONSOLE_AUTH_EVENT_RETENTION_DAYS = 90
 CONSOLE_LOGIN_ATTEMPT_RETENTION_DAYS = 30
 
@@ -3996,6 +3998,61 @@ def console_auth_settings_view(settings: ConsoleAuthSettings) -> dict:
     return {"password_history_count": int(settings.password_history_count or 0)}
 
 
+def console_auth_security_summary(session: Session, *, now: datetime | None = None) -> dict:
+    """Return aggregate console-security signals without exposing identities.
+
+    This is deliberately an ADMIN-only read model.  It reports counts and
+    thresholds only: usernames, origin fingerprints, credentials and session
+    tokens never leave the audit tables through this endpoint.
+    """
+    now = now or utcnow()
+    alert_cutoff = now - timedelta(seconds=CONSOLE_AUTH_ALERT_WINDOW_SECONDS)
+    soft_cutoff = now - timedelta(seconds=CONSOLE_LOGIN_SOFT_WINDOW_SECONDS)
+    failed_login_events = int(session.scalar(select(func.count(ConsoleAuthAuditEvent.id)).where(
+        ConsoleAuthAuditEvent.event_type.in_(["LOGIN_FAILED", "LOGIN_RATE_LIMITED"]),
+        ConsoleAuthAuditEvent.created_at >= alert_cutoff,
+    )) or 0)
+    rate_limited_events = int(session.scalar(select(func.count(ConsoleAuthAuditEvent.id)).where(
+        ConsoleAuthAuditEvent.event_type == "LOGIN_RATE_LIMITED",
+        ConsoleAuthAuditEvent.created_at >= alert_cutoff,
+    )) or 0)
+    denied_events = int(session.scalar(select(func.count(ConsoleAuthAuditEvent.id)).where(
+        ConsoleAuthAuditEvent.event_type.in_(["AUTHORIZATION_DENIED", "CSRF_REJECTED"]),
+        ConsoleAuthAuditEvent.created_at >= alert_cutoff,
+    )) or 0)
+
+    def throttled_identity_count(cutoff: datetime, threshold: int) -> int:
+        rows = session.execute(select(ConsoleLoginAttempt.identity_hash).where(
+            ConsoleLoginAttempt.succeeded.is_(False),
+            ConsoleLoginAttempt.created_at >= cutoff,
+        ).group_by(ConsoleLoginAttempt.identity_hash).having(
+            func.count(ConsoleLoginAttempt.id) >= threshold
+        )).all()
+        return len(rows)
+
+    hard_lockouts = throttled_identity_count(alert_cutoff, CONSOLE_LOGIN_MAX_FAILURES)
+    soft_lockouts = throttled_identity_count(soft_cutoff, CONSOLE_LOGIN_SOFT_FAILURES)
+    ready_admins = int(session.scalar(select(func.count(ConsoleUser.id)).where(
+        ConsoleUser.role == ConsoleRole.ADMIN,
+        ConsoleUser.enabled.is_(True),
+        ConsoleUser.must_change_password.is_(False),
+    )) or 0)
+    bootstrap_required = bool(web_auth_settings.enabled and (
+        web_auth_settings.bootstrap_required or ready_admins == 0
+    ))
+    return {
+        "generated_at": now,
+        "window_seconds": CONSOLE_AUTH_ALERT_WINDOW_SECONDS,
+        "bootstrap_required": bootstrap_required,
+        "ready_admins": ready_admins,
+        "failed_logins": failed_login_events,
+        "rate_limited": rate_limited_events,
+        "active_lockouts": max(hard_lockouts, soft_lockouts),
+        "authorization_denied": denied_events,
+        "denied_alert_threshold": CONSOLE_AUTH_DENIED_ALERT_THRESHOLD,
+    }
+
+
 def console_password_reused(session: Session, user: ConsoleUser, candidate: str,
                             history_count: int) -> bool:
     """Check current plus the configured number of prior Argon2id hashes."""
@@ -4310,6 +4367,12 @@ def console_auth_audit(limit: int = Query(default=100, ge=1, le=500),
     return [{"id": event.id, "actor": username, "event_type": event.event_type,
              "target": event.target, "result": event.result, "created_at": event.created_at,
              "detail": json.loads(event.detail_json)} for event, username in rows]
+
+
+@app.get("/api/admin/auth-security-summary")
+def console_auth_security_summary_view(session: Session = Depends(get_session)) -> dict:
+    """Expose only aggregate authentication hardening signals to ADMIN users."""
+    return console_auth_security_summary(session)
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -42,6 +42,53 @@
       control.setAttribute("aria-disabled", String(!permitted));
     });
   };
+  const installAdminSecurityAlerts = () => {
+    const baseRenderTopAlerts = window.renderTopAlerts;
+    if (typeof baseRenderTopAlerts !== "function") return;
+    let securityAlerts = [];
+    let operationalAlerts = [];
+    window.renderTopAlerts = alerts => {
+      operationalAlerts = Array.isArray(alerts) ? alerts : [];
+      baseRenderTopAlerts([...operationalAlerts, ...securityAlerts]);
+    };
+    const message = (data, key) => {
+      const en = window.raijinLocale?.() === "en-US";
+      const minutes = Math.max(1, Math.round(Number(data.window_seconds || 0) / 60));
+      if (key === "bootstrap") return en
+        ? "Administrative authentication bootstrap requires host intervention."
+        : "O bootstrap da autenticação administrativa requer intervenção no host.";
+      if (key === "lockout") return en
+        ? `${data.active_lockouts} origin(s) are temporarily rate-limited after login attempts.`
+        : `${data.active_lockouts} origem(ns) está(ão) temporariamente bloqueada(s) por tentativas de login.`;
+      if (key === "login") return en
+        ? `${data.failed_logins} denied login attempt(s) in the last ${minutes} minutes.`
+        : `${data.failed_logins} tentativa(s) de login negada(s) nos últimos ${minutes} minutos.`;
+      return en
+        ? `${data.authorization_denied} denied console access attempt(s) in the last ${minutes} minutes.`
+        : `${data.authorization_denied} tentativa(s) de acesso à console negada(s) nos últimos ${minutes} minutos.`;
+    };
+    const refreshSecurityAlerts = async () => {
+      try {
+        const data = await apiCall("/api/admin/auth-security-summary");
+        const alerts = [];
+        if (data.bootstrap_required) alerts.push(["auth-bootstrap", "bad", message(data, "bootstrap")]);
+        if (Number(data.active_lockouts || 0)) alerts.push(["auth-lockout", "bad", message(data, "lockout")]);
+        if (Number(data.failed_logins || 0) >= 5) alerts.push(["auth-login-failures", "warning", message(data, "login")]);
+        if (Number(data.authorization_denied || 0) >= Number(data.denied_alert_threshold || 5)) {
+          alerts.push(["auth-authorization-denied", "warning", message(data, "denied")]);
+        }
+        securityAlerts = alerts;
+        window.renderTopAlerts(operationalAlerts);
+      } catch (_) {
+        // The regular dashboard health path remains independent from this
+        // ADMIN-only enhancement, so a transient summary read never disrupts
+        // monitoring for the console.
+      }
+    };
+    refreshSecurityAlerts();
+    setInterval(() => { if (document.visibilityState !== "hidden") refreshSecurityAlerts(); }, 60_000);
+    document.addEventListener("raijin:language-changed", refreshSecurityAlerts);
+  };
 
   async function install() {
     // Authentication controls are injected after the application shell. Wait
@@ -204,6 +251,8 @@
       });
       return;
     }
+
+    installAdminSecurityAlerts();
 
     const settings = document.getElementById("view-settings");
     if (!settings) return;

@@ -156,6 +156,15 @@ def test_console_disables_dynamic_migration_mutations_for_viewers():
     assert "markMigrationMutationControls(node)" in script
 
 
+def test_console_admin_security_alerts_are_aggregate_and_do_not_affect_other_roles():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert "installAdminSecurityAlerts" in script
+    assert '"/api/admin/auth-security-summary"' in script
+    assert '"auth-lockout"' in script
+    assert '"auth-authorization-denied"' in script
+    assert "identity.user.role !== \"ADMIN\"" in script
+
+
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():
     catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")

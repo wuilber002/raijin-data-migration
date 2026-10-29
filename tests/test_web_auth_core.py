@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,34 @@ def test_safe_dashboard_configuration_reads_are_available_to_viewers():
     assert main.auth_route_requirement("/api/auth/profile", "GET") is ConsoleRole.VIEWER
     assert main.auth_route_requirement("/api/auth/profile", "PATCH") is ConsoleRole.VIEWER
     assert main.auth_route_requirement("/api/console-presence/heartbeat", "POST") is ConsoleRole.VIEWER
+    assert main.auth_route_requirement("/api/admin/auth-security-summary", "GET") is ConsoleRole.ADMIN
+
+
+def test_auth_security_summary_is_aggregate_and_detects_lockouts_and_denial_spikes(tmp_path, monkeypatch):
+    database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'auth-security.db'}")
+    monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))
+    main.Base.metadata.create_all(database)
+    now = main.utcnow()
+    with main.SessionLocal() as session:
+        admin = main.ConsoleUser(username="admin", password_hash=PasswordHasher().hash("a secure test password"),
+                                 role=ConsoleRole.ADMIN)
+        session.add(admin)
+        for index in range(main.CONSOLE_LOGIN_MAX_FAILURES):
+            session.add(main.ConsoleLoginAttempt(identity_hash=f"origin-{index // main.CONSOLE_LOGIN_MAX_FAILURES}",
+                                                  succeeded=False, created_at=now - timedelta(seconds=10)))
+        for _ in range(main.CONSOLE_AUTH_DENIED_ALERT_THRESHOLD):
+            session.add(main.ConsoleAuthAuditEvent(event_type="AUTHORIZATION_DENIED", result="DENIED",
+                                                   target="/api/admin/users", created_at=now - timedelta(seconds=10)))
+        session.add(main.ConsoleAuthAuditEvent(event_type="LOGIN_RATE_LIMITED", result="DENIED",
+                                               target="redacted", created_at=now - timedelta(seconds=10)))
+        session.commit()
+        summary = main.console_auth_security_summary(session, now=now)
+    assert summary["ready_admins"] == 1
+    assert summary["bootstrap_required"] is False
+    assert summary["active_lockouts"] == 1
+    assert summary["rate_limited"] == 1
+    assert summary["authorization_denied"] == main.CONSOLE_AUTH_DENIED_ALERT_THRESHOLD
+    assert "origin" not in repr(summary)
 
 
 def test_password_policy_rejects_obvious_common_bootstrap_passwords():

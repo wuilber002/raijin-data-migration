@@ -245,8 +245,9 @@ redirecionamento repetido ou página sem resposta após expiração de sessão.
 - [x] Manter `/healthz`, backup, restore, timers e scripts host-side funcionais
   sem cookie de navegador.
 - [x] Implementar documentação e exercício local de recuperação de administrador.
-- [ ] Criar alertas para falhas de bootstrap de admin, picos de bloqueio e
-  tentativas de acesso negadas.
+- [x] Criar alertas administrativos agregados para bootstrap pendente, picos
+  de bloqueio e tentativas de acesso negadas, sem expor usuários, origens ou
+  credenciais. A consulta é renovada a cada minuto somente em sessões ADMIN.
 - [x] Revisar backup/restore PostgreSQL para incluir usuários, sessões e
   auditoria; definir revogação de sessões após restauração.
 
