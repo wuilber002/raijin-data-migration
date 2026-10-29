@@ -165,6 +165,17 @@ def test_console_admin_security_alerts_are_aggregate_and_do_not_affect_other_rol
     assert "identity.user.role !== \"ADMIN\"" in script
 
 
+def test_auth_alerts_open_filtered_audit_and_admins_can_see_authenticated_sessions():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert "raijin:open-auth-audit" in page
+    assert "authAlert?'settings'" in page
+    assert "installAdminActiveSessionSummary" in script
+    assert '"/api/admin/active-sessions"' in script
+    assert "authenticated sessions are visible only to administrators" in script.lower()
+    assert "LOGIN_RATE_LIMITED" in script
+
+
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():
     catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")

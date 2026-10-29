@@ -4375,6 +4375,25 @@ def console_auth_security_summary_view(session: Session = Depends(get_session)) 
     return console_auth_security_summary(session)
 
 
+@app.get("/api/admin/active-sessions")
+def console_active_sessions(session: Session = Depends(get_session)) -> list[dict]:
+    """List current authenticated console sessions for ADMIN observability only."""
+    now = utcnow()
+    rows = session.execute(select(ConsoleSession, ConsoleUser).join(
+        ConsoleUser, ConsoleSession.user_id == ConsoleUser.id
+    ).where(
+        ConsoleSession.revoked_at.is_(None),
+        ConsoleSession.idle_expires_at > now,
+        ConsoleSession.expires_at > now,
+    ).order_by(ConsoleSession.last_seen_at.desc(), ConsoleSession.id.desc())).all()
+    return [{
+        "username": user.username,
+        "role": user.role,
+        "last_seen_at": browser_session.last_seen_at,
+        "expires_at": min(browser_session.idle_expires_at, browser_session.expires_at),
+    } for browser_session, user in rows]
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard() -> HTMLResponse:
     with open("app/static/index.html", encoding="utf-8") as page:

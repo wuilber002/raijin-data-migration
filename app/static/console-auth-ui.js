@@ -89,6 +89,32 @@
     setInterval(() => { if (document.visibilityState !== "hidden") refreshSecurityAlerts(); }, 60_000);
     document.addEventListener("raijin:language-changed", refreshSecurityAlerts);
   };
+  const installAdminActiveSessionSummary = () => {
+    let sessions = [];
+    const decorateHealthCard = () => {
+      const card = document.querySelector("#health .platform-health-metric:nth-child(2)");
+      const detail = card?.querySelector(".platform-health-secondary");
+      if (!detail) return;
+      const uniqueUsers = [...new Map(sessions.map(item => [`${item.username}:${item.role}`, item])).values()];
+      const people = uniqueUsers.map(item => `${item.username} (${item.role})`).join(", ");
+      const en = window.raijinLocale?.() === "en-US";
+      detail.textContent = people
+        ? (en ? `authenticated: ${people}` : `autenticados: ${people}`)
+        : (en ? "no authenticated session" : "nenhuma sessão autenticada");
+      detail.title = en
+        ? "Authenticated sessions are visible only to administrators. The console heartbeat count remains anonymous."
+        : "Sessões autenticadas são visíveis somente para administradores. A contagem de heartbeat da console continua anônima.";
+    };
+    const refreshActiveSessions = async () => {
+      try { sessions = await apiCall("/api/admin/active-sessions"); decorateHealthCard(); }
+      catch (_) { /* This ADMIN-only detail must not affect platform health. */ }
+    };
+    const health = document.getElementById("health");
+    if (health) new MutationObserver(decorateHealthCard).observe(health, {childList:true, subtree:true});
+    refreshActiveSessions();
+    setInterval(() => { if (document.visibilityState !== "hidden") refreshActiveSessions(); }, 60_000);
+    document.addEventListener("raijin:language-changed", decorateHealthCard);
+  };
 
   async function install() {
     // Authentication controls are injected after the application shell. Wait
@@ -253,6 +279,7 @@
     }
 
     installAdminSecurityAlerts();
+    installAdminActiveSessionSummary();
 
     const settings = document.getElementById("view-settings");
     if (!settings) return;
@@ -331,6 +358,16 @@
     document.addEventListener("raijin:language-changed", () => {
       applyAuthTranslations(card);
       render().catch(() => {});
+    });
+    document.addEventListener("raijin:open-auth-audit", event => {
+      const form = card.querySelector("#console-audit-filter");
+      if (!form) return;
+      const key = event.detail?.alertKey || "";
+      form.elements.actor.value = "";
+      form.elements.result.value = "DENIED";
+      form.elements.event_type.value = key === "auth-lockout" ? "LOGIN_RATE_LIMITED"
+        : key === "auth-bootstrap" ? "BOOTSTRAP_ADMIN_CREATED" : "";
+      render().then(() => card.scrollIntoView({block:"start", behavior:"smooth"})).catch(() => {});
     });
     await render();
   }

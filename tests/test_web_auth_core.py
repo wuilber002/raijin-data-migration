@@ -70,6 +70,7 @@ def test_safe_dashboard_configuration_reads_are_available_to_viewers():
     assert main.auth_route_requirement("/api/auth/profile", "PATCH") is ConsoleRole.VIEWER
     assert main.auth_route_requirement("/api/console-presence/heartbeat", "POST") is ConsoleRole.VIEWER
     assert main.auth_route_requirement("/api/admin/auth-security-summary", "GET") is ConsoleRole.ADMIN
+    assert main.auth_route_requirement("/api/admin/active-sessions", "GET") is ConsoleRole.ADMIN
 
 
 def test_auth_security_summary_is_aggregate_and_detects_lockouts_and_denial_spikes(tmp_path, monkeypatch):

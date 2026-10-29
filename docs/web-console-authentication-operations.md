@@ -42,6 +42,15 @@ Ele permite alterar o nome de exibição, e-mail e a própria senha, sem expor a
 área administrativa. A troca de senha exige a senha atual, aplica a política
 de histórico e revoga as demais sessões do usuário.
 
+## Alertas e sessões ativas
+
+Somente `ADMIN` recebe alertas agregados de bootstrap pendente, bloqueios de
+login e recusas de acesso. Ao selecionar um alerta, a console abre a auditoria
+de autenticação com o resultado negado filtrado. O cartão **Consoles ativas**
+continua sendo uma métrica anônima de heartbeat; para `ADMIN`, a linha auxiliar
+mostra os usuários com sessão autenticada ativa. `OPERATOR` e `VIEWER` nunca
+recebem nomes de usuários, sessões, IPs, hashes ou credenciais.
+
 ## Host via Bastion
 
 O fluxo é idêntico. Mantenha `WEB_BIND_HOST=127.0.0.1` e acesse a console por
