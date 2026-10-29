@@ -1,6 +1,7 @@
 import os
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import BigInteger, create_engine, select
@@ -119,6 +120,35 @@ def test_sessions_are_opaque_and_csrf_is_independently_hashed(tmp_path, monkeypa
         assert stored.token_hash == main.hash_opaque_token(token)
         assert stored.csrf_hash == main.hash_opaque_token(csrf)
         assert token not in stored.token_hash and csrf not in stored.csrf_hash
+
+
+def test_administrator_cannot_revoke_any_of_their_own_sessions(tmp_path, monkeypatch):
+    database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'session-revoke-policy.db'}")
+    monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))
+    main.Base.metadata.create_all(database)
+    with main.SessionLocal() as session:
+        admin = main.ConsoleUser(username="admin", password_hash=PasswordHasher().hash("a secure test password"),
+                                 role=ConsoleRole.ADMIN)
+        operator = main.ConsoleUser(username="operator-hml", password_hash=PasswordHasher().hash("another secure test password"),
+                                    role=ConsoleRole.OPERATOR)
+        session.add_all([admin, operator]); session.flush()
+        main.create_console_session(session, admin)
+        main.create_console_session(session, operator)
+        session.flush()
+        own_session = session.scalar(select(main.ConsoleSession).where(main.ConsoleSession.user_id == admin.id))
+        other_session = session.scalar(select(main.ConsoleSession).where(main.ConsoleSession.user_id == operator.id))
+        request = SimpleNamespace(
+            state=SimpleNamespace(console_principal={"id": admin.id}, console_session_id=own_session.id),
+            client=None, headers={},
+        )
+        listed = main.console_list_sessions(request, session)
+        assert next(row for row in listed if row["id"] == own_session.id)["is_current_user"] is True
+        assert next(row for row in listed if row["id"] == other_session.id)["is_current_user"] is False
+        with pytest.raises(main.HTTPException, match="cannot revoke their own"):
+            main.console_revoke_session(own_session.id, request, session)
+        assert own_session.revoked_at is None
+        assert main.console_revoke_session(other_session.id, request, session)["id"] == other_session.id
+        assert other_session.revoked_at is not None
 
 
 def test_password_history_rejects_current_and_last_configured_passwords(tmp_path, monkeypatch):

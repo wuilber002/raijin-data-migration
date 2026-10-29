@@ -114,20 +114,18 @@
     const renderModal = () => {
       const empty = uiText("Nenhuma sessão autenticada ativa.");
       content.innerHTML = sessions.length ? `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(item => {
+        const revoke = item.is_current_user
+          ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode revogar suas próprias sessões."))}">${uiText("Revogar")}</button>`
+          : `<button type="button" class="danger" data-revoke-active-session="${Number(item.id)}">${uiText("Revogar")}</button>`;
         const disable = item.is_current_user
           ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode desativar sua própria conta."))}">${uiText("Desativar")}</button>`
           : `<button type="button" class="danger" data-disable-active-user="${Number(item.user_id)}" data-disable-active-username="${escapeHtml(item.username)}">${uiText("Desativar")}</button>`;
-        return `<tr><td>${escapeHtml(item.username)}${item.is_current?` <small>(${uiText("sessão atual")})</small>`:""}</td><td>${escapeHtml(item.role)}</td><td>${localTime(item.last_seen_at)}</td><td>${localTime(item.expires_at)}</td><td><div class="console-active-session-actions"><button type="button" class="danger" data-revoke-active-session="${Number(item.id)}" data-current-session="${item.is_current?"true":"false"}">${uiText("Revogar")}</button>${disable}</div></td></tr>`;
+        return `<tr><td>${escapeHtml(item.username)}${item.is_current?` <small>(${uiText("sessão atual")})</small>`:""}</td><td>${escapeHtml(item.role)}</td><td>${localTime(item.last_seen_at)}</td><td>${localTime(item.expires_at)}</td><td><div class="console-active-session-actions">${revoke}${disable}</div></td></tr>`;
       }).join("")}</tbody></table>` : `<p class="hint">${empty}</p>`;
       content.querySelectorAll("[data-revoke-active-session]").forEach(button => button.addEventListener("click", async () => {
         button.disabled = true;
         try {
           await apiCall(`/api/admin/sessions/${button.dataset.revokeActiveSession}/revoke`, {method:"POST"});
-          if (button.dataset.currentSession === "true") {
-            sessionStorage.removeItem("raijin_csrf");
-            location.assign("/login");
-            return;
-          }
           await refreshActiveSessions();
           renderModal();
         } catch (error) { button.disabled = false; content.insertAdjacentHTML("afterbegin", `<p class="error">${escapeHtml(error.message)}</p>`); }
@@ -393,7 +391,7 @@
         ? `${row.event_type} (${row.target})` : row.event_type;
       card.querySelector("#console-auth-policy").elements.password_history_count.value = authSettings.password_history_count;
       card.querySelector("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Ativo")}</th><th>${uiText("Redefinir senha")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(uiText("Ativar {{username}}", {username:user.username}))}"></td><td><input data-field="password" type="password" minlength="14" placeholder="${escapeHtml(uiText("Opcional"))}"></td><td><button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button></td></tr>`).join("")}</tbody></table>`;
-      card.querySelector("#console-sessions").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
+      card.querySelector("#console-sessions").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:row.is_current_user?`<button type="button" disabled title="${escapeHtml(uiText("Você não pode revogar suas próprias sessões."))}">${uiText("Revogar")}</button>`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
       card.querySelector("#console-auth-audit").innerHTML = `<table><thead><tr><th>${uiText("Data e hora")}</th><th>${uiText("Responsável")}</th><th>${uiText("Evento")}</th><th>${uiText("Resultado")}</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||uiText("sistema"))}</td><td>${escapeHtml(auditEventLabel(row))}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;
       card.querySelectorAll("[data-session]").forEach(button => button.addEventListener("click", async () => {
         await apiCall(`/api/admin/sessions/${button.dataset.session}/revoke`, {method:"POST"}); await render();

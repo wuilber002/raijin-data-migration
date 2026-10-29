@@ -652,6 +652,7 @@
   "Sessões autenticadas": "Authenticated sessions",
   "Desativar este usuário encerrará todas as suas sessões. Continuar?": "Deactivating this user will end all of their sessions. Continue?",
   "Você não pode desativar sua própria conta.": "You cannot deactivate your own account.",
+  "Você não pode revogar suas próprias sessões.": "You cannot revoke your own sessions.",
   "Somente administradores podem visualizar ou revogar sessões autenticadas ativas.": "Only administrators can view or revoke active authenticated sessions.",
   "Nenhuma sessão autenticada ativa.": "No active authenticated session.",
   "sessão atual": "current session",
