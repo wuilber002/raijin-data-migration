@@ -174,6 +174,8 @@ def test_auth_alerts_open_filtered_audit_and_admins_can_see_authenticated_sessio
     assert '"/api/admin/active-sessions"' in script
     assert "authenticated sessions are visible only to administrators" in script.lower()
     assert "LOGIN_RATE_LIMITED" in script
+    assert "observe(health, {childList:true});" in script
+    assert "observe(health, {childList:true, subtree:true})" not in script
 
 
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():

@@ -110,7 +110,10 @@
       catch (_) { /* This ADMIN-only detail must not affect platform health. */ }
     };
     const health = document.getElementById("health");
-    if (health) new MutationObserver(decorateHealthCard).observe(health, {childList:true, subtree:true});
+    // loadHealth replaces direct health cards in one operation. Observing the
+    // entire subtree would also observe detail.textContent above and recurse
+    // synchronously on our own decoration, freezing the browser.
+    if (health) new MutationObserver(decorateHealthCard).observe(health, {childList:true});
     refreshActiveSessions();
     setInterval(() => { if (document.visibilityState !== "hidden") refreshActiveSessions(); }, 60_000);
     document.addEventListener("raijin:language-changed", decorateHealthCard);
