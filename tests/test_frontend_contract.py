@@ -199,6 +199,14 @@ def test_login_password_visibility_control_is_non_submitting_and_supports_change
     assert "button[type=\"submit\"]" in script
 
 
+def test_login_controller_is_build_versioned_to_prevent_stale_password_control_behavior():
+    source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    assert 'login.js?v={RAIJIN_BUILD_REVISION}' in source
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "console-active-sessions-panel{width:min(1150px" in page
+    assert "console-active-session-actions{display:flex;gap:.4rem;flex-wrap:nowrap" in page
+
+
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():
     catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")

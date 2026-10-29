@@ -4092,7 +4092,10 @@ def login_page() -> HTMLResponse:
     if not web_auth_settings.enabled:
         return RedirectResponse("/", status_code=303)
     with open("app/static/login.html", encoding="utf-8") as page:
-        content = page.read().replace("</body>", '<script src="/static/login.js"></script></body>')
+        # The document is no-store, but a browser may retain a static script.
+        # Version the login controller as well so newly added authentication UI
+        # controls never render without their matching behavior after a rollout.
+        content = page.read().replace("</body>", f'<script src="/static/login.js?v={RAIJIN_BUILD_REVISION}"></script></body>')
         return HTMLResponse(content, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
