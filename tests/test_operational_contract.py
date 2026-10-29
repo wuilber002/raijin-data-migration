@@ -4864,7 +4864,7 @@ def test_aws_connection_registration_uses_partial_private_endpoint_from_secret(t
         "batch_operations_role_arn": "arn:aws:iam::123456789012:role/batch",
         "control_bucket": "private-raijin-control",
         "private_endpoint": {
-            "s3_endpoint_url": "https://s3.example.internal",
+            "s3_endpoint_url": "https://bucket.vpce-0da4ab045f501323b-jvccrlvq.s3.us-east-1.vpce.amazonaws.com",
         },
     }
     monkeypatch.setattr(module, "aws_secret_payload", lambda _ocid: parse_aws_connection_payload(__import__("json").dumps(secret)))
@@ -4875,11 +4875,12 @@ def test_aws_connection_registration_uses_partial_private_endpoint_from_secret(t
         session.commit()
         result = module.create_aws_connection(module.AwsConnectionCreate(secret_ocid=secret_ocid, label="Private"), session)
         connection = session.get(AwsConnection, result["id"])
-        assert connection.s3_endpoint_url == "https://s3.example.internal"
+        assert connection.s3_endpoint_url == "https://bucket.vpce-0da4ab045f501323b-jvccrlvq.s3.us-east-1.vpce.amazonaws.com"
         assert connection.sts_endpoint_url is None
-        assert connection.s3control_endpoint_url is None
+        assert connection.s3control_endpoint_url == "https://control.vpce-0da4ab045f501323b-jvccrlvq.s3.us-east-1.vpce.amazonaws.com"
         assert connection.s3_addressing_style == "auto"
         assert connection.tls_ca_bundle_path is None
+        assert module.derived_s3control_endpoint("https://s3.example.internal") is None
 
 
 def test_archived_connection_releases_reused_secret_for_new_identity(tmp_path, monkeypatch):

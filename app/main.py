@@ -3648,6 +3648,33 @@ def normalized_private_endpoint(value: str | None, field: str) -> str | None:
     return value.strip().rstrip("/")
 
 
+AWS_S3_INTERFACE_BUCKET_ENDPOINT = re.compile(
+    r"^bucket\.(?P<suffix>vpce-[a-z0-9-]+\.s3(?:-fips)?\.[a-z0-9-]+\.vpce\.amazonaws\.com(?:\.cn)?)$"
+)
+
+
+def derived_s3control_endpoint(s3_endpoint_url: str | None) -> str | None:
+    """Return the AWS S3 Control variant of a canonical S3 VPCE URL.
+
+    Only AWS's documented ``bucket.vpce-...`` hostname shape is eligible.
+    Arbitrary private DNS names are never rewritten: an absent S3 Control URL
+    for those names means the normal public regional SDK endpoint.
+    """
+    if not s3_endpoint_url:
+        return None
+    parsed = urlparse(s3_endpoint_url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or port is not None or not parsed.hostname:
+        return None
+    match = AWS_S3_INTERFACE_BUCKET_ENDPOINT.fullmatch(parsed.hostname)
+    if not match:
+        return None
+    return f"https://control.{match.group('suffix')}"
+
+
 def connection_endpoint_configuration(connection: AwsConnection) -> dict:
     return {
         "sts_endpoint_url": connection.sts_endpoint_url,
@@ -8545,6 +8572,12 @@ def create_aws_connection(payload: AwsConnectionCreate, session: Session = Depen
                        if request_has_endpoint else secret_endpoint)
     endpoints = {field: normalized_private_endpoint(endpoint_source.get(field), field)
                  for field in ("sts_endpoint_url", "s3_endpoint_url", "s3control_endpoint_url")}
+    # AWS S3 Interface Endpoints use the same VPCE suffix for their documented
+    # bucket and S3 Control hostnames.  An explicit S3 Control endpoint always
+    # wins; an unrecognised/custom S3 hostname deliberately retains the public
+    # S3 Control SDK default instead of guessing an internal DNS convention.
+    if not endpoints["s3control_endpoint_url"]:
+        endpoints["s3control_endpoint_url"] = derived_s3control_endpoint(endpoints["s3_endpoint_url"])
     ca_bundle = ((payload.tls_ca_bundle_path or "").strip() or
                  (secret_endpoint.get("tls_ca_bundle_path") if not request_has_endpoint else None))
     if ca_bundle and not os.path.isabs(ca_bundle):

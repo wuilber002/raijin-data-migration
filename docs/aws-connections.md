@@ -40,9 +40,15 @@ Control públicos. `s3_addressing_style` assume `auto` se omitido e
 absoluto instalado pela infraestrutura na VM/container do Raijin.
 
 Um endpoint de interface S3 normalmente publica as variantes `bucket`,
-`accesspoint` e `control` com o mesmo identificador `vpce`; portanto, se for
-necessário manter S3 Control privado, use a variante `control.vpce-...` fornecida
-pela AWS. STS é outro serviço: ele exige um Interface VPC Endpoint próprio
+`accesspoint` e `control` com o mesmo identificador `vpce`. Quando
+`s3control_endpoint_url` estiver vazio e `s3_endpoint_url` tiver exatamente o
+formato AWS `https://bucket.vpce-...s3.<região>.vpce.amazonaws.com`, o Raijin
+grava e usa a variante derivada `https://control.vpce-...`. Uma URL explícita
+de S3 Control sempre prevalece e qualquer falha nesse endpoint é um erro, sem
+fallback silencioso. Um hostname S3 customizado ou não reconhecido não é
+reescrito: nesse caso, S3 Control usa o endpoint regional público.
+
+STS é outro serviço: ele exige um Interface VPC Endpoint próprio
 (`com.amazonaws.<região>.sts`) ou, sem essa URL, será acessado no endpoint STS
 regional público. Os campos manuais da interface continuam disponíveis como
 override operacional durante o cadastro, sem criar um modo especial no Raijin.
