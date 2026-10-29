@@ -25,10 +25,10 @@ def test_web_bind_defaults_to_private_1604_when_config_is_absent(tmp_path):
     assert run.stdout == "127.0.0.1|1604|127.0.0.1:1604:8080|http://127.0.0.1:1604\n"
 
 
-def test_web_bind_accepts_wildcard_and_probes_it_through_loopback(tmp_path):
-    run = load_bind(tmp_path, "WEB_BIND_HOST=0.0.0.0\nWEB_BIND_PORT=9443\n")
+def test_web_bind_accepts_wildcard_https_and_probes_it_through_loopback(tmp_path):
+    run = load_bind(tmp_path, "WEB_BIND_HOST=0.0.0.0\nWEB_BIND_PORT=9443\nWEB_TRANSPORT=https\n")
     assert run.returncode == 0, run.stderr
-    assert run.stdout == "0.0.0.0|9443|0.0.0.0:9443:8080|http://127.0.0.1:9443\n"
+    assert run.stdout == "0.0.0.0|9443|0.0.0.0:9443:8080|https://127.0.0.1:9443\n"
 
 
 def test_web_bind_environment_override_wins_over_persisted_config(tmp_path):
@@ -37,9 +37,10 @@ def test_web_bind_environment_override_wins_over_persisted_config(tmp_path):
         "WEB_BIND_HOST=127.0.0.1\nWEB_BIND_PORT=1604\n",
         RAIJIN_WEB_BIND_HOST="192.0.2.10",
         RAIJIN_WEB_BIND_PORT="8088",
+        RAIJIN_WEB_TRANSPORT="https",
     )
     assert run.returncode == 0, run.stderr
-    assert run.stdout == "192.0.2.10|8088|192.0.2.10:8088:8080|http://192.0.2.10:8088\n"
+    assert run.stdout == "192.0.2.10|8088|192.0.2.10:8088:8080|https://192.0.2.10:8088\n"
 
 
 def test_web_bind_rejects_non_address_or_invalid_port(tmp_path):

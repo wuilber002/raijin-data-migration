@@ -27,6 +27,7 @@ import math
 import re
 import shutil
 import uuid
+from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
@@ -1930,6 +1931,13 @@ class ConsoleAuthSettingsUpdate(BaseModel):
     password_history_count: int = Field(ge=0, le=12)
 
 
+class ConsoleWebBindUpdate(BaseModel):
+    host: str = Field(min_length=1, max_length=64)
+    port: int = Field(ge=1, le=65535)
+    transport: str = Field(pattern="^(http|https)$")
+    trusted_upstream_ips: list[str] = Field(default_factory=list, max_length=16)
+
+
 class IntegrityEvidence(BaseModel):
     source_checksum: str | None = Field(default=None, max_length=256)
     destination_checksum: str | None = Field(default=None, max_length=256)
@@ -2092,6 +2100,16 @@ async def console_authentication_guard(request: FastAPIRequest, call_next):
     """Enforce local browser sessions only after explicit opt-in configuration."""
     if not web_auth_settings.enabled:
         return await call_next(request)
+    import ipaddress
+    if web_auth_settings.transport == "http" and not ipaddress.ip_address(web_auth_settings.bind_host).is_loopback:
+        peer = request.client.host if request.client else ""
+        try:
+            allowed = any(ipaddress.ip_address(peer) in ipaddress.ip_network(entry, strict=False)
+                          for entry in web_auth_settings.trusted_upstream_networks)
+        except ValueError:
+            allowed = False
+        if not allowed:
+            return JSONResponse(status_code=403, content={"detail": "Console peer is not a configured TLS terminator"})
     path, method = request.url.path, request.method.upper()
     required = auth_route_requirement(path, method)
     if required is None:
@@ -4201,6 +4219,7 @@ def console_change_password(payload: ConsolePasswordChange, request: FastAPIRequ
                             session: Session = Depends(get_session)) -> Response:
     principal = console_principal(request)
     user = session.get(ConsoleUser, principal["id"])
+    completing_bootstrap = bool(user and user.must_change_password and web_auth_settings.bootstrap_required)
     # A newly bootstrapped/administratively reset user already proved control
     # of this short-lived session at login. Requiring the old temporary secret
     # again would force the browser to retain it. Normal password changes keep
@@ -4224,6 +4243,16 @@ def console_change_password(payload: ConsolePasswordChange, request: FastAPIRequ
     token, csrf = create_console_session(session, user)
     auth_audit(session, "PASSWORD_CHANGED", actor_user_id=user.id, target=user.username, request=request)
     session.commit()
+    if completing_bootstrap:
+        # The app cannot remove the root-owned bootstrap file.  Request its
+        # retirement through the same constrained host channel; the resulting
+        # restart revokes this temporary session by design.
+        try:
+            Path(os.environ.get("RAIJIN_WEB_BIND_REQUEST_FILE", "/run/web-bind-control/request.json")).parent.joinpath(
+                "retire-bootstrap"
+            ).touch(exist_ok=True)
+        except OSError:
+            pass
     response = JSONResponse(jsonable_encoder({"user": console_user_view(user), "csrf_token": csrf}))
     set_console_cookies(response, token, csrf)
     return response
@@ -4257,6 +4286,68 @@ def console_update_auth_settings(payload: ConsoleAuthSettingsUpdate, request: Fa
                detail={"password_history_count": payload.password_history_count})
     session.commit()
     return console_auth_settings_view(settings)
+
+
+def console_web_bind_state() -> dict:
+    """Expose only non-secret endpoint state; host remains the authority."""
+    request_file = Path(os.environ.get("RAIJIN_WEB_BIND_REQUEST_FILE", "/run/web-bind-control/request.json"))
+    result_file = Path(os.environ.get("RAIJIN_WEB_BIND_RESULT_FILE", "/run/web-bind-control/result.json"))
+    result: dict = {}
+    try:
+        result = json.loads(result_file.read_text(encoding="utf-8")) if result_file.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        result = {"status": "UNKNOWN", "message": "The host result is unreadable."}
+    return {
+        "host": web_auth_settings.bind_host,
+        "port": int(os.environ.get("RAIJIN_WEB_BIND_PORT", "1604")),
+        "transport": web_auth_settings.transport,
+        "trusted_upstream_ips": list(web_auth_settings.trusted_upstream_networks),
+        "locked": bool(web_auth_settings.bootstrap_required),
+        "lock_reason": "Bootstrap is incomplete; endpoint settings remain loopback-only." if web_auth_settings.bootstrap_required else "",
+        "pending": request_file.exists(),
+        "result": result,
+    }
+
+
+@app.get("/api/admin/web-bind")
+def console_get_web_bind() -> dict:
+    return console_web_bind_state()
+
+
+@app.put("/api/admin/web-bind", status_code=202)
+def console_update_web_bind(payload: ConsoleWebBindUpdate, request: FastAPIRequest,
+                            session: Session = Depends(get_session)) -> dict:
+    if web_auth_settings.bootstrap_required:
+        raise HTTPException(status_code=409, detail="Console endpoint is locked until bootstrap is completed")
+    try:
+        import ipaddress
+        host = str(ipaddress.ip_address(payload.host.strip()))
+        upstreams = []
+        for value in payload.trusted_upstream_ips:
+            network = ipaddress.ip_network(value.strip(), strict=True)
+            if network.version != 4 or network.prefixlen != 32:
+                raise ValueError("Trusted upstream addresses must be IPv4 /32")
+            upstreams.append(str(network))
+        if payload.transport == "http" and not ipaddress.ip_address(host).is_loopback and not upstreams:
+            raise ValueError("Non-loopback HTTP requires at least one trusted TLS terminator IPv4 /32")
+        if payload.transport == "https" and upstreams:
+            raise ValueError("Trusted upstream addresses apply only to HTTP behind a TLS terminator")
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    request_file = Path(os.environ.get("RAIJIN_WEB_BIND_REQUEST_FILE", "/run/web-bind-control/request.json"))
+    try:
+        request_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = request_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"host": host, "port": payload.port, "transport": payload.transport,
+                                         "trusted_upstream_ips": upstreams}), encoding="utf-8")
+        temporary.replace(request_file)
+    except OSError as error:
+        raise HTTPException(status_code=503, detail="Host console endpoint control channel is unavailable") from error
+    auth_audit(session, "WEB_BIND_CHANGE_REQUESTED", actor_user_id=console_principal(request)["id"],
+               target=f"{payload.transport}:{host}:{payload.port}", request=request,
+               detail={"trusted_upstream_ips": upstreams})
+    session.commit()
+    return {"accepted": True, **console_web_bind_state()}
 
 
 @app.post("/api/admin/users", status_code=201)

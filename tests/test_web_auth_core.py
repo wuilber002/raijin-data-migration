@@ -74,6 +74,32 @@ def test_safe_dashboard_configuration_reads_are_available_to_viewers():
     assert main.auth_route_requirement("/api/admin/active-sessions", "GET") is ConsoleRole.ADMIN
 
 
+def test_admin_web_bind_request_is_constrained_and_written_atomically(tmp_path, monkeypatch):
+    control = tmp_path / "web-bind" / "request.json"
+    monkeypatch.setenv("RAIJIN_WEB_BIND_REQUEST_FILE", str(control))
+    monkeypatch.setenv("RAIJIN_WEB_BIND_RESULT_FILE", str(tmp_path / "web-bind" / "result.json"))
+    monkeypatch.setattr(main, "web_auth_settings", load_web_auth_settings({
+        "RAIJIN_WEB_AUTH_MODE": "local", "RAIJIN_WEB_BIND_HOST": "127.0.0.1",
+        "RAIJIN_WEB_AUTH_BOOTSTRAP_REQUIRED": "false", "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME": "admin",
+    }))
+    database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'web-bind.db'}")
+    monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))
+    main.Base.metadata.create_all(database)
+    with main.SessionLocal() as session:
+        admin = main.ConsoleUser(username="admin", password_hash=PasswordHasher().hash("a secure test password"),
+                                 role=ConsoleRole.ADMIN)
+        session.add(admin); session.commit()
+        request = SimpleNamespace(state=SimpleNamespace(console_principal={"id": admin.id}), client=None, headers={})
+        payload = main.ConsoleWebBindUpdate(host="192.0.2.12", port=9443, transport="https")
+        response = main.console_update_web_bind(payload, request, session)
+    assert response["accepted"] is True
+    assert control.exists()
+    assert control.read_text(encoding="utf-8").find('"transport": "https"') >= 0
+    with pytest.raises(main.HTTPException, match="IPv4 /32"):
+        main.console_update_web_bind(main.ConsoleWebBindUpdate(host="192.0.2.12", port=8080, transport="http",
+                                                               trusted_upstream_ips=["192.0.2.0/24"]), request, session)
+
+
 def test_auth_security_summary_is_aggregate_and_detects_lockouts_and_denial_spikes(tmp_path, monkeypatch):
     database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'auth-security.db'}")
     monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))

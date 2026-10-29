@@ -354,6 +354,17 @@
         <span class="hint" data-console-i18n="Bloqueia a senha atual e esta quantidade de senhas anteriores (padrão: 3)."></span>
         <button data-console-i18n="Salvar política"></button>
       </form>
+      <hr>
+      <h3 data-console-i18n="Endpoint da console"></h3>
+      <p class="hint" id="console-web-bind-help" data-console-i18n="HTTPS direto usa certificado autoassinado persistente. HTTP fora do loopback exige os IPs privados /32 dos terminadores TLS."></p>
+      <form id="console-web-bind" class="row">
+        <label class="field"><span data-console-i18n="IP de bind"></span><input name="host" inputmode="numeric" required></label>
+        <label class="field"><span data-console-i18n="Porta"></span><input name="port" type="number" min="1" max="65535" required></label>
+        <label class="field"><span data-console-i18n="Transporte"></span><select name="transport"><option value="https">HTTPS</option><option value="http">HTTP</option></select></label>
+        <label class="field"><span data-console-i18n="IPs confiáveis do terminador TLS (/32, separados por vírgula)"></span><input name="trusted_upstream_ips"></label>
+        <button data-console-i18n="Aplicar endpoint"></button>
+      </form>
+      <p class="hint" id="console-web-bind-status"></p>
       <form id="console-create-user" class="row">
         <label class="field"><span data-console-i18n="Usuário"></span><input name="username" pattern="[a-z][a-z0-9_.-]{2,63}" required></label>
         <label class="field"><span data-console-i18n="Senha temporária"></span><input name="password" type="password" minlength="14" required></label>
@@ -382,14 +393,19 @@
       return query.toString() ? `?${query}` : "";
     };
     const render = async () => {
-      const [users, sessions, audit, authSettings] = await Promise.all([
+      const [users, sessions, audit, authSettings, webBind] = await Promise.all([
         apiCall("/api/admin/users"), apiCall("/api/admin/sessions"),
         apiCall(`/api/admin/auth-audit${auditQuery()}`),
-        apiCall("/api/admin/auth-settings"),
+        apiCall("/api/admin/auth-settings"), apiCall("/api/admin/web-bind"),
       ]);
       const auditEventLabel = row => row.event_type === "USER_CREATED" && row.target
         ? `${row.event_type} (${row.target})` : row.event_type;
       card.querySelector("#console-auth-policy").elements.password_history_count.value = authSettings.password_history_count;
+      const bindForm = card.querySelector("#console-web-bind");
+      bindForm.host.value = webBind.host; bindForm.port.value = webBind.port; bindForm.transport.value = webBind.transport;
+      bindForm.trusted_upstream_ips.value = (webBind.trusted_upstream_ips || []).join(",");
+      bindForm.querySelectorAll("input, select, button").forEach(control => { control.disabled = Boolean(webBind.locked || webBind.pending); });
+      card.querySelector("#console-web-bind-status").textContent = webBind.locked ? uiText(webBind.lock_reason) : (webBind.pending ? uiText("Solicitação de endpoint aguardando aplicação no host.") : (webBind.result?.message || ""));
       card.querySelector("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Ativo")}</th><th>${uiText("Redefinir senha")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(uiText("Ativar {{username}}", {username:user.username}))}"></td><td><input data-field="password" type="password" minlength="14" placeholder="${escapeHtml(uiText("Opcional"))}"></td><td><button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button></td></tr>`).join("")}</tbody></table>`;
       card.querySelector("#console-sessions").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:row.is_current?`<button type="button" disabled title="${escapeHtml(uiText("Você não pode revogar a sessão atual."))}">${uiText("Revogar")}</button>`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
       card.querySelector("#console-auth-audit").innerHTML = `<table><thead><tr><th>${uiText("Data e hora")}</th><th>${uiText("Responsável")}</th><th>${uiText("Evento")}</th><th>${uiText("Resultado")}</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||uiText("sistema"))}</td><td>${escapeHtml(auditEventLabel(row))}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;
@@ -413,6 +429,12 @@
     card.querySelector("#console-auth-policy").addEventListener("submit", async event => {
       event.preventDefault(); const form = event.currentTarget;
       await apiCall("/api/admin/auth-settings", {method:"PUT", headers:{"content-type":"application/json"}, body:JSON.stringify({password_history_count:Number(form.password_history_count.value)})});
+      await render();
+    });
+    card.querySelector("#console-web-bind").addEventListener("submit", async event => {
+      event.preventDefault(); const form = event.currentTarget;
+      const trusted_upstream_ips = form.trusted_upstream_ips.value.split(",").map(value => value.trim()).filter(Boolean);
+      await apiCall("/api/admin/web-bind", {method:"PUT", headers:{"content-type":"application/json"}, body:JSON.stringify({host:form.host.value, port:Number(form.port.value), transport:form.transport.value, trusted_upstream_ips})});
       await render();
     });
     card.querySelector("#console-audit-filter").addEventListener("submit", async event => { event.preventDefault(); await render(); });

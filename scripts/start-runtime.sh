@@ -6,6 +6,7 @@ install_root=/opt/s3-oci-migration/release
 secret_root=/etc/s3-oci-migration/secrets
 runtime_root=/run/s3-oci-migration
 mode_control_root=/var/lib/s3-oci-migration/mode-control
+web_bind_control_root=/var/lib/s3-oci-migration/web-bind-control
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 image="${RAIJIN_IMAGE:-localhost/s3-oci-migration:latest}"
 network=s3-oci-migration
@@ -49,14 +50,45 @@ fi
 
 web_auth_environment=(
   -e "RAIJIN_WEB_BIND_HOST=$RAIJIN_WEB_BIND_HOST"
+  -e "RAIJIN_WEB_BIND_PORT=$RAIJIN_WEB_BIND_PORT"
+  -e "RAIJIN_WEB_TRANSPORT=$RAIJIN_WEB_TRANSPORT"
+  -e "RAIJIN_WEB_TRUSTED_UPSTREAM_IPS=$RAIJIN_WEB_TRUSTED_UPSTREAM_IPS"
   -e "RAIJIN_WEB_AUTH_MODE=$RAIJIN_WEB_AUTH_MODE"
-  -e "RAIJIN_WEB_EXTERNAL_HTTPS=$RAIJIN_WEB_EXTERNAL_HTTPS"
-  -e "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=$RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS"
   -e "RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES"
   -e "RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES=$RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES"
   -e "RAIJIN_WEB_AUTH_BOOTSTRAP_REQUIRED=$([[ "$console_auth_lifecycle" == BOOTSTRAP_REQUIRED ]] && echo true || echo false)"
   -e "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME=$RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME"
 )
+
+# The endpoint configuration is authoritative for transport security.  An
+# HTTP publication is accepted only from its TLS terminator, which is also the
+# only peer permitted to supply forwarded client headers.
+if [[ "$RAIJIN_WEB_TRANSPORT" == https ]]; then
+  web_auth_environment+=( -e RAIJIN_WEB_EXTERNAL_HTTPS=true -e RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS= )
+elif [[ -n "$RAIJIN_WEB_TRUSTED_UPSTREAM_IPS" ]]; then
+  web_auth_environment+=( -e RAIJIN_WEB_EXTERNAL_HTTPS=true -e "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=$RAIJIN_WEB_TRUSTED_UPSTREAM_IPS" )
+else
+  web_auth_environment+=( -e "RAIJIN_WEB_EXTERNAL_HTTPS=$RAIJIN_WEB_EXTERNAL_HTTPS" -e "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS=$RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS" )
+fi
+
+web_server_command=()
+web_tls_mounts=()
+if [[ "$RAIJIN_WEB_TRANSPORT" == https ]]; then
+  web_tls_root=/etc/s3-oci-migration/web-tls
+  [[ -s "$web_tls_root/cert.pem" && -s "$web_tls_root/key.pem" ]] || {
+    echo "HTTPS console publication requires host TLS certificate material" >&2; exit 2;
+  }
+  web_tls_mounts+=( -v "$web_tls_root:/run/web-tls:ro,z" )
+  web_server_command=(uvicorn app.main:app --host 0.0.0.0 --port 8080 --ssl-certfile /run/web-tls/cert.pem --ssl-keyfile /run/web-tls/key.pem)
+fi
+
+web_probe() {
+  if [[ "$RAIJIN_WEB_TRANSPORT" == https ]]; then
+    curl --insecure --fail --silent "$RAIJIN_WEB_BIND_PROBE_URL/healthz"
+  else
+    curl --fail --silent "$RAIJIN_WEB_BIND_PROBE_URL/healthz"
+  fi
+}
 
 web_auth_secret_mounts=()
 if [[ "$RAIJIN_WEB_AUTH_MODE" == local && "$console_auth_lifecycle" == BOOTSTRAP_REQUIRED ]]; then
@@ -79,12 +111,17 @@ case "$mode" in
       "${web_auth_secret_mounts[@]}" \
       -e OCI_RUNTIME_CONFIG_FILE=/run/oci-runtime/oci-runtime.json \
       -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
+      -e RAIJIN_WEB_BIND_REQUEST_FILE=/run/web-bind-control/request.json \
+      -e RAIJIN_WEB_BIND_RESULT_FILE=/run/web-bind-control/result.json \
       -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
       -v "$runtime_root:/run/platform-status:ro,z" \
       -v "$mode_control_root:/run/mode-control:rw,z" \
-      -v "$oci_runtime_config:/run/oci-runtime/oci-runtime.json:ro,z" "$image"
+      -v "$web_bind_control_root:/run/web-bind-control:rw,z" \
+      -v "$oci_runtime_config:/run/oci-runtime/oci-runtime.json:ro,z" \
+      "${web_tls_mounts[@]}" \
+      "$image" "${web_server_command[@]}"
     for attempt in $(seq 1 30); do
-      curl --fail --silent "$RAIJIN_WEB_BIND_PROBE_URL/healthz" >/dev/null && break
+      web_probe >/dev/null && break
       [[ "$attempt" -lt 30 ]] || { echo "REAL API did not become healthy" >&2; exit 1; }
       sleep 2
     done

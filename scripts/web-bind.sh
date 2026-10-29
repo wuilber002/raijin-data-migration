@@ -86,6 +86,8 @@ PY
   RAIJIN_WEB_TRANSPORT="$transport"
   RAIJIN_WEB_TRUSTED_UPSTREAM_IPS="$upstreams"
   RAIJIN_WEB_BIND_PUBLISH="$publish_host:$port:8080"
-  RAIJIN_WEB_BIND_PROBE_URL="http://$probe_host_url:$port"
+  # The probe reaches the same listener; self-signed TLS deliberately uses
+  # curl --insecure in the launcher, never a weakened browser policy.
+  RAIJIN_WEB_BIND_PROBE_URL="$transport://$probe_host_url:$port"
   export RAIJIN_WEB_BIND_HOST RAIJIN_WEB_BIND_PORT RAIJIN_WEB_TRANSPORT RAIJIN_WEB_TRUSTED_UPSTREAM_IPS RAIJIN_WEB_BIND_PUBLISH RAIJIN_WEB_BIND_PROBE_URL
 }

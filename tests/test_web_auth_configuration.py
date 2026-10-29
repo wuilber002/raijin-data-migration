@@ -23,6 +23,7 @@ def test_local_auth_on_non_loopback_requires_https_and_trusted_proxy():
         load_web_auth_settings({
             "RAIJIN_WEB_AUTH_MODE": "local",
             "RAIJIN_WEB_BIND_HOST": "0.0.0.0",
+            "RAIJIN_WEB_AUTH_BOOTSTRAP_REQUIRED": "false",
         })
 
 
@@ -30,6 +31,7 @@ def test_local_auth_accepts_explicit_https_and_trusted_proxy():
     settings = load_web_auth_settings({
         "RAIJIN_WEB_AUTH_MODE": "local",
         "RAIJIN_WEB_BIND_HOST": "192.0.2.12",
+        "RAIJIN_WEB_TRANSPORT": "https",
         "RAIJIN_WEB_EXTERNAL_HTTPS": "true",
         "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS": "192.0.2.0/24, 2001:db8::/32",
         "RAIJIN_WEB_AUTH_BOOTSTRAP_REQUIRED": "false",
@@ -39,11 +41,25 @@ def test_local_auth_accepts_explicit_https_and_trusted_proxy():
     assert settings.trusted_proxy_networks == ("192.0.2.0/24", "2001:db8::/32")
 
 
+def test_local_auth_accepts_http_only_from_explicit_tls_terminators():
+    settings = load_web_auth_settings({
+        "RAIJIN_WEB_AUTH_MODE": "local",
+        "RAIJIN_WEB_BIND_HOST": "192.0.2.12",
+        "RAIJIN_WEB_TRANSPORT": "http",
+        "RAIJIN_WEB_EXTERNAL_HTTPS": "true",
+        "RAIJIN_WEB_TRUSTED_UPSTREAM_IPS": "192.0.2.21/32,192.0.2.22/32",
+        "RAIJIN_WEB_AUTH_BOOTSTRAP_REQUIRED": "false",
+        "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME": "admin",
+    })
+    assert settings.trusted_upstream_networks == ("192.0.2.21/32", "192.0.2.22/32")
+
+
 def test_initial_local_auth_bootstrap_is_loopback_and_file_only():
     with pytest.raises(WebAuthConfigurationError, match="initial local web-auth bootstrap requires"):
         load_web_auth_settings({
             "RAIJIN_WEB_AUTH_MODE": "local",
             "RAIJIN_WEB_BIND_HOST": "192.0.2.12",
+        "RAIJIN_WEB_TRANSPORT": "https",
             "RAIJIN_WEB_EXTERNAL_HTTPS": "true",
             "RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS": "192.0.2.0/24",
             "RAIJIN_WEB_AUTH_BOOTSTRAP_USERNAME": "admin",

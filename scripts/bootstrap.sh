@@ -72,6 +72,8 @@ if [[ ! -e "$web_bind_config" ]]; then
 # port 8080 internally; only this host endpoint is configurable.
 WEB_BIND_HOST=127.0.0.1
 WEB_BIND_PORT=1604
+WEB_TRANSPORT=http
+WEB_TRUSTED_UPSTREAM_IPS=
 EOF
   chmod 0600 "$web_bind_config"
 fi
@@ -114,7 +116,9 @@ if [[ "$local_runtime_complete" == true ]]; then
   exit 0
 fi
 
-mkdir -p "$data_root/postgres" "$secret_root" "$runtime_root" "$mode_control_root"
+web_bind_control_root="$data_root/web-bind-control"
+mkdir -p "$data_root/postgres" "$secret_root" "$runtime_root" "$mode_control_root" "$web_bind_control_root"
+chmod 0750 "$web_bind_control_root"
 chmod 700 "$secret_root"
 # The web service is loopback-only. SSH is the sole administrative entrypoint,
 # and it accepts only the public key provisioned by Terraform/cloud-init.
@@ -301,6 +305,7 @@ install -m 0750 "$install_root/scripts/raijin-mode.sh" /usr/local/sbin/raijin-mo
 install -m 0750 "$install_root/scripts/console-admin.sh" /usr/local/sbin/raijin-console-admin
 install -m 0750 "$install_root/scripts/console-auth-preflight.sh" /usr/local/sbin/raijin-console-auth-preflight
 install -m 0750 "$install_root/scripts/process-mode-request.sh" /usr/local/sbin/s3-oci-process-mode-request
+install -m 0750 "$install_root/scripts/process-web-bind-request.sh" /usr/local/sbin/s3-oci-process-web-bind-request
 if [[ "$deployment_profile" == LOCAL ]]; then
   # LOCAL is a durable deployment topology, not a Raijin operation mode.
   # Raijin remains in REAL and sees Fujin only through ordinary private
@@ -355,6 +360,31 @@ WantedBy=timers.target
 EOF
 systemctl daemon-reload
 systemctl enable --now s3-oci-mode-request.timer
+
+cat >/etc/systemd/system/s3-oci-web-bind-request.service <<'EOF'
+[Unit]
+Description=Process a validated RAIJIN console endpoint request
+After=s3-oci-migration.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/s3-oci-process-web-bind-request
+EOF
+cat >/etc/systemd/system/s3-oci-web-bind-request.timer <<'EOF'
+[Unit]
+Description=Watch for RAIJIN console endpoint requests
+
+[Timer]
+OnBootSec=10
+OnUnitActiveSec=5
+AccuracySec=1
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now s3-oci-web-bind-request.timer
 
 install -m 0750 "$install_root/scripts/backup-postgres.sh" /usr/local/sbin/s3-oci-backup-postgres
 install -m 0750 "$install_root/scripts/restore-postgres.sh" /usr/local/sbin/s3-oci-restore-postgres

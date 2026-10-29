@@ -98,6 +98,8 @@ class WebAuthSettings:
 
     mode: WebAuthMode
     bind_host: str
+    transport: str
+    trusted_upstream_networks: tuple[str, ...]
     external_https: bool
     trusted_proxy_networks: tuple[str, ...]
     session_idle_minutes: int
@@ -123,6 +125,10 @@ class WebAuthSettings:
 
         bind_host = str(values.get("RAIJIN_WEB_BIND_HOST", "127.0.0.1")).strip()
         loopback_bind = _loopback_bind(bind_host)
+        transport = str(values.get("RAIJIN_WEB_TRANSPORT", "http")).strip().lower()
+        if transport not in {"http", "https"}:
+            raise WebAuthConfigurationError("RAIJIN_WEB_TRANSPORT must be http or https")
+        trusted_upstream_networks = _trusted_proxy_networks(values.get("RAIJIN_WEB_TRUSTED_UPSTREAM_IPS", ""))
         external_https = _boolean(values.get("RAIJIN_WEB_EXTERNAL_HTTPS", "false"), "RAIJIN_WEB_EXTERNAL_HTTPS")
         trusted_proxy_networks = _trusted_proxy_networks(
             values.get("RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS", "")
@@ -153,16 +159,21 @@ class WebAuthSettings:
             raise WebAuthConfigurationError(
                 "RAIJIN_WEB_AUTH_BOOTSTRAP_PASSWORD_FILE must be an absolute path"
             )
-        if mode is WebAuthMode.LOCAL and not loopback_bind:
-            if not external_https or not trusted_proxy_networks:
-                raise WebAuthConfigurationError(
-                    "local web authentication on a non-loopback bind requires external HTTPS "
-                    "and RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS"
-                )
         if mode is WebAuthMode.LOCAL and bootstrap_required and not loopback_bind:
             raise WebAuthConfigurationError(
                 "initial local web-auth bootstrap requires RAIJIN_WEB_BIND_HOST=127.0.0.1 or ::1"
             )
+        if mode is WebAuthMode.LOCAL and not loopback_bind:
+            # Direct TLS is secure without a proxy.  Plain HTTP is permitted
+            # only behind an explicit TLS terminator; its /32 list is both the
+            # TCP peer allowlist and the only trusted forwarded-header source.
+            if transport == "https":
+                if not external_https:
+                    raise WebAuthConfigurationError("direct HTTPS requires RAIJIN_WEB_EXTERNAL_HTTPS=true")
+            elif not external_https or not trusted_upstream_networks:
+                raise WebAuthConfigurationError(
+                    "non-loopback HTTP requires external HTTPS and trusted upstream IPv4 /32 entries"
+                )
         if mode is WebAuthMode.LOCAL and bootstrap_required and (not bootstrap_username or not bootstrap_password_file):
             raise WebAuthConfigurationError(
                 "initial local web authentication requires bootstrap username and password file references"
@@ -170,6 +181,8 @@ class WebAuthSettings:
         return cls(
             mode=mode,
             bind_host=bind_host,
+            transport=transport,
+            trusted_upstream_networks=trusted_upstream_networks,
             external_https=external_https,
             trusted_proxy_networks=trusted_proxy_networks,
             session_idle_minutes=idle,
