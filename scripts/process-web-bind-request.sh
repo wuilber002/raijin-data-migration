@@ -11,6 +11,39 @@ retire_request="$control_root/retire-bootstrap"
 config=/etc/s3-oci-migration/web-bind.env
 secret_root=/etc/s3-oci-migration/secrets
 
+# The container sees only its Podman interfaces. Collect candidate bind
+# addresses on the host, where the listener is actually published.
+publish_bind_addresses() {
+  python3 >"$control_root/interfaces.json.tmp" <<'PY'
+import json
+import subprocess
+
+addresses = [
+    {"value": "127.0.0.1", "label": "127.0.0.1 — Loopback only"},
+    {"value": "0.0.0.0", "label": "0.0.0.0 — All IPv4 interfaces"},
+]
+try:
+    rows = json.loads(subprocess.check_output(
+        ["ip", "-j", "-4", "addr", "show", "up"], text=True, stderr=subprocess.DEVNULL
+    ))
+    for row in rows:
+        name = str(row.get("ifname") or "interface")
+        for info in row.get("addr_info") or []:
+            address = str(info.get("local") or "")
+            if info.get("family") != "inet" or address in {"", "127.0.0.1"}:
+                continue
+            addresses.append({"value": address, "label": f"{address} — {name}"})
+except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+    pass
+seen = set()
+print(json.dumps([item for item in addresses if not (item["value"] in seen or seen.add(item["value"]))]))
+PY
+  chmod 0640 "$control_root/interfaces.json.tmp"
+  mv "$control_root/interfaces.json.tmp" "$control_root/interfaces.json"
+}
+
+publish_bind_addresses
+
 if [[ -e "$retire_request" ]]; then
   source "$install_root/scripts/web-auth.sh"
   source "$install_root/scripts/console-auth-lifecycle.sh"

@@ -100,6 +100,17 @@ def test_admin_web_bind_request_is_constrained_and_written_atomically(tmp_path, 
                                                                trusted_upstream_ips=["192.0.2.0/24"]), request, session)
 
 
+def test_admin_web_bind_addresses_come_from_host_inventory(tmp_path, monkeypatch):
+    control = tmp_path / "web-bind" / "request.json"
+    control.parent.mkdir()
+    control.parent.joinpath("interfaces.json").write_text(
+        '[{"value":"127.0.0.1","label":"127.0.0.1 — Loopback only"},'
+        '{"value":"10.0.0.12","label":"10.0.0.12 — ens3"}]', encoding="utf-8"
+    )
+    monkeypatch.setenv("RAIJIN_WEB_BIND_REQUEST_FILE", str(control))
+    assert main.console_get_web_bind_addresses()["addresses"][1]["value"] == "10.0.0.12"
+
+
 def test_auth_security_summary_is_aggregate_and_detects_lockouts_and_denial_spikes(tmp_path, monkeypatch):
     database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'auth-security.db'}")
     monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))

@@ -358,7 +358,7 @@
       <h3 data-console-i18n="Endpoint da console"></h3>
       <p class="hint" id="console-web-bind-help" data-console-i18n="HTTPS direto usa certificado autoassinado persistente. HTTP fora do loopback exige os IPs privados /32 dos terminadores TLS."></p>
       <form id="console-web-bind" class="row console-endpoint-form">
-        <label class="field"><span data-console-i18n="IP de bind"></span><input name="host" inputmode="numeric" required></label>
+        <label class="field"><span data-console-i18n="IP de bind"></span><select name="host" required></select></label>
         <label class="field"><span data-console-i18n="Porta"></span><input name="port" type="number" min="1" max="65535" required></label>
         <label class="field"><span data-console-i18n="Transporte"></span><select name="transport"><option value="https">HTTPS</option><option value="http">HTTP</option></select></label>
         <label class="field"><span data-console-i18n="IPs confiáveis do terminador TLS (/32, separados por vírgula)"></span><input name="trusted_upstream_ips"></label>
@@ -396,15 +396,18 @@
       return query.toString() ? `?${query}` : "";
     };
     const render = async () => {
-      const [users, sessions, audit, authSettings, webBind] = await Promise.all([
+      const [users, sessions, audit, authSettings, webBind, bindAddresses] = await Promise.all([
         apiCall("/api/admin/users"), apiCall("/api/admin/sessions"),
         apiCall(`/api/admin/auth-audit${auditQuery()}`),
-        apiCall("/api/admin/auth-settings"), apiCall("/api/admin/web-bind"),
+        apiCall("/api/admin/auth-settings"), apiCall("/api/admin/web-bind"), apiCall("/api/admin/web-bind/addresses"),
       ]);
       const auditEventLabel = row => row.event_type === "USER_CREATED" && row.target
         ? `${row.event_type} (${row.target})` : row.event_type;
       card.querySelector("#console-auth-policy").elements.password_history_count.value = authSettings.password_history_count;
       const bindForm = card.querySelector("#console-web-bind");
+      const addresses = Array.isArray(bindAddresses.addresses) ? bindAddresses.addresses : [];
+      if (!addresses.some(item => item.value === webBind.host)) addresses.push({value:webBind.host, label:webBind.host});
+      bindForm.host.innerHTML = addresses.map(item => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label || item.value)}</option>`).join("");
       bindForm.host.value = webBind.host; bindForm.port.value = webBind.port; bindForm.transport.value = webBind.transport;
       bindForm.trusted_upstream_ips.value = (webBind.trusted_upstream_ips || []).join(",");
       bindForm.querySelectorAll("input, select, button").forEach(control => { control.disabled = Boolean(webBind.locked || webBind.pending); });

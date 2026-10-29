@@ -4309,6 +4309,22 @@ def console_web_bind_state() -> dict:
     }
 
 
+@app.get("/api/admin/web-bind/addresses")
+def console_get_web_bind_addresses() -> dict:
+    address_file = Path(os.environ.get("RAIJIN_WEB_BIND_REQUEST_FILE", "/run/web-bind-control/request.json")).parent / "interfaces.json"
+    fallback = [
+        {"value": "127.0.0.1", "label": "127.0.0.1 — Loopback only"},
+        {"value": "0.0.0.0", "label": "0.0.0.0 — All IPv4 interfaces"},
+    ]
+    try:
+        addresses = json.loads(address_file.read_text(encoding="utf-8"))
+        if not isinstance(addresses, list) or not all(isinstance(item, dict) for item in addresses):
+            raise ValueError("Invalid host address inventory")
+    except (OSError, ValueError, json.JSONDecodeError):
+        addresses = fallback
+    return {"addresses": addresses}
+
+
 @app.get("/api/admin/web-bind")
 def console_get_web_bind() -> dict:
     return console_web_bind_state()
