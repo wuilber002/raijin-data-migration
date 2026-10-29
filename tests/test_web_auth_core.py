@@ -4,6 +4,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import base64
+import hmac
+import hashlib
+import struct
 from sqlalchemy import BigInteger, create_engine, select
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
@@ -109,6 +113,17 @@ def test_admin_web_bind_addresses_come_from_host_inventory(tmp_path, monkeypatch
     )
     monkeypatch.setenv("RAIJIN_WEB_BIND_REQUEST_FILE", str(control))
     assert main.console_get_web_bind_addresses()["addresses"][1]["value"] == "10.0.0.12"
+
+
+def test_totp_accepts_current_window_and_rejects_wrong_pin():
+    secret = main.generate_totp_secret()
+    timestamp = 1_700_000_000
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8))
+    digest = hmac.new(key, struct.pack(">Q", timestamp // 30), hashlib.sha1).digest()
+    start = digest[-1] & 0x0F
+    pin = str((struct.unpack(">I", digest[start:start + 4])[0] & 0x7fffffff) % 1_000_000).zfill(6)
+    assert main.verify_totp(secret, pin, now=timestamp)
+    assert not main.verify_totp(secret, "000000", now=timestamp)
 
 
 def test_auth_security_summary_is_aggregate_and_detects_lockouts_and_denial_spikes(tmp_path, monkeypatch):

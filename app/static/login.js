@@ -7,6 +7,7 @@
   });
   let csrf = "";
   let changingPassword = false;
+  let mfaChallenge = "";
   const passwordControl = (name, label, autocomplete) => `<label>${label}<span class="password-control"><input name="${name}" type="password" autocomplete="${autocomplete}" minlength="14" required><button type="button" class="password-visibility-toggle" aria-pressed="false"><span class="password-eye" aria-hidden="true"></span></button></span></label>`;
   const installPasswordVisibilityControls = () => {
     form.querySelectorAll(".password-visibility-toggle").forEach(button => {
@@ -39,6 +40,11 @@
     form.innerHTML = `${passwordControl("password", portuguese ? "Nova senha" : "New password", "new-password")}${passwordControl("confirmation", portuguese ? "Confirmar senha" : "Confirm password", "new-password")}<p id="message" role="alert"></p><button type="submit">${portuguese ? "Alterar senha" : "Change password"}</button>`;
     installPasswordVisibilityControls();
   };
+  const showMfa = () => {
+    mfaChallenge = mfaChallenge || "";
+    document.querySelector(".card p")?.replaceChildren(portuguese ? "Informe o código de seis dígitos do seu autenticador." : "Enter the six-digit code from your authenticator.");
+    form.innerHTML = `<label>${portuguese ? "Código de autenticação" : "Authentication code"}<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus></label><p id="message" role="alert"></p><button type="submit">${portuguese ? "Verificar código" : "Verify code"}</button>`;
+  };
   form.addEventListener("submit", async event => {
     event.preventDefault(); event.stopImmediatePropagation();
     const button = form.querySelector('button[type="submit"]'); button.disabled = true; message().textContent = "";
@@ -51,9 +57,16 @@
         location.assign("/");
         return;
       }
+      if (mfaChallenge) {
+        const response = await fetch("/api/auth/mfa/verify", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({challenge_token:mfaChallenge, code:form.code.value})});
+        if (!response.ok) await responseError(response);
+        const payload = await response.json(); rememberCsrf(payload.csrf_token); location.assign("/"); return;
+      }
       const response = await fetch("/api/auth/login", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({username: form.username.value, password: form.password.value})});
       if (!response.ok) await responseError(response);
-      const payload = await response.json(); rememberCsrf(payload.csrf_token);
+      const payload = await response.json();
+      if (payload.mfa_required) { mfaChallenge = payload.challenge_token; showMfa(); return; }
+      rememberCsrf(payload.csrf_token);
       if (payload.must_change_password) showChangePassword(); else location.assign("/");
     } catch (error) {
       message().textContent = error.message === "password-mismatch"

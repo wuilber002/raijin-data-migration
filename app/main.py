@@ -27,7 +27,12 @@ import math
 import re
 import shutil
 import uuid
+import base64
+import struct
+import time
+import secrets
 from pathlib import Path
+from cryptography.fernet import Fernet, InvalidToken
 from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
@@ -210,6 +215,9 @@ runtime_context = load_runtime_context()
 web_auth_settings = load_web_auth_settings()
 cloud_backend = backend_for(runtime_context)
 password = read_secret(os.environ["POSTGRES_PASSWORD_FILE"])
+_mfa_cipher = Fernet(base64.urlsafe_b64encode(hashlib.sha256(
+    ("raijin-console-mfa-v1:" + password).encode("utf-8")
+).digest()))
 parsed_database_url = make_url(database_url)
 if parsed_database_url.drivername.startswith("postgres"):
     database_url = parsed_database_url.set(password=password).render_as_string(
@@ -1159,6 +1167,9 @@ class ConsoleUser(Base):
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    mfa_secret_encrypted: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    mfa_pending_secret_encrypted: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -1190,6 +1201,30 @@ class ConsoleLoginAttempt(Base):
     identity_hash: Mapped[str] = mapped_column(String(64), index=True)
     succeeded: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ConsoleMfaChallenge(Base):
+    __tablename__ = "console_mfa_challenges"
+    __table_args__ = (Index("ix_console_mfa_challenge_expiry", "expires_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("console_users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    origin_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ConsoleMfaRecoveryCode(Base):
+    __tablename__ = "console_mfa_recovery_codes"
+    __table_args__ = (Index("ix_console_mfa_recovery_user", "user_id", "used_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("console_users.id"), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ConsoleAuthAuditEvent(Base):
@@ -1903,6 +1938,15 @@ class ConsoleLoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class ConsoleMfaVerifyRequest(BaseModel):
+    challenge_token: str = Field(min_length=32, max_length=256)
+    code: str = Field(min_length=6, max_length=32)
+
+
+class ConsoleMfaEnrollConfirm(BaseModel):
+    code: str = Field(min_length=6, max_length=12)
+
+
 class ConsolePasswordChange(BaseModel):
     current_password: str = Field(default="", max_length=1024)
     new_password: str = Field(min_length=14, max_length=1024)
@@ -2043,7 +2087,7 @@ def auth_route_requirement(path: str, method: str) -> ConsoleRole | str | None:
     """Central deny-by-default route policy; keep worker APIs out of human RBAC."""
     # The login document has exactly one external script. Keep that minimal
     # asset public; every other console static asset remains session-protected.
-    if path in {"/healthz", "/metrics", "/login", "/api/auth/login", "/static/login.js"}:
+    if path in {"/healthz", "/metrics", "/login", "/api/auth/login", "/api/auth/mfa/verify", "/static/login.js"}:
         return None
     if path in {"/api/auth/me", "/api/auth/logout", "/api/auth/password", "/api/auth/profile"}:
         return ConsoleRole.VIEWER
@@ -2232,6 +2276,9 @@ def create_schema() -> None:
         for column, sql_type in {
             "display_name": "VARCHAR(128)",
             "email": "VARCHAR(320)",
+            "mfa_secret_encrypted": "VARCHAR(512)",
+            "mfa_pending_secret_encrypted": "VARCHAR(512)",
+            "mfa_enabled": "BOOLEAN NOT NULL DEFAULT FALSE",
         }.items():
             if column not in existing_console_user_columns:
                 connection.execute(text(f"ALTER TABLE console_users ADD COLUMN {column} {sql_type}"))
@@ -3987,7 +4034,7 @@ def set_console_cookies(response: Response, token: str, csrf: str) -> None:
 
 def console_user_view(user: ConsoleUser) -> dict:
     return {"id": user.id, "username": user.username, "role": user.role,
-            "enabled": user.enabled, "must_change_password": user.must_change_password,
+            "enabled": user.enabled, "must_change_password": user.must_change_password, "mfa_enabled": user.mfa_enabled,
             "last_login_at": user.last_login_at, "created_at": user.created_at}
 
 
@@ -4006,7 +4053,7 @@ def normalize_console_profile(display_name: str | None, email: str | None) -> tu
 
 def console_profile_view(user: ConsoleUser) -> dict:
     return {"username": user.username, "role": user.role, "display_name": user.display_name,
-            "email": user.email, "last_login_at": user.last_login_at}
+            "email": user.email, "last_login_at": user.last_login_at, "mfa_enabled": user.mfa_enabled}
 
 
 MAX_CONSOLE_PASSWORD_HISTORY = 12
@@ -4105,6 +4152,63 @@ def replace_console_password(session: Session, user: ConsoleUser, password: str,
         session.delete(item)
 
 
+def mfa_encrypt(secret: str) -> str:
+    return _mfa_cipher.encrypt(secret.encode("ascii")).decode("ascii")
+
+
+def mfa_decrypt(value: str | None) -> str:
+    if not value:
+        raise ValueError("MFA secret is unavailable")
+    try:
+        return _mfa_cipher.decrypt(value.encode("ascii")).decode("ascii")
+    except (InvalidToken, UnicodeDecodeError) as error:
+        raise ValueError("MFA secret cannot be read") from error
+
+
+def generate_totp_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def verify_totp(secret: str, code: str, *, now: int | None = None) -> bool:
+    normalized = re.sub(r"[\s-]", "", str(code))
+    if not re.fullmatch(r"\d{6}", normalized):
+        return False
+    timestamp = int(time.time()) if now is None else now
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
+    for offset in (-1, 0, 1):
+        counter = (timestamp // 30) + offset
+        digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+        start = digest[-1] & 0x0F
+        expected = str(((struct.unpack(">I", digest[start:start + 4])[0] & 0x7fffffff) % 1_000_000)).zfill(6)
+        if hmac.compare_digest(expected, normalized):
+            return True
+    return False
+
+
+def generate_recovery_codes(session: Session, user: ConsoleUser) -> list[str]:
+    session.execute(delete(ConsoleMfaRecoveryCode).where(ConsoleMfaRecoveryCode.user_id == user.id))
+    codes = [secrets.token_hex(5).upper() for _ in range(10)]
+    session.add_all(ConsoleMfaRecoveryCode(user_id=user.id, code_hash=hash_opaque_token(code)) for code in codes)
+    return codes
+
+
+def mfa_verified_or_recovery(session: Session, user: ConsoleUser, code: str) -> bool:
+    try:
+        if verify_totp(mfa_decrypt(user.mfa_secret_encrypted), code):
+            return True
+    except ValueError:
+        return False
+    candidate = hash_opaque_token(re.sub(r"[\s-]", "", str(code)).upper())
+    recovery = session.scalar(select(ConsoleMfaRecoveryCode).where(
+        ConsoleMfaRecoveryCode.user_id == user.id, ConsoleMfaRecoveryCode.code_hash == candidate,
+        ConsoleMfaRecoveryCode.used_at.is_(None)
+    ))
+    if recovery:
+        recovery.used_at = utcnow()
+        return True
+    return False
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page() -> HTMLResponse:
     if not web_auth_settings.enabled:
@@ -4152,6 +4256,16 @@ def console_login(payload: ConsoleLoginRequest, request: FastAPIRequest,
         raise HTTPException(status_code=401, detail="Invalid username or password")
     if PasswordHasher().needs_rehash(user.password_hash):
         user.password_hash = PasswordHasher().hash(payload.password)
+    if user.mfa_enabled:
+        challenge_token = generate_session_token()
+        session.add(ConsoleMfaChallenge(
+            user_id=user.id, token_hash=hash_opaque_token(challenge_token), origin_hash=origin_hash,
+            expires_at=now + timedelta(minutes=5),
+        ))
+        auth_audit(session, "PASSWORD_VERIFIED_MFA_REQUIRED", actor_user_id=user.id,
+                   target=user.username, request=request)
+        session.commit()
+        return JSONResponse({"mfa_required": True, "challenge_token": challenge_token})
     user.last_login_at = now
     token, csrf = create_console_session(session, user)
     auth_audit(session, "LOGIN_SUCCEEDED", actor_user_id=user.id, target=user.username, request=request)
@@ -4159,6 +4273,39 @@ def console_login(payload: ConsoleLoginRequest, request: FastAPIRequest,
         ConsoleLoginAttempt.created_at < now - timedelta(days=CONSOLE_LOGIN_ATTEMPT_RETENTION_DAYS)))
     session.execute(delete(ConsoleAuthAuditEvent).where(
         ConsoleAuthAuditEvent.created_at < now - timedelta(days=CONSOLE_AUTH_EVENT_RETENTION_DAYS)))
+    session.commit()
+    response = JSONResponse(jsonable_encoder({"user": console_user_view(user), "csrf_token": csrf,
+                                              "must_change_password": user.must_change_password}))
+    set_console_cookies(response, token, csrf)
+    return response
+
+
+@app.post("/api/auth/mfa/verify")
+def console_verify_mfa(payload: ConsoleMfaVerifyRequest, request: FastAPIRequest,
+                       session: Session = Depends(get_session)) -> Response:
+    now = utcnow()
+    challenge = session.scalar(select(ConsoleMfaChallenge).where(
+        ConsoleMfaChallenge.token_hash == hash_opaque_token(payload.challenge_token),
+        ConsoleMfaChallenge.completed_at.is_(None), ConsoleMfaChallenge.expires_at > now,
+    ))
+    origin_hash = auth_client_origin(request)
+    if not challenge or not hmac.compare_digest(challenge.origin_hash, origin_hash) or challenge.attempts >= 5:
+        raise HTTPException(status_code=401, detail="MFA challenge is invalid or expired")
+    user = session.get(ConsoleUser, challenge.user_id)
+    if not user or not user.enabled or not user.mfa_enabled:
+        raise HTTPException(status_code=401, detail="MFA challenge is invalid or expired")
+    if not mfa_verified_or_recovery(session, user, payload.code):
+        challenge.attempts += 1
+        auth_audit(session, "MFA_FAILED", actor_user_id=user.id, target=user.username,
+                   result="DENIED", request=request)
+        session.commit()
+        raise HTTPException(status_code=401, detail="Invalid authentication code")
+    challenge.completed_at = now
+    user.last_login_at = now
+    token, csrf = create_console_session(session, user)
+    auth_audit(session, "MFA_VERIFIED", actor_user_id=user.id, target=user.username, request=request)
+    auth_audit(session, "LOGIN_SUCCEEDED", actor_user_id=user.id, target=user.username, request=request,
+               detail={"mfa": True})
     session.commit()
     response = JSONResponse(jsonable_encoder({"user": console_user_view(user), "csrf_token": csrf,
                                               "must_change_password": user.must_change_password}))
@@ -4198,6 +4345,44 @@ def console_update_profile(payload: ConsoleProfileUpdate, request: FastAPIReques
                request=request, detail={"fields": ["display_name", "email"]})
     session.commit()
     return console_profile_view(user)
+
+
+@app.post("/api/auth/mfa/enrollment")
+def console_start_mfa_enrollment(request: FastAPIRequest, session: Session = Depends(get_session)) -> dict:
+    user = session.get(ConsoleUser, console_principal(request)["id"])
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    secret = generate_totp_secret()
+    user.mfa_pending_secret_encrypted = mfa_encrypt(secret)
+    auth_audit(session, "MFA_ENROLLMENT_STARTED", actor_user_id=user.id, target=user.username, request=request)
+    session.commit()
+    issuer = "RAIJIN"
+    label = f"{issuer}:{user.username}"
+    from urllib.parse import quote
+    uri = f"otpauth://totp/{quote(label)}?secret={secret}&issuer={quote(issuer)}&algorithm=SHA1&digits=6&period=30"
+    return {"secret": secret, "otpauth_uri": uri, "issuer": issuer, "username": user.username}
+
+
+@app.post("/api/auth/mfa/enrollment/confirm")
+def console_confirm_mfa_enrollment(payload: ConsoleMfaEnrollConfirm, request: FastAPIRequest,
+                                   session: Session = Depends(get_session)) -> dict:
+    user = session.get(ConsoleUser, console_principal(request)["id"])
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        secret = mfa_decrypt(user.mfa_pending_secret_encrypted)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail="Start MFA enrollment before confirming it") from error
+    if not verify_totp(secret, payload.code):
+        auth_audit(session, "MFA_ENROLLMENT_FAILED", actor_user_id=user.id, target=user.username,
+                   result="DENIED", request=request)
+        session.commit()
+        raise HTTPException(status_code=422, detail="Invalid authentication code")
+    user.mfa_secret_encrypted, user.mfa_pending_secret_encrypted, user.mfa_enabled = mfa_encrypt(secret), None, True
+    recovery_codes = generate_recovery_codes(session, user)
+    auth_audit(session, "MFA_ENABLED", actor_user_id=user.id, target=user.username, request=request)
+    session.commit()
+    return {"enabled": True, "recovery_codes": recovery_codes}
 
 
 @app.post("/api/auth/logout")
@@ -4428,6 +4613,26 @@ def console_update_user(user_id: int, payload: ConsoleUserUpdate, request: FastA
             ConsoleSession.revoked_at.is_(None)).values(revoked_at=utcnow(), revoke_reason="admin_update"))
         auth_audit(session, "USER_UPDATED", actor_user_id=actor["id"], target=user.username,
                    request=request, detail={"changed": sorted(changed)})
+    session.commit()
+    return console_user_view(user)
+
+
+@app.post("/api/admin/users/{user_id}/mfa/reset")
+def console_reset_user_mfa(user_id: int, request: FastAPIRequest,
+                           session: Session = Depends(get_session)) -> dict:
+    user = session.get(ConsoleUser, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Console user not found")
+    actor = console_principal(request)
+    if user.id == actor["id"]:
+        raise HTTPException(status_code=422, detail="Use a new enrollment from your profile to change your own MFA")
+    user.mfa_secret_encrypted = None
+    user.mfa_pending_secret_encrypted = None
+    user.mfa_enabled = False
+    session.execute(delete(ConsoleMfaRecoveryCode).where(ConsoleMfaRecoveryCode.user_id == user.id))
+    session.execute(update(ConsoleSession).where(ConsoleSession.user_id == user.id,
+        ConsoleSession.revoked_at.is_(None)).values(revoked_at=utcnow(), revoke_reason="mfa_reset"))
+    auth_audit(session, "MFA_RESET", actor_user_id=actor["id"], target=user.username, request=request)
     session.commit()
     return console_user_view(user)
 

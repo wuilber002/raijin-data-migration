@@ -276,6 +276,17 @@
           <label class="field"><span data-console-i18n="Confirmar nova senha"></span><input name="confirmation" type="password" minlength="14" autocomplete="new-password" required></label>
           <div class="field action"><span class="field-label" data-console-i18n="Segurança"></span><button data-console-i18n="Trocar senha"></button></div>
         </form>
+        <hr>
+        <h3 data-console-i18n="Autenticação em duas etapas"></h3>
+        <p class="hint" id="console-mfa-state"></p>
+        <div id="console-mfa-enrollment" class="hidden">
+          <p class="hint" data-console-i18n="Adicione esta chave ao seu aplicativo autenticador e informe o código de seis dígitos para confirmar."></p>
+          <label class="field"><span data-console-i18n="Chave de configuração"></span><input id="console-mfa-secret" readonly></label>
+          <label class="field"><span data-console-i18n="Código de autenticação"></span><input id="console-mfa-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
+          <button type="button" id="console-mfa-confirm" data-console-i18n="Ativar autenticação em duas etapas"></button>
+        </div>
+        <button type="button" id="console-mfa-start" data-console-i18n="Configurar autenticador"></button>
+        <div id="console-mfa-recovery" class="hidden"><p class="warning" data-console-i18n="Guarde estes códigos de recuperação em local seguro. Eles não serão exibidos novamente."></p><code id="console-mfa-recovery-codes"></code></div>
         <p id="console-profile-message" class="hint" role="status"></p>
       </div>`;
     document.body.append(profileModal);
@@ -290,6 +301,8 @@
       const data = await apiCall("/api/auth/profile");
       const form = profileModal.querySelector("#console-profile-form");
       ["username", "display_name", "email"].forEach(field => { form.elements[field].value = data[field] || ""; });
+      profileModal.querySelector("#console-mfa-state").textContent = data.mfa_enabled ? uiText("Autenticador configurado.") : uiText("Nenhum autenticador configurado.");
+      profileModal.querySelector("#console-mfa-start").classList.toggle("hidden", Boolean(data.mfa_enabled));
       if (window.openModal) window.openModal("#console-profile-modal"); else profileModal.classList.remove("hidden");
     };
     profile.addEventListener("click", () => {
@@ -313,6 +326,26 @@
         const result = await apiCall("/api/auth/password", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({current_password:form.current_password.value, new_password:form.new_password.value})});
         if (result.csrf_token) sessionStorage.setItem("raijin_csrf", result.csrf_token);
         form.reset(); profileMessage("Senha alterada. As demais sessões foram encerradas.");
+      } catch (error) { profileMessage(error.message); }
+    });
+    profileModal.querySelector("#console-mfa-start").addEventListener("click", async () => {
+      try {
+        const data = await apiCall("/api/auth/mfa/enrollment", {method:"POST"});
+        profileModal.querySelector("#console-mfa-secret").value = data.secret;
+        profileModal.querySelector("#console-mfa-enrollment").classList.remove("hidden");
+        profileMessage("Informe o código exibido no autenticador para concluir a ativação.");
+      } catch (error) { profileMessage(error.message); }
+    });
+    profileModal.querySelector("#console-mfa-confirm").addEventListener("click", async () => {
+      try {
+        const code = profileModal.querySelector("#console-mfa-code").value;
+        const data = await apiCall("/api/auth/mfa/enrollment/confirm", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({code})});
+        profileModal.querySelector("#console-mfa-recovery-codes").textContent = data.recovery_codes.join("  ");
+        profileModal.querySelector("#console-mfa-recovery").classList.remove("hidden");
+        profileModal.querySelector("#console-mfa-enrollment").classList.add("hidden");
+        profileModal.querySelector("#console-mfa-start").classList.add("hidden");
+        profileModal.querySelector("#console-mfa-state").textContent = uiText("Autenticador configurado.");
+        profileMessage("Autenticação em duas etapas ativada.");
       } catch (error) { profileMessage(error.message); }
     });
     document.addEventListener("raijin:language-changed", () => {
@@ -412,7 +445,7 @@
       bindForm.trusted_upstream_ips.value = (webBind.trusted_upstream_ips || []).join(",");
       bindForm.querySelectorAll("input, select, button").forEach(control => { control.disabled = Boolean(webBind.locked || webBind.pending); });
       card.querySelector("#console-web-bind-status").textContent = webBind.locked ? uiText(webBind.lock_reason) : (webBind.pending ? uiText("Solicitação de endpoint aguardando aplicação no host.") : (webBind.result?.message || ""));
-      card.querySelector("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Ativo")}</th><th>${uiText("Redefinir senha")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(uiText("Ativar {{username}}", {username:user.username}))}"></td><td><input data-field="password" type="password" minlength="14" placeholder="${escapeHtml(uiText("Opcional"))}"></td><td><button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button></td></tr>`).join("")}</tbody></table>`;
+      card.querySelector("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Ativo")}</th><th>MFA</th><th>${uiText("Redefinir senha")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(uiText("Ativar {{username}}", {username:user.username}))}"></td><td>${user.mfa_enabled ? `<button type="button" class="secondary" data-reset-mfa="${user.id}">${uiText("Redefinir MFA")}</button>` : uiText("Não configurado")}</td><td><input data-field="password" type="password" minlength="14" placeholder="${escapeHtml(uiText("Opcional"))}"></td><td><button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button></td></tr>`).join("")}</tbody></table>`;
       card.querySelector("#console-sessions").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:row.is_current?`<button type="button" disabled title="${escapeHtml(uiText("Você não pode revogar a sessão atual."))}">${uiText("Revogar")}</button>`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
       card.querySelector("#console-auth-audit").innerHTML = `<table><thead><tr><th>${uiText("Data e hora")}</th><th>${uiText("Responsável")}</th><th>${uiText("Evento")}</th><th>${uiText("Resultado")}</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||uiText("sistema"))}</td><td>${escapeHtml(auditEventLabel(row))}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;
       card.querySelectorAll("[data-session]").forEach(button => button.addEventListener("click", async () => {
@@ -425,6 +458,10 @@
         if (password) payload.password = password;
         await apiCall(`/api/admin/users/${button.dataset.saveUser}`, {method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify(payload)});
         await render();
+      }));
+      card.querySelectorAll("[data-reset-mfa]").forEach(button => button.addEventListener("click", async () => {
+        if (!window.confirm(uiText("Redefinir MFA deste usuário encerrará suas sessões. Continuar?"))) return;
+        await apiCall(`/api/admin/users/${button.dataset.resetMfa}/mfa/reset`, {method:"POST"}); await render();
       }));
     };
     card.querySelector("#console-create-user").addEventListener("submit", async event => {
