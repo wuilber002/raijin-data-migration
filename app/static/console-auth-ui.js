@@ -4,6 +4,26 @@
   const uiText = (value, options) => window.t ? window.t(value, options) : value;
   const localTime = value => value ? new Date(value).toLocaleString(window.raijinLocale?.() || "pt-BR") : "—";
   const roleRank = {VIEWER: 1, OPERATOR: 2, ADMIN: 3};
+  // The migration screen builds several controls after the page is loaded
+  // (waves, projects and source actions).  The API remains the authority,
+  // but a VIEWER must not be invited to issue a request that is guaranteed to
+  // be denied.  Keep the read-only buttons (reports, manifests, timelines)
+  // available and identify only commands that can change operational state.
+  const migrationMutationIds = new Set([
+    "source-discovery-action", "source-validate-destination", "source-edit-action",
+    "source-lifecycle-action", "create-source-action", "source-submit",
+    "wave-create-submit", "waves-queue-all", "migration-project-create",
+    "migration-project-archive", "migration-project-closure", "project-closure-issue",
+  ]);
+  const migrationMutationHandlers = /(?:openDiscoveryModal|startEditSource|removeOrDeactivateSource|openNewSourceModal|submitSelectedWaveMethod|queue(?:All)?PlannedWave|waveAction|verifyWave|deleteWave|start(?:Source)?DeepAudit|toggleDeepAuditQueue|reprocessModifiedDiscoveryObjects|openMigrationProjectCreateModal|openProjectClosureModal)/;
+  const markMigrationMutationControls = root => {
+    root?.querySelectorAll?.("button, input[type=submit]").forEach(control => {
+      const handler = control.getAttribute("onclick") || "";
+      if (migrationMutationIds.has(control.id) || migrationMutationHandlers.test(handler)) {
+        control.dataset.requiredRole = "OPERATOR";
+      }
+    });
+  };
   const applyAuthTranslations = root => {
     root.querySelectorAll?.("[data-console-i18n]").forEach(node => { node.textContent = uiText(node.dataset.consoleI18n); });
     root.querySelectorAll?.("[data-console-i18n-aria-label]").forEach(node => { node.setAttribute("aria-label", uiText(node.dataset.consoleI18nAriaLabel)); });
@@ -32,7 +52,24 @@
     try { identity = await apiCall("/api/auth/me"); } catch (_) { return; }
     if (!identity.enabled) return;
     window.raijinConsoleRole = identity.user.role;
+    markMigrationMutationControls(document);
     applyRoleControls(identity.user.role);
+    const migrations = document.getElementById("view-migrations");
+    if (migrations) {
+      // Wave/project refreshes replace their rows in a single DOM update.
+      // Reapply the client-side affordance only to newly inserted controls;
+      // no network call or layout-wide polling is involved.
+      new MutationObserver(records => {
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            if (node.nodeType !== Node.ELEMENT_NODE) continue;
+            markMigrationMutationControls(node);
+            if (node.matches?.("button, input[type=submit]")) markMigrationMutationControls(node.parentElement);
+          }
+        }
+        applyRoleControls(identity.user.role);
+      }).observe(migrations, {childList:true, subtree:true});
+    }
     const actions = document.querySelector(".banner-actions");
     const userMenu = document.createElement("div");
     userMenu.className = "console-user-menu";

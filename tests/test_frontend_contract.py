@@ -144,6 +144,18 @@ def test_console_hides_admin_settings_navigation_for_non_admin_roles():
     assert "gear[data-required-role=\"ADMIN\"]" in script
 
 
+def test_console_disables_dynamic_migration_mutations_for_viewers():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert "migrationMutationIds" in script
+    assert '"source-discovery-action"' in script
+    assert '"wave-create-submit"' in script
+    assert '"migration-project-create"' in script
+    assert "migrationMutationHandlers" in script
+    assert "queue(?:All)?PlannedWave" in script
+    assert "new MutationObserver(records" in script
+    assert "markMigrationMutationControls(node)" in script
+
+
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():
     catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
