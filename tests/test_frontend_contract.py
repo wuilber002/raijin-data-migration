@@ -174,6 +174,9 @@ def test_auth_alerts_open_filtered_audit_and_admins_can_see_authenticated_sessio
     assert '"/api/admin/active-sessions"' in script
     assert "console-active-sessions-modal" in script
     assert "data-revoke-active-session" in script
+    assert "data-disable-active-user" in script
+    assert "/api/admin/users/${button.dataset.disableActiveUser}" in script
+    assert "is_current_user" in script
     assert "/api/admin/sessions/${button.dataset.revokeActiveSession}/revoke" in script
     assert "data-current-session" in script
     assert 'location.assign("/login")' in script
@@ -182,6 +185,18 @@ def test_auth_alerts_open_filtered_audit_and_admins_can_see_authenticated_sessio
     assert "LOGIN_RATE_LIMITED" in script
     assert "observe(health, {childList:true});" in script
     assert "observe(health, {childList:true, subtree:true})" not in script
+
+
+def test_login_password_visibility_control_is_non_submitting_and_supports_change_password():
+    page = (ROOT / "app/static/login.html").read_text(encoding="utf-8")
+    script = (ROOT / "app/static/login.js").read_text(encoding="utf-8")
+    assert 'class="password-visibility-toggle"' in page
+    assert 'type="button" class="password-visibility-toggle"' in page
+    assert 'aria-pressed="false"' in page
+    assert "installPasswordVisibilityControls" in script
+    assert 'input.type === "password" ? "text" : "password"' in script
+    assert "passwordControl(\"confirmation\"" in script
+    assert "button[type=\"submit\"]" in script
 
 
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():

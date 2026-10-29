@@ -113,7 +113,12 @@
     modal.querySelector("[data-close-active-sessions]").addEventListener("click", close);
     const renderModal = () => {
       const empty = uiText("Nenhuma sessão autenticada ativa.");
-      content.innerHTML = sessions.length ? `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(item => `<tr><td>${escapeHtml(item.username)}${item.is_current?` <small>(${uiText("sessão atual")})</small>`:""}</td><td>${escapeHtml(item.role)}</td><td>${localTime(item.last_seen_at)}</td><td>${localTime(item.expires_at)}</td><td><button type="button" class="danger" data-revoke-active-session="${Number(item.id)}" data-current-session="${item.is_current?"true":"false"}">${uiText("Revogar")}</button></td></tr>`).join("")}</tbody></table>` : `<p class="hint">${empty}</p>`;
+      content.innerHTML = sessions.length ? `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(item => {
+        const disable = item.is_current_user
+          ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode desativar sua própria conta."))}">${uiText("Desativar")}</button>`
+          : `<button type="button" class="danger" data-disable-active-user="${Number(item.user_id)}" data-disable-active-username="${escapeHtml(item.username)}">${uiText("Desativar")}</button>`;
+        return `<tr><td>${escapeHtml(item.username)}${item.is_current?` <small>(${uiText("sessão atual")})</small>`:""}</td><td>${escapeHtml(item.role)}</td><td>${localTime(item.last_seen_at)}</td><td>${localTime(item.expires_at)}</td><td><div class="console-active-session-actions"><button type="button" class="danger" data-revoke-active-session="${Number(item.id)}" data-current-session="${item.is_current?"true":"false"}">${uiText("Revogar")}</button>${disable}</div></td></tr>`;
+      }).join("")}</tbody></table>` : `<p class="hint">${empty}</p>`;
       content.querySelectorAll("[data-revoke-active-session]").forEach(button => button.addEventListener("click", async () => {
         button.disabled = true;
         try {
@@ -123,6 +128,16 @@
             location.assign("/login");
             return;
           }
+          await refreshActiveSessions();
+          renderModal();
+        } catch (error) { button.disabled = false; content.insertAdjacentHTML("afterbegin", `<p class="error">${escapeHtml(error.message)}</p>`); }
+      }));
+      content.querySelectorAll("[data-disable-active-user]").forEach(button => button.addEventListener("click", async () => {
+        const username = button.dataset.disableActiveUsername;
+        if (!window.confirm(uiText("Desativar este usuário encerrará todas as suas sessões. Continuar?", {username}))) return;
+        button.disabled = true;
+        try {
+          await apiCall(`/api/admin/users/${button.dataset.disableActiveUser}`, {method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify({enabled:false})});
           await refreshActiveSessions();
           renderModal();
         } catch (error) { button.disabled = false; content.insertAdjacentHTML("afterbegin", `<p class="error">${escapeHtml(error.message)}</p>`); }

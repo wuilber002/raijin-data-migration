@@ -9,6 +9,7 @@
     .card{width:min(400px,calc(100vw - 2rem));padding:2rem;border:1px solid #52627e;border-radius:12px;background:#182237;box-shadow:0 16px 42px #0008}
     h1{margin:0;color:#f8fafc}p{color:#b9c9df;line-height:1.5}label{display:grid;gap:.35rem;margin:1rem 0;font-weight:700}
     input{box-sizing:border-box;width:100%;padding:.7rem;border:1px solid #52627e;border-radius:5px;background:#0d1524;color:#fff;font:inherit}
+    .password-control{position:relative}.password-control input{padding-right:3rem}.password-visibility-toggle{position:absolute;top:50%;right:.35rem;display:grid;place-items:center;width:2.25rem;height:2.25rem;padding:0;transform:translateY(-50%);border:0;border-radius:5px;background:transparent;color:#bfdbfe}.password-visibility-toggle:hover,.password-visibility-toggle:focus-visible{background:#33425c;outline:1px solid #93c5fd}.password-eye{position:relative;display:block;width:1.15rem;height:.72rem;border:2px solid currentColor;border-radius:100%;font-size:0}.password-eye::before{position:absolute;top:50%;left:50%;width:.28rem;height:.28rem;transform:translate(-50%,-50%);border-radius:50%;background:currentColor;content:""}.password-visibility-toggle[aria-pressed="false"] .password-eye::after{position:absolute;top:50%;left:-.15rem;width:1.3rem;height:2px;transform:rotate(-34deg);background:currentColor;content:""}
     button{width:100%;padding:.72rem;border:0;border-radius:5px;background:#2f7ef7;color:#fff;font:inherit;font-weight:800;cursor:pointer}button:disabled{opacity:.6}
     #message{min-height:1.4rem;color:#fca5a5}.en{display:none}
   </style>
@@ -20,9 +21,9 @@
     <p class="en">Sign in with your individual console account.</p>
     <form id="login">
       <label><span class="pt">Usuário</span><span class="en">Username</span><input name="username" autocomplete="username" required></label>
-      <label><span class="pt">Senha</span><span class="en">Password</span><input name="password" type="password" autocomplete="current-password" required></label>
+      <label><span class="pt">Senha</span><span class="en">Password</span><span class="password-control"><input name="password" type="password" autocomplete="current-password" required><button type="button" class="password-visibility-toggle" aria-pressed="false"><span class="password-eye" aria-hidden="true"></span></button></span></label>
       <p id="message" role="alert"></p>
-      <button><span class="pt">Entrar</span><span class="en">Sign in</span></button>
+      <button type="submit"><span class="pt">Entrar</span><span class="en">Sign in</span></button>
     </form>
   </main>
 </body>

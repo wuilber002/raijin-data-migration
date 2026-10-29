@@ -7,6 +7,24 @@
   });
   let csrf = "";
   let changingPassword = false;
+  const passwordControl = (name, label, autocomplete) => `<label>${label}<span class="password-control"><input name="${name}" type="password" autocomplete="${autocomplete}" minlength="14" required><button type="button" class="password-visibility-toggle" aria-pressed="false"><span class="password-eye" aria-hidden="true"></span></button></span></label>`;
+  const installPasswordVisibilityControls = () => {
+    form.querySelectorAll(".password-visibility-toggle").forEach(button => {
+      const input = button.closest(".password-control")?.querySelector("input");
+      if (!input || button.dataset.ready) return;
+      button.dataset.ready = "true";
+      const update = () => {
+        const visible = input.type === "text";
+        button.setAttribute("aria-pressed", String(visible));
+        button.setAttribute("aria-label", visible
+          ? (portuguese ? "Ocultar senha" : "Hide password")
+          : (portuguese ? "Exibir senha" : "Show password"));
+        button.title = button.getAttribute("aria-label");
+      };
+      button.addEventListener("click", () => { input.type = input.type === "password" ? "text" : "password"; update(); input.focus(); });
+      update();
+    });
+  };
   const responseError = async response => {
     let detail = "";
     try { detail = (await response.json()).detail || ""; } catch (_) { /* use a generic fallback */ }
@@ -18,11 +36,12 @@
   const showChangePassword = () => {
     changingPassword = true;
     document.querySelector(".card p")?.replaceChildren(portuguese ? "Defina uma nova senha para continuar." : "Set a new password to continue.");
-    form.innerHTML = `<label>${portuguese ? "Nova senha" : "New password"}<input name="password" type="password" autocomplete="new-password" minlength="14" required></label><label>${portuguese ? "Confirmar senha" : "Confirm password"}<input name="confirmation" type="password" autocomplete="new-password" minlength="14" required></label><p id="message" role="alert"></p><button>${portuguese ? "Alterar senha" : "Change password"}</button>`;
+    form.innerHTML = `${passwordControl("password", portuguese ? "Nova senha" : "New password", "new-password")}${passwordControl("confirmation", portuguese ? "Confirmar senha" : "Confirm password", "new-password")}<p id="message" role="alert"></p><button type="submit">${portuguese ? "Alterar senha" : "Change password"}</button>`;
+    installPasswordVisibilityControls();
   };
   form.addEventListener("submit", async event => {
     event.preventDefault(); event.stopImmediatePropagation();
-    const button = form.querySelector("button"); button.disabled = true; message().textContent = "";
+    const button = form.querySelector('button[type="submit"]'); button.disabled = true; message().textContent = "";
     try {
       if (changingPassword) {
         if (form.password.value !== form.confirmation.value) throw new Error("password-mismatch");
@@ -44,6 +63,7 @@
     }
     finally { button.disabled = false; }
   }, true);
+  installPasswordVisibilityControls();
   (async () => {
     try {
       const response = await fetch("/api/auth/me", {cache: "no-store"});

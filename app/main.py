@@ -4380,6 +4380,7 @@ def console_active_sessions(request: FastAPIRequest,
                             session: Session = Depends(get_session)) -> list[dict]:
     """List current authenticated console sessions for ADMIN observability only."""
     now = utcnow()
+    current_user_id = console_principal(request)["id"]
     rows = session.execute(select(ConsoleSession, ConsoleUser).join(
         ConsoleUser, ConsoleSession.user_id == ConsoleUser.id
     ).where(
@@ -4389,7 +4390,9 @@ def console_active_sessions(request: FastAPIRequest,
     ).order_by(ConsoleSession.last_seen_at.desc(), ConsoleSession.id.desc())).all()
     return [{
         "id": browser_session.id,
+        "user_id": user.id,
         "is_current": browser_session.id == request.state.console_session_id,
+        "is_current_user": user.id == current_user_id,
         "username": user.username,
         "role": user.role,
         "last_seen_at": browser_session.last_seen_at,
