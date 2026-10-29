@@ -105,6 +105,22 @@ def test_i18next_catalogs_have_portuguese_fallbacks_for_every_english_message():
     assert all(isinstance(pt_catalog[key], str) and pt_catalog[key] for key in english_message_keys)
 
 
+def test_console_auth_menu_and_profile_use_the_shared_translation_catalog():
+    import json
+
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    english = json.loads((ROOT / "app/static/locales/en-US.json").read_text(encoding="utf-8"))
+    for phrase in (
+        "Menu do usuário", "Ações do usuário", "Meu perfil", "Sair",
+        "Atualize somente seus próprios dados. O usuário é gerenciado pelo administrador.",
+        "Histórico de reutilização de senha", "Auditoria recente de autenticação",
+    ):
+        assert phrase in script
+        assert phrase in english
+    assert "raijin:language-changed" in script
+    assert "window.raijinLocale?.() || \"pt-BR\"" in script
+
+
 def test_i18n_has_no_embedded_legacy_translation_map_and_uses_selected_locale_for_dates():
     catalog = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")

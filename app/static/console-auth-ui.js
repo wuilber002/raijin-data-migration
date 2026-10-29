@@ -1,7 +1,8 @@
 (() => {
   const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
   const apiCall = (...args) => window.api ? window.api(...args) : Promise.reject(new Error("Console API is not ready"));
-  const localTime = value => value ? new Date(value).toLocaleString() : "—";
+  const uiText = value => window.uiText ? window.uiText(value) : value;
+  const localTime = value => value ? new Date(value).toLocaleString(window.raijinLocale?.() || "pt-BR") : "—";
 
   async function install() {
     let identity;
@@ -81,7 +82,11 @@
         <p id="console-profile-message" class="hint" role="status"></p>
       </div>`;
     document.body.append(profileModal);
-    const profileMessage = value => { profileModal.querySelector("#console-profile-message").textContent = value || ""; };
+    let profileMessageSource = "";
+    const profileMessage = value => {
+      profileMessageSource = value || "";
+      profileModal.querySelector("#console-profile-message").textContent = profileMessageSource ? uiText(profileMessageSource) : "";
+    };
     const openProfile = async () => {
       profileMessage("");
       const data = await apiCall("/api/auth/profile");
@@ -112,6 +117,7 @@
         form.reset(); profileMessage("Senha alterada. As demais sessões foram encerradas.");
       } catch (error) { profileMessage(error.message); }
     });
+    document.addEventListener("raijin:language-changed", () => profileMessage(profileMessageSource));
     if (identity.user.role !== "ADMIN") {
       // Settings contains only tenancy integration and global scheduling
       // controls. Do not make an OPERATOR/VIEWER discover administrative
@@ -134,29 +140,29 @@
     const card = document.createElement("section");
     card.className = "card"; card.id = "console-access-management";
     card.innerHTML = `
-      <h2>Console access</h2>
-      <p class="hint">Local users, active browser sessions, and authentication audit evidence.</p>
+      <h2>Acesso ao console</h2>
+      <p class="hint">Usuários locais, sessões ativas no navegador e evidências de auditoria de autenticação.</p>
       <form id="console-auth-policy" class="row">
-        <label class="field"><span>Password reuse history</span><input name="password_history_count" type="number" min="0" max="12" required></label>
-        <span class="hint">Blocks the current password plus this number of previous passwords (default: 3).</span>
-        <button>Save policy</button>
+        <label class="field"><span>Histórico de reutilização de senha</span><input name="password_history_count" type="number" min="0" max="12" required></label>
+        <span class="hint">Bloqueia a senha atual e esta quantidade de senhas anteriores (padrão: 3).</span>
+        <button>Salvar política</button>
       </form>
       <form id="console-create-user" class="row">
-        <label class="field"><span>Username</span><input name="username" pattern="[a-z][a-z0-9_.-]{2,63}" required></label>
-        <label class="field"><span>Temporary password</span><input name="password" type="password" minlength="14" required></label>
-        <label class="field"><span>Role</span><select name="role"><option>VIEWER</option><option>OPERATOR</option><option>ADMIN</option></select></label>
-        <button>Create user</button>
+        <label class="field"><span>Usuário</span><input name="username" pattern="[a-z][a-z0-9_.-]{2,63}" required></label>
+        <label class="field"><span>Senha temporária</span><input name="password" type="password" minlength="14" required></label>
+        <label class="field"><span>Papel</span><select name="role"><option>VIEWER</option><option>OPERATOR</option><option>ADMIN</option></select></label>
+        <button>Criar usuário</button>
       </form>
-      <div id="console-users" class="report-content">Loading users…</div>
-      <h3>Sessions</h3><div id="console-sessions" class="report-content">Loading sessions…</div>
-      <h3>Recent authentication audit</h3>
+      <div id="console-users" class="report-content">Carregando usuários…</div>
+      <h3>Sessões</h3><div id="console-sessions" class="report-content">Carregando sessões…</div>
+      <h3>Auditoria recente de autenticação</h3>
       <form id="console-audit-filter" class="row">
-        <label class="field"><span>Actor</span><input name="actor" pattern="[a-z][a-z0-9_.-]{2,63}"></label>
-        <label class="field"><span>Event</span><input name="event_type" placeholder="LOGIN_SUCCEEDED"></label>
-        <label class="field"><span>Result</span><select name="result"><option value="">All</option><option>SUCCEEDED</option><option>DENIED</option></select></label>
-        <button class="secondary">Filter</button>
+        <label class="field"><span>Responsável</span><input name="actor" pattern="[a-z][a-z0-9_.-]{2,63}"></label>
+        <label class="field"><span>Evento</span><input name="event_type" placeholder="LOGIN_SUCCEEDED"></label>
+        <label class="field"><span>Resultado</span><select name="result"><option value="">Todos</option><option>SUCCEEDED</option><option>DENIED</option></select></label>
+        <button class="secondary">Filtrar</button>
       </form>
-      <div id="console-auth-audit" class="report-content">Loading audit…</div>`;
+      <div id="console-auth-audit" class="report-content">Carregando auditoria…</div>`;
     settings.append(card);
 
     const auditQuery = () => {
@@ -174,9 +180,9 @@
         apiCall("/api/admin/auth-settings"),
       ]);
       card.querySelector("#console-auth-policy").elements.password_history_count.value = authSettings.password_history_count;
-      card.querySelector("#console-users").innerHTML = `<table><thead><tr><th>Username</th><th>Role</th><th>Enabled</th><th>Reset password</th><th>Action</th></tr></thead><tbody>${users.map(user => `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?" · password change required":""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="Enable ${escapeHtml(user.username)}"></td><td><input data-field="password" type="password" minlength="14" placeholder="Optional"></td><td><button type="button" data-save-user="${user.id}">Save</button></td></tr>`).join("")}</tbody></table>`;
-      card.querySelector("#console-sessions").innerHTML = `<table><thead><tr><th>User</th><th>Last seen</th><th>Expires</th><th>Action</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`Revoked (${escapeHtml(row.revoke_reason||"")})`:`<button type="button" data-session="${row.id}">Revoke</button>`}</td></tr>`).join("")}</tbody></table>`;
-      card.querySelector("#console-auth-audit").innerHTML = `<table><thead><tr><th>Time</th><th>Actor</th><th>Event</th><th>Result</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||"system")}</td><td>${escapeHtml(row.event_type)}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;
+      card.querySelector("#console-users").innerHTML = `<table><thead><tr><th>Usuário</th><th>Papel</th><th>Ativo</th><th>Redefinir senha</th><th>Ação</th></tr></thead><tbody>${users.map(user => `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?" · troca de senha obrigatória":""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(window.t?.("Ativar {{username}}", {username:user.username}) || `Ativar ${user.username}`)}"></td><td><input data-field="password" type="password" minlength="14" placeholder="Opcional"></td><td><button type="button" data-save-user="${user.id}">Salvar</button></td></tr>`).join("")}</tbody></table>`;
+      card.querySelector("#console-sessions").innerHTML = `<table><thead><tr><th>Usuário</th><th>Última atividade</th><th>Expira em</th><th>Ação</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`Revogada (${escapeHtml(row.revoke_reason||"")})`:`<button type="button" data-session="${row.id}">Revogar</button>`}</td></tr>`).join("")}</tbody></table>`;
+      card.querySelector("#console-auth-audit").innerHTML = `<table><thead><tr><th>Data e hora</th><th>Responsável</th><th>Evento</th><th>Resultado</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||"sistema")}</td><td>${escapeHtml(row.event_type)}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;
       card.querySelectorAll("[data-session]").forEach(button => button.addEventListener("click", async () => {
         await apiCall(`/api/admin/sessions/${button.dataset.session}/revoke`, {method:"POST"}); await render();
       }));
@@ -200,6 +206,7 @@
       await render();
     });
     card.querySelector("#console-audit-filter").addEventListener("submit", async event => { event.preventDefault(); await render(); });
+    document.addEventListener("raijin:language-changed", () => render().catch(() => {}));
     await render();
   }
   queueMicrotask(install);
