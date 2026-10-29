@@ -113,13 +113,46 @@ host="${values[0]}" port="${values[1]}" transport="${values[2]}" upstreams="${va
 if [[ "$transport" == https ]]; then
   tls_root=/etc/s3-oci-migration/web-tls
   install -d -m 0750 "$tls_root"
-  if [[ ! -s "$tls_root/cert.pem" || ! -s "$tls_root/key.pem" ]]; then
-    command -v openssl >/dev/null || { finish FAILED "openssl is required to generate the local TLS certificate"; exit 0; }
-    openssl req -x509 -newkey rsa:3072 -nodes -days 825 \
-      -subj "/CN=raijin-console" -addext "subjectAltName=IP:$host" \
-      -keyout "$tls_root/key.pem" -out "$tls_root/cert.pem" >/dev/null 2>&1
-    chmod 0640 "$tls_root/key.pem" "$tls_root/cert.pem"
-  fi
+  command -v openssl >/dev/null || { finish FAILED "openssl is required to generate the local TLS certificate"; exit 0; }
+  # A wildcard listener is reached through one of the host's real VNIC
+  # addresses, never through 0.0.0.0. Include those addresses in the SAN so
+  # clients do not receive a name-mismatch warning merely because the admin
+  # selected "all IPv4 interfaces".
+  readarray -t certificate_ips < <(python3 - "$host" <<'PY'
+import ipaddress
+import json
+import subprocess
+import sys
+
+addresses = {"127.0.0.1", sys.argv[1]}
+try:
+    rows = json.loads(subprocess.check_output(
+        ["ip", "-j", "-4", "addr", "show", "up"], text=True, stderr=subprocess.DEVNULL
+    ))
+    for row in rows:
+        name = str(row.get("ifname") or "")
+        if name == "lo" or name.startswith(("podman", "docker", "cni", "veth", "br-")):
+            continue
+        for info in row.get("addr_info") or []:
+            address = str(info.get("local") or "")
+            if info.get("family") == "inet":
+                addresses.add(address)
+except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+    pass
+for address in sorted(addresses, key=lambda item: int(ipaddress.ip_address(item))):
+    print(address)
+PY
+)
+  san=$(printf 'IP:%s,' "${certificate_ips[@]}")
+  san="${san%,}"
+  # Regenerate on each HTTPS endpoint change. The old certificate may have
+  # been issued for a previous address (or, historically, for 0.0.0.0).
+  openssl req -x509 -newkey rsa:3072 -nodes -days 825 \
+    -subj "/CN=raijin-console" -addext "subjectAltName=$san" \
+    -keyout "$tls_root/key.pem.tmp" -out "$tls_root/cert.pem.tmp" >/dev/null 2>&1
+  chmod 0640 "$tls_root/key.pem.tmp" "$tls_root/cert.pem.tmp"
+  mv "$tls_root/key.pem.tmp" "$tls_root/key.pem"
+  mv "$tls_root/cert.pem.tmp" "$tls_root/cert.pem"
 fi
 umask 077
 cat >"$config.tmp" <<EOF
