@@ -6,7 +6,7 @@ from sqlalchemy import MetaData, create_engine, text
 from sqlalchemy.engine import Engine
 
 
-PRODUCTION_SCHEMA_VERSION = 1
+PRODUCTION_SCHEMA_VERSION = 2
 REVISION_TABLE = "raijin_schema_revisions"
 
 
@@ -48,6 +48,18 @@ def migrate(engine: Engine, metadata: MetaData) -> int:
                 f"INSERT INTO {REVISION_TABLE} (version, description) VALUES (1, :description)"
             ), {"description": "Initial versioned Raijin production control-plane schema"})
             revision = 1
+        # v2 is deliberately expansive: it introduces immutable migration
+        # metadata without changing any control-plane table or application
+        # read/write path. It is the first N/N+1 compatibility exercise.
+        if revision < 2:
+            connection.execute(text(
+                "CREATE TABLE IF NOT EXISTS raijin_schema_metadata ("
+                "key VARCHAR(128) PRIMARY KEY, value TEXT NOT NULL)"
+            ))
+            connection.execute(text(
+                f"INSERT INTO {REVISION_TABLE} (version, description) VALUES (2, :description)"
+            ), {"description": "Add append-only production schema metadata"})
+            revision = 2
         if revision != PRODUCTION_SCHEMA_VERSION:
             raise ProductionMigrationError(f"No migration path from revision {revision}")
     return revision

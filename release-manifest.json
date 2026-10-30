@@ -3,7 +3,7 @@
   "contracts": {
     "web_api": 1,
     "worker_protocol": 1,
-    "database_schema": 1
+    "database_schema": 2
   },
   "selective_rollout": {
     "web_ui": {
