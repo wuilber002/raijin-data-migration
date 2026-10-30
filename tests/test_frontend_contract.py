@@ -258,6 +258,8 @@ def test_update_agent_requires_expand_only_database_manifest():
     assert 'Schema do banco' in script
     assert 'required_database_schema_revision' in agent
     assert 'Schema exigido' in script
+    assert 'required == contract' in agent
+    assert '"$current" -ge "$required"' in agent
 
 
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():

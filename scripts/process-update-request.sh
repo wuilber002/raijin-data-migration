@@ -302,10 +302,12 @@ required_database_revision() {
   git -C "$install_root" show "$revision:release-manifest.json" 2>/dev/null | python3 -c '
 import json, sys
 try:
-    value = json.load(sys.stdin).get("database_migration", {})
+    data = json.load(sys.stdin)
+    value = data.get("database_migration", {})
     required = value.get("required_revision")
+    contract = data.get("contracts", {}).get("database_schema")
     mode = value.get("mode")
-    if isinstance(required, int) and required >= 1 and mode == "EXPAND_ONLY":
+    if isinstance(required, int) and required >= 1 and required == contract and mode == "EXPAND_ONLY":
         print(required)
 except Exception:
     pass
@@ -331,6 +333,11 @@ apply_database_migration() {
     -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
     -v /etc/s3-oci-migration/secrets/postgres_password:/run/secrets/postgres_password:ro,z \
     "$(release_image_for_revision "$revision")" env PYTHONPATH=/app python3 scripts/migrate-production.py
+  current="$(podman exec s3-oci-postgres psql -U migration -d migration -Atc 'SELECT coalesce(max(version), 0) FROM raijin_schema_revisions' 2>/dev/null || true)"
+  [[ "$current" =~ ^[0-9]+$ && "$current" -ge "$required" ]] || {
+    write_result FAILED "Database migration did not reach the revision declared by the approved release." "$(revision HEAD)" "$revision"
+    return 1
+  }
 }
 
 apply_web_only_update() {
