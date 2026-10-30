@@ -643,7 +643,8 @@
         ROLLED_BACK: uiText("A nova revisão falhou; a revisão anterior foi restaurada."),
       }[updateState.state] || updateState.message || "";
       latestUpdateState = updateState;
-      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>${updateImpactMarkup(updateState.impact)}`;
+      const impactPreview = updateAvailable ? updateImpactMarkup(updateState.impact) : "";
+      card.querySelector("#console-update-status").innerHTML = `<div class="console-update-status-layout"><div><p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p></div>${impactPreview}</div>`;
       // A request is processed by the host agent asynchronously. Keep the
       // progress indication visible through its pending state, not only while
       // the short API request that creates it is in flight.
