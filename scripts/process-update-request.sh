@@ -320,7 +320,7 @@ apply_database_migration() {
     -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
     -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
     -v /etc/s3-oci-migration/secrets/postgres_password:/run/secrets/postgres_password:ro,z \
-    "$(release_image_for_revision "$revision")" python3 scripts/migrate-production.py
+    "$(release_image_for_revision "$revision")" env PYTHONPATH=/app python3 scripts/migrate-production.py
 }
 
 apply_web_only_update() {

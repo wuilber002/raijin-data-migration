@@ -252,6 +252,7 @@ def test_update_agent_requires_expand_only_database_manifest():
     assert "apply_database_migration" in agent
     assert 'if ! build_release_image "$available"; then' in agent
     assert 'if ! apply_database_migration "$available"; then' in agent
+    assert "PYTHONPATH=/app python3 scripts/migrate-production.py" in agent
 
 
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():
