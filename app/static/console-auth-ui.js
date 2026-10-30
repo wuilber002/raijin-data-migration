@@ -520,7 +520,7 @@
       const impact = latestUpdateState?.impact || {};
       const commits = Array.isArray(impact.commits) ? impact.commits : [];
       const count = Number.isInteger(Number(impact.commit_count)) ? Number(impact.commit_count) : commits.length;
-      updateCommitsModal.querySelector("#console-update-commits-range").textContent = `${uiText("Revisão instalada")}: ${latestUpdateState?.current_revision || "—"} → ${uiText("Revisão disponível")}: ${latestUpdateState?.available_revision || "—"}`;
+      updateCommitsModal.querySelector("#console-update-commits-range").innerHTML = `<span><strong>${escapeHtml(uiText("Revisão instalada"))}:</strong> <code>${escapeHtml(latestUpdateState?.current_revision || "—")}</code></span><span><strong>${escapeHtml(uiText("Revisão disponível"))}:</strong> <code>${escapeHtml(latestUpdateState?.available_revision || "—")}</code></span>`;
       updateCommitsModal.querySelector("#console-update-commits-list").innerHTML = commits.length
         ? commits.map(commit => `<li><code>${escapeHtml(String(commit.revision || "").slice(0, 12))}</code><span>${escapeHtml(commit.subject || "—")}</span></li>`).join("")
         : `<li class="hint">${escapeHtml(uiText("Nenhum commit adicional foi informado para esta atualização."))}</li>`;

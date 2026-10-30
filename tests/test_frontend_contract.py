@@ -295,6 +295,7 @@ def test_update_check_exposes_commit_subjects_and_available_revision_opens_them(
     assert "console-update-commits-modal" in script
     assert "showUpdateCommits" in script
     assert "console-update-commits-button" in script
+    assert '"#console-update-commits-range").innerHTML' in script
 
 
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():
