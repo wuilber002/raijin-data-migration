@@ -583,7 +583,7 @@
       const action = finalSuccess
         ? `<p class="console-update-workflow-final" data-console-i18n="Atualização concluída. Sua sessão atual será encerrada para concluir a instalação."></p><button type="button" id="console-update-workflow-logout" data-console-i18n="Entrar novamente"></button>`
         : finalFailure
-          ? `<p class="error" data-console-i18n="Atualização não foi concluída. Nenhuma alteração adicional será feita nesta sessão."></p><button type="button" class="secondary" id="console-update-workflow-close" data-console-i18n="Fechar"></button>`
+          ? `<p class="error"><strong>${escapeHtml(uiText("Atualização não foi concluída."))}</strong> ${escapeHtml(state.message || uiText("A revisão anterior foi preservada. Verifique Settings antes de tentar novamente."))}</p><button type="button" class="secondary" id="console-update-workflow-close" data-console-i18n="Fechar"></button>`
           : "";
       updateWorkflowContent.innerHTML = `<p class="hint">${escapeHtml(message)}</p>${updateWorkflowSteps(state)}<div class="console-update-workflow-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}" aria-label="${escapeHtml(uiText("Progresso"))}"><span style="width:${progress}%"></span></div><p class="console-update-workflow-percent">${progress}%</p>${action}`;
       applyAuthTranslations(updateModal);
@@ -684,7 +684,13 @@
       }[updateState.state] || updateState.message || "";
       latestUpdateState = updateState;
       const impactPreview = updateAvailable ? updateImpactMarkup(updateState.impact) : "";
-      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
+      const failedUpdate = ["FAILED", "ROLLED_BACK", "REJECTED"].includes(updateState.state);
+      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="${failedUpdate ? "console-update-status-error" : "hint"}"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
+      let failureBanner = document.querySelector("#console-update-failure-banner");
+      if (failedUpdate) {
+        if (!failureBanner) { failureBanner = document.createElement("div"); failureBanner.id = "console-update-failure-banner"; failureBanner.className = "console-update-failure-banner"; document.querySelector(".topbar")?.after(failureBanner); }
+        failureBanner.textContent = `${uiText("Atualização da plataforma não foi concluída")}: ${updateMessage}`;
+      } else failureBanner?.remove();
       card.querySelector("#console-update-impact-slot").innerHTML = impactPreview;
       // A request is processed by the host agent asynchronously. Keep the
       // progress indication visible through its pending state, not only while
