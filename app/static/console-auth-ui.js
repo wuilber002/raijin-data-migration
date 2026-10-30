@@ -473,6 +473,15 @@
       <div id="console-auth-audit" class="report-content" data-console-i18n="Carregando auditoria…"></div>`;
     settings.append(card);
     applyAuthTranslations(card);
+    const updateModal = document.createElement("section");
+    updateModal.id = "console-update-workflow-modal";
+    updateModal.className = "modal hidden";
+    updateModal.setAttribute("role", "dialog");
+    updateModal.setAttribute("aria-modal", "true");
+    updateModal.setAttribute("aria-labelledby", "console-update-workflow-title");
+    updateModal.innerHTML = `<div class="modal-panel console-update-workflow-panel"><h2 id="console-update-workflow-title" data-console-i18n="Atualização da plataforma em andamento"></h2><div id="console-update-workflow-content"></div></div>`;
+    document.body.append(updateModal);
+    applyAuthTranslations(updateModal);
 
     const auditQuery = () => {
       const form = card.querySelector("#console-audit-filter");
@@ -485,6 +494,86 @@
     let latestUpdateState = null;
     let updateRefreshTimer = null;
     let updateCheckInProgress = false;
+    let updateWorkflowActive = false;
+    let updateWorkflowLocked = false;
+    let updateWorkflowPollTimer = null;
+    const updateWorkflowContent = updateModal.querySelector("#console-update-workflow-content");
+    const updateWorkflowSteps = state => {
+      const phases = [
+        ["VALIDATING", "Validar revisão e fila"], ["BACKING_UP", "Criar backup do PostgreSQL"],
+        ["DEPLOYING", "Instalar nova revisão"], ["VERIFYING", "Reiniciar e validar plataforma"],
+      ];
+      const order = {VALIDATING:0, BACKING_UP:1, DEPLOYING:2, VERIFYING:3, SUCCEEDED:4, ROLLED_BACK:4, FAILED:4, REJECTED:0};
+      const current = order[state.state] ?? 0;
+      return `<ol class="console-update-workflow-steps">${phases.map(([phase, label], index) => `<li class="${index < current || state.state === "SUCCEEDED" ? "complete" : index === current ? "active" : ""}"><span class="console-update-workflow-step-mark">${index < current || state.state === "SUCCEEDED" ? "✓" : index === current ? "•" : ""}</span>${escapeHtml(uiText(label))}</li>`).join("")}</ol>`;
+    };
+    const updateWorkflowProgress = state => {
+      const fallback = {VALIDATING:10, BACKING_UP:35, DEPLOYING:65, VERIFYING:90, SUCCEEDED:100, ROLLED_BACK:100, FAILED:100, REJECTED:0};
+      return Math.max(0, Math.min(100, Number.isFinite(Number(state.progress)) ? Number(state.progress) : (fallback[state.state] || 0)));
+    };
+    const showUpdateWorkflow = state => {
+      latestUpdateState = {...(latestUpdateState || {}), ...state};
+      const progress = updateWorkflowProgress(state);
+      const finalSuccess = state.state === "SUCCEEDED";
+      const finalFailure = ["FAILED", "ROLLED_BACK", "REJECTED"].includes(state.state);
+      if (finalSuccess || finalFailure) updateWorkflowLocked = false;
+      const reconnecting = state.state === "RESTARTING";
+      const message = reconnecting ? uiText("Reconectando à plataforma…") : (state.message || uiText("Processando atualização…"));
+      const action = finalSuccess
+        ? `<p class="console-update-workflow-final" data-console-i18n="Atualização concluída. Sua sessão atual será encerrada para concluir a instalação."></p><button type="button" id="console-update-workflow-logout" data-console-i18n="Entrar novamente"></button>`
+        : finalFailure
+          ? `<p class="error" data-console-i18n="Atualização não foi concluída. Nenhuma alteração adicional será feita nesta sessão."></p><button type="button" class="secondary" id="console-update-workflow-close" data-console-i18n="Fechar"></button>`
+          : "";
+      updateWorkflowContent.innerHTML = `<p class="hint">${escapeHtml(message)}</p>${updateWorkflowSteps(state)}<div class="console-update-workflow-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}" aria-label="${escapeHtml(uiText("Progresso"))}"><span style="width:${progress}%"></span></div><p class="console-update-workflow-percent">${progress}%</p>${action}`;
+      applyAuthTranslations(updateModal);
+      updateModal.querySelector("#console-update-workflow-close")?.addEventListener("click", () => {
+        updateWorkflowActive = false; updateWorkflowLocked = false; clearTimeout(updateWorkflowPollTimer); window.closeModal?.("#console-update-workflow-modal");
+      });
+      updateModal.querySelector("#console-update-workflow-logout")?.addEventListener("click", async () => {
+        try { await apiCall("/api/auth/logout", {method:"POST"}); } finally { location.assign("/login"); }
+      });
+    };
+    const pollUpdateWorkflow = async () => {
+      if (!updateWorkflowActive) return;
+      try {
+        const state = await apiCall("/api/admin/updates");
+        latestUpdateState = state;
+        showUpdateWorkflow(state);
+        if (["SUCCEEDED", "FAILED", "ROLLED_BACK", "REJECTED"].includes(state.state) && !state.pending) return;
+      } catch (_) {
+        showUpdateWorkflow({state:"RESTARTING", progress:90});
+      }
+      updateWorkflowPollTimer = window.setTimeout(pollUpdateWorkflow, 1500);
+    };
+    const openUpdateConfirmation = () => {
+      updateWorkflowActive = true; updateWorkflowLocked = false;
+      updateWorkflowContent.innerHTML = `<p data-console-i18n="Uma atualização criará um backup, reiniciará a plataforma e encerrará sua sessão atual. Será necessário entrar novamente. Continuar?"></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(latestUpdateState?.available_revision || "—")}</code></p><div class="modal-actions"><button type="button" class="secondary" id="console-update-workflow-cancel" data-console-i18n="Cancelar"></button><button type="button" id="console-update-workflow-confirm" data-console-i18n="Instalar atualização"></button></div>`;
+      updateModal.querySelector("h2").dataset.consoleI18n = "Confirme a instalação da atualização";
+      applyAuthTranslations(updateModal);
+      if (window.openModal) window.openModal("#console-update-workflow-modal"); else updateModal.classList.remove("hidden");
+      updateModal.querySelector("#console-update-workflow-cancel").addEventListener("click", () => {
+        updateWorkflowActive = false; window.closeModal?.("#console-update-workflow-modal");
+      });
+      updateModal.querySelector("#console-update-workflow-confirm").addEventListener("click", async event => {
+        const button = event.currentTarget; button.disabled = true;
+        updateWorkflowLocked = true;
+        updateModal.querySelector("h2").dataset.consoleI18n = "Atualização da plataforma em andamento";
+        updateModal.querySelector("h2").textContent = uiText("Atualização da plataforma em andamento");
+        showUpdateWorkflow({state:"VALIDATING", progress:10, message:uiText("Validando a revisão aprovada e a fila drenada.")});
+        try {
+          await apiCall("/api/admin/updates/apply", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({revision:latestUpdateState.available_revision})});
+          pollUpdateWorkflow();
+        } catch (error) {
+          updateWorkflowLocked = false;
+          showUpdateWorkflow({state:"FAILED", progress:0, message:error.message});
+        }
+      });
+    };
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && updateWorkflowLocked) {
+        event.preventDefault(); event.stopImmediatePropagation();
+      }
+    }, true);
     const renderUpdateCheckButton = (busy, disabled) => {
       const button = card.querySelector("#console-update-check");
       if (!button) return;
@@ -591,12 +680,13 @@
       }
     });
     card.querySelector("#console-update-apply").addEventListener("click", async () => {
-      if (!latestUpdateState?.available_revision || !window.confirm(uiText("A atualização criará um backup, reiniciará a plataforma e encerrará sua sessão atual. Será necessário entrar novamente. Continuar?"))) return;
-      await apiCall("/api/admin/updates/apply", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({revision:latestUpdateState.available_revision})}); await render();
+      if (!latestUpdateState?.available_revision) return;
+      openUpdateConfirmation();
     });
     card.querySelector("#console-audit-filter").addEventListener("submit", async event => { event.preventDefault(); await render(); });
     document.addEventListener("raijin:language-changed", () => {
       applyAuthTranslations(card);
+      if (!updateModal.classList.contains("hidden") && updateModal.querySelector(".console-update-workflow-steps")) showUpdateWorkflow(latestUpdateState || {state:"VALIDATING", progress:10});
       render().catch(() => {});
     });
     document.addEventListener("raijin:open-auth-audit", event => {

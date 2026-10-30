@@ -29,7 +29,8 @@ valid_remote='^[A-Za-z0-9_.-]+$'
 
 write_result() {
   local state="$1" message="$2" current="${3:-}" available="${4:-}" previous="${5:-}"
-  python3 - "$state" "$message" "$current" "$available" "$previous" >"$result.tmp" <<'PY'
+  local progress="${6:-0}"
+  python3 - "$state" "$message" "$current" "$available" "$previous" "$progress" >"$result.tmp" <<'PY'
 import datetime
 import json
 import sys
@@ -38,6 +39,7 @@ print(json.dumps({
     "current_revision": sys.argv[3] or None,
     "available_revision": sys.argv[4] or None,
     "previous_revision": sys.argv[5] or None,
+    "progress": max(0, min(100, int(sys.argv[6] or 0))),
     "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }, separators=(",", ":")))
 PY
@@ -48,7 +50,7 @@ PY
 revision() { git -C "$install_root" rev-parse --verify "$1^{commit}"; }
 
 check_update() {
-  local current available
+  local emit_result="${1:-true}" current available
   current="$(revision HEAD)"
   if ! git -C "$install_root" fetch --quiet --tags "$remote"; then
     write_result FAILED "Could not fetch the configured Git remote." "$current"
@@ -63,9 +65,9 @@ check_update() {
     return 1
   fi
   if [[ "$current" == "$available" ]]; then
-    write_result CURRENT "The installed revision is current." "$current" "$available"
+    [[ "$emit_result" == true ]] && write_result CURRENT "The installed revision is current." "$current" "$available" "" 100
   else
-    write_result AVAILABLE "An approved source revision is available." "$current" "$available"
+    [[ "$emit_result" == true ]] && write_result AVAILABLE "An approved source revision is available." "$current" "$available" "" 100
   fi
   printf '%s\n' "$available"
 }
@@ -82,7 +84,8 @@ runtime_is_drained() {
 apply_update() {
   local requested="$1" current available previous
   current="$(revision HEAD)"
-  available="$(check_update)" || return 1
+  write_result VALIDATING "Validating the approved revision and drained queue." "$current" "$requested" "" 10
+  available="$(check_update false)" || return 1
   # check_update prints only the SHA on stdout; its state is in result.json.
   available="${available##*$'\n'}"
   if [[ ! "$requested" =~ ^[0-9a-f]{40}$ || "$requested" != "$available" ]]; then
@@ -97,13 +100,13 @@ apply_update() {
     write_result REJECTED "Installed release contains local source changes; automatic update is unsafe." "$current" "$available"
     return 0
   fi
-  write_result BACKING_UP "Creating a PostgreSQL backup before update." "$current" "$available"
+  write_result BACKING_UP "Creating a PostgreSQL backup before update." "$current" "$available" "" 35
   if ! "$backup"; then
     write_result FAILED "PostgreSQL backup failed; no update was applied." "$current" "$available"
     return 1
   fi
   previous="$current"
-  write_result DEPLOYING "Installing the approved source revision." "$current" "$available" "$previous"
+  write_result DEPLOYING "Installing the approved source revision." "$current" "$available" "$previous" 65
   systemctl stop "$service"
   if ! git -C "$install_root" checkout --detach --quiet "$available"; then
     git -C "$install_root" checkout --detach --quiet "$previous" || true
@@ -111,13 +114,14 @@ apply_update() {
     write_result FAILED "Could not checkout the approved revision." "$previous" "$available" "$previous"
     return 1
   fi
+  write_result VERIFYING "Restarting the platform and validating the local health check." "$available" "$available" "$previous" 90
   if systemctl start "$service"; then
-    write_result SUCCEEDED "Update completed and the new revision passed the local health check." "$available" "$available" "$previous"
+    write_result SUCCEEDED "Update completed and the new revision passed the local health check." "$available" "$available" "$previous" 100
     return 0
   fi
   git -C "$install_root" checkout --detach --quiet "$previous" || true
   if systemctl start "$service"; then
-    write_result ROLLED_BACK "New revision failed startup; the previous release was restored." "$previous" "$available" "$previous"
+    write_result ROLLED_BACK "New revision failed startup; the previous release was restored." "$previous" "$available" "$previous" 100
   else
     write_result FAILED "New revision failed and automatic rollback could not restore the service." "$previous" "$available" "$previous"
   fi

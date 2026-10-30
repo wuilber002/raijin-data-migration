@@ -140,6 +140,17 @@ def test_update_check_keeps_a_stable_busy_indicator_until_the_host_finishes():
     assert "console-update-check-spinner" in page
 
 
+def test_console_update_uses_a_blocking_raijin_workflow_modal_not_browser_confirm():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'id = "console-update-workflow-modal"' in script
+    assert "openUpdateConfirmation" in script
+    assert "pollUpdateWorkflow" in script
+    assert 'apiCall("/api/auth/logout", {method:"POST"})' in script
+    assert "console-update-workflow-progress" in page
+    assert "console-update-workflow-steps" in page
+
+
 def test_dashboard_versions_the_injected_console_auth_asset_to_avoid_stale_ui():
     main = (ROOT / "app/main.py").read_text(encoding="utf-8")
     assert 'console-auth-ui.js?v={RAIJIN_BUILD_REVISION}' in main

@@ -4732,6 +4732,7 @@ def console_update_control_state() -> dict:
         "current_revision": RAIJIN_BUILD_REVISION,
         "available_revision": None,
         "previous_revision": None,
+        "progress": 0,
         "updated_at": None,
     }
     try:
@@ -4741,6 +4742,10 @@ def console_update_control_state() -> dict:
     except (OSError, ValueError, json.JSONDecodeError):
         state = {**fallback, "state": "UNKNOWN", "message": "Host update status is unreadable."}
     state = {**fallback, **{key: state.get(key) for key in fallback if key in state}}
+    try:
+        state["progress"] = min(100, max(0, int(state.get("progress") or 0)))
+    except (TypeError, ValueError):
+        state["progress"] = 0
     state["pending"] = request_file.exists() or request_file.with_suffix(".processing").exists()
     return state
 

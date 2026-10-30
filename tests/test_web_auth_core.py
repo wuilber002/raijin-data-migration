@@ -122,7 +122,7 @@ def test_console_update_requests_are_single_flight_and_status_is_sanitized(tmp_p
     result.parent.mkdir()
     result.write_text(
         '{"state":"AVAILABLE","message":"Ready","current_revision":"' + "b" * 40 +
-        '","available_revision":"' + revision + '","previous_revision":null,"updated_at":"now"}',
+        '","available_revision":"' + revision + '","previous_revision":null,"progress":65,"updated_at":"now"}',
         encoding="utf-8",
     )
     monkeypatch.setenv("RAIJIN_UPDATE_REQUEST_FILE", str(request))
@@ -130,6 +130,7 @@ def test_console_update_requests_are_single_flight_and_status_is_sanitized(tmp_p
     state = main.console_update_control_state()
     assert state["state"] == "AVAILABLE"
     assert state["available_revision"] == revision
+    assert state["progress"] == 65
     accepted = main.request_console_update("apply", revision=revision)
     assert accepted["accepted"] is True and accepted["pending"] is True
     with pytest.raises(main.HTTPException, match="already being processed"):
