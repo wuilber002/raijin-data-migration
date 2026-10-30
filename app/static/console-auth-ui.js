@@ -451,9 +451,11 @@
       <h3 data-console-i18n="Atualizações da plataforma"></h3>
       <p class="hint" data-console-i18n="Consulta uma revisão aprovada no GitHub. A instalação exige fila completamente drenada, backup e validação local de saúde."></p>
       <div class="console-update-layout">
-        <div id="console-update-status"></div>
+        <div class="console-update-summary">
+          <div id="console-update-status"></div>
+          <div class="row console-update-actions"><button type="button" class="secondary console-update-check" id="console-update-check"></button><button type="button" id="console-update-apply" data-console-i18n="Instalar atualização"></button></div>
+        </div>
         <div id="console-update-impact-slot"></div>
-        <div class="row console-update-actions"><button type="button" class="secondary console-update-check" id="console-update-check"></button><button type="button" id="console-update-apply" data-console-i18n="Instalar atualização"></button></div>
       </div>
       <hr class="console-section-divider">
       <h3 data-console-i18n="Gerenciamento de usuários"></h3>
