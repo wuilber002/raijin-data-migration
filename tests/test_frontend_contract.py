@@ -245,6 +245,13 @@ def test_transfer_execution_isolated_from_generic_worker_loop():
     assert 'app/transfer_execution.py' in update_agent
 
 
+def test_discovery_rollout_probe_is_isolated_to_its_worker_entrypoint():
+    execution = (ROOT / "app/discovery_execution.py").read_text(encoding="utf-8")
+    update_agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
+    assert 'ROLLOUT_PROBE = "phase2-discovery-1"' in execution
+    assert 'app/discovery_execution.py' in update_agent
+
+
 def test_update_agent_requires_expand_only_database_manifest():
     agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")

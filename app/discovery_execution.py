@@ -12,6 +12,10 @@ from app.runtime_context import mode_switch_requested
 
 
 ROLE = "raikou-ko"
+# Controlled Phase 2 rollout probe. This inert marker is intentionally kept
+# with the isolated entrypoint so the deployment can prove that only the
+# discovery worker image is replaced.
+ROLLOUT_PROBE = "phase2-discovery-1"
 
 
 def run_once(role: str = ROLE) -> None:
