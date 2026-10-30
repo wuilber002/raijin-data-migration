@@ -24,6 +24,7 @@ update_enabled="${RAIJIN_UPDATE_ENABLED:-false}"
 remote="${RAIJIN_UPDATE_REMOTE:-origin}"
 ref="${RAIJIN_UPDATE_REF:-refs/remotes/origin/main}"
 selective_web_only="${RAIJIN_UPDATE_SELECTIVE_WEB_ONLY:-false}"
+selective_controller="${RAIJIN_UPDATE_SELECTIVE_CONTROLLER:-false}"
 
 valid_remote='^[A-Za-z0-9_.-]+$'
 [[ "$update_enabled" == true && "$remote" =~ $valid_remote ]] || exit 0
@@ -33,12 +34,12 @@ update_impact() {
   [[ "$current" =~ ^[0-9a-f]{40}$ && "$available" =~ ^[0-9a-f]{40}$ ]] || {
     printf '%s\n' '{}'; return 0;
   }
-  python3 - "$install_root" "$current" "$available" "$selective_web_only" <<'PY'
+  python3 - "$install_root" "$current" "$available" "$selective_web_only" "$selective_controller" <<'PY'
 import json
 import subprocess
 import sys
 
-root, current, available, selective_web_only = sys.argv[1:]
+root, current, available, selective_web_only, selective_controller = sys.argv[1:]
 try:
     all_paths = subprocess.check_output(
         ["git", "-C", root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", current, available],
@@ -51,6 +52,7 @@ except Exception:
 # diff. Only the administrative evidence sent to the web console is capped.
 paths = all_paths[:100]
 web_ui = lambda path: path.startswith(("app/static/", "images/"))
+controller = lambda path: path == "app/controller_worker.py"
 validation = lambda path: path.startswith("tests/")
 docs = lambda path: path.startswith("docs/") or path in {"README.md", "LICENSE"}
 host = lambda path: path.startswith(("scripts/", "docker/", "terraform/")) or path in {"Dockerfile", "docker-compose.yml", "requirements.txt", "requirements-dev.txt"}
@@ -63,6 +65,7 @@ database = lambda path: path.startswith("app/") and any(token in path for token 
 runtime_paths = [path for path in all_paths if not validation(path)]
 components = []
 if any(web_ui(path) for path in runtime_paths): components.append("WEB_UI")
+if any(controller(path) for path in runtime_paths): components.append("CONTROLLER")
 if any(worker(path) for path in runtime_paths): components.append("WORKERS")
 if any(database(path) for path in runtime_paths): components.append("DATABASE_OR_API")
 if any(host(path) for path in runtime_paths): components.append("HOST_RUNTIME")
@@ -78,6 +81,7 @@ except Exception:
     manifest = {}
 
 web_rollout = manifest.get("selective_rollout", {}).get("web_ui", {}) if isinstance(manifest, dict) else {}
+controller_rollout = manifest.get("selective_rollout", {}).get("controller", {}) if isinstance(manifest, dict) else {}
 manifest_authorizes_web = (
     isinstance(manifest, dict)
     and manifest.get("manifest_version") == 1
@@ -87,15 +91,32 @@ manifest_authorizes_web = (
     and web_rollout.get("allowed_path_prefixes") == ["app/static/", "images/"]
     and web_rollout.get("validation_path_prefixes") == ["tests/"]
 )
+manifest_authorizes_controller = (
+    isinstance(manifest, dict)
+    and manifest.get("manifest_version") == 1
+    and isinstance(controller_rollout, dict)
+    and controller_rollout.get("enabled") is True
+    and controller_rollout.get("contract_version") == 1
+    and controller_rollout.get("allowed_paths") == ["app/controller_worker.py"]
+    and controller_rollout.get("validation_path_prefixes") == ["tests/"]
+)
 web_only_candidate = (
     bool(runtime_paths)
     and all(web_ui(path) for path in runtime_paths)
     and all(web_ui(path) or validation(path) for path in all_paths)
 )
 web_rollout_enabled = selective_web_only.lower() == "true"
+controller_only_candidate = (
+    bool(runtime_paths)
+    and all(controller(path) for path in runtime_paths)
+    and all(controller(path) or validation(path) for path in all_paths)
+)
+controller_rollout_enabled = selective_controller.lower() == "true"
 
 if web_only_candidate:
     classification, transfer_impact = "WEB_UI_ONLY", "NONE"
+elif controller_only_candidate:
+    classification, transfer_impact = "CONTROLLER_ONLY", "NONE"
 elif all_paths and all(docs(path) or validation(path) for path in all_paths):
     classification, transfer_impact = "DOCUMENTATION_ONLY", "NONE"
 else:
@@ -105,12 +126,15 @@ print(json.dumps({
     "classification": classification,
     "components": components,
     "transfer_impact": transfer_impact,
-    "installation_strategy": "WEB_ONLY_ROLLING" if web_only_candidate and manifest_authorizes_web and web_rollout_enabled else "FULL_CONTROLLED_RESTART",
-    "rollout_eligible": bool(web_only_candidate and manifest_authorizes_web and web_rollout_enabled),
+    "installation_strategy": "WEB_ONLY_ROLLING" if web_only_candidate and manifest_authorizes_web and web_rollout_enabled else "CONTROLLER_ONLY_ROLLING" if controller_only_candidate and manifest_authorizes_controller and controller_rollout_enabled else "FULL_CONTROLLED_RESTART",
+    "rollout_eligible": bool((web_only_candidate and manifest_authorizes_web and web_rollout_enabled) or (controller_only_candidate and manifest_authorizes_controller and controller_rollout_enabled)),
     "rollout_eligibility_reason": (
         "manifest_authorized" if web_only_candidate and manifest_authorizes_web and web_rollout_enabled
+        else "manifest_authorized" if controller_only_candidate and manifest_authorizes_controller and controller_rollout_enabled
         else "host_policy_disabled" if web_only_candidate and manifest_authorizes_web
+        else "host_policy_disabled" if controller_only_candidate and manifest_authorizes_controller
         else "manifest_not_authorized" if web_only_candidate
+        else "manifest_not_authorized" if controller_only_candidate
         else "not_web_ui_only"
     ),
     "changed_files": paths,
@@ -235,6 +259,35 @@ apply_web_only_update() {
   return 1
 }
 
+apply_controller_only_update() {
+  local current="$1" available="$2" previous_image candidate_image
+  previous_image="$(podman inspect --format '{{.ImageName}}' s3-oci-raikou-shin 2>/dev/null || true)"
+  [[ -n "$previous_image" ]] || {
+    write_result FAILED "Could not identify the running controller image." "$current" "$available" "$current"
+    return 1
+  }
+  write_result DEPLOYING "Draining the controller transaction and building the approved controller revision." "$current" "$available" "$current" 55
+  if ! git -C "$install_root" checkout --detach --quiet "$available"; then
+    write_result FAILED "Could not checkout the approved controller revision." "$current" "$available" "$current"
+    return 1
+  fi
+  if ! build_release_image "$available"; then
+    git -C "$install_root" checkout --detach --quiet "$current" || true
+    write_result FAILED "Could not build the approved controller revision." "$current" "$available" "$current"
+    return 1
+  fi
+  candidate_image="$(release_image_for_revision "$available")"
+  write_result VERIFYING "Replacing only the controller and validating its heartbeat." "$available" "$available" "$current" 85
+  if RAIJIN_IMAGE="$candidate_image" RAIJIN_RUNTIME_COMPONENT=controller "$install_root/scripts/start-runtime.sh" REAL; then
+    write_result SUCCEEDED "Controller-only update completed; restore and transfer workers remained running." "$available" "$available" "$current" 100
+    return 0
+  fi
+  git -C "$install_root" checkout --detach --quiet "$current" || true
+  RAIJIN_IMAGE="$previous_image" RAIJIN_RUNTIME_COMPONENT=controller "$install_root/scripts/start-runtime.sh" REAL || true
+  write_result ROLLED_BACK "Controller-only update failed heartbeat validation; the previous controller was restored." "$current" "$available" "$current" 100
+  return 1
+}
+
 apply_update() {
   local requested="$1" current available previous strategy
   current="$(revision HEAD)"
@@ -247,7 +300,7 @@ apply_update() {
     return 0
   fi
   strategy="$(update_strategy "$current" "$available")"
-  if [[ "$strategy" != WEB_ONLY_ROLLING ]] && ! runtime_is_drained; then
+  if [[ "$strategy" != WEB_ONLY_ROLLING && "$strategy" != CONTROLLER_ONLY_ROLLING ]] && ! runtime_is_drained; then
     write_result REJECTED "Update requires a fully drained queue and no active restore or transfer." "$current" "$available"
     return 0
   fi
@@ -257,6 +310,10 @@ apply_update() {
   fi
   if [[ "$strategy" == WEB_ONLY_ROLLING ]]; then
     apply_web_only_update "$current" "$available"
+    return $?
+  fi
+  if [[ "$strategy" == CONTROLLER_ONLY_ROLLING ]]; then
+    apply_controller_only_update "$current" "$available"
     return $?
   fi
   write_result BACKING_UP "Creating a PostgreSQL backup before update." "$current" "$available" "" 35

@@ -16,6 +16,16 @@
       "validation_path_prefixes": [
         "tests/"
       ]
+    },
+    "controller": {
+      "enabled": true,
+      "contract_version": 1,
+      "allowed_paths": [
+        "app/controller_worker.py"
+      ],
+      "validation_path_prefixes": [
+        "tests/"
+      ]
     }
   }
 }

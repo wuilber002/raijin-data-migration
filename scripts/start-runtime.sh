@@ -12,8 +12,8 @@ oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 image="${RAIJIN_IMAGE:-localhost/s3-oci-migration:latest}"
 network=s3-oci-migration
 runtime_component="${RAIJIN_RUNTIME_COMPONENT:-full}"
-[[ "$runtime_component" == full || "$runtime_component" == web ]] || {
-  echo "RAIJIN_RUNTIME_COMPONENT must be full or web" >&2
+[[ "$runtime_component" == full || "$runtime_component" == web || "$runtime_component" == controller ]] || {
+  echo "RAIJIN_RUNTIME_COMPONENT must be full, web, or controller" >&2
   exit 2
 }
 
@@ -108,7 +108,8 @@ fi
 
 case "$mode" in
   REAL)
-    podman run -d --name s3-oci-app --replace --restart unless-stopped \
+    if [[ "$runtime_component" != controller ]]; then
+      podman run -d --name s3-oci-app --replace --restart unless-stopped \
       --network "$network" -p "$RAIJIN_WEB_BIND_PUBLISH" \
       -e RAIJIN_OPERATION_MODE=REAL \
       -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
@@ -128,20 +129,30 @@ case "$mode" in
       -v "$update_control_root:/run/update-control:rw,z" \
       -v "$oci_runtime_config:/run/oci-runtime/oci-runtime.json:ro,z" \
       "${web_tls_mounts[@]}" \
-      "$image" "${web_server_command[@]}"
-    for attempt in $(seq 1 30); do
-      web_probe >/dev/null && break
-      [[ "$attempt" -lt 30 ]] || { echo "REAL API did not become healthy" >&2; exit 1; }
-      sleep 2
-    done
+        "$image" "${web_server_command[@]}"
+      for attempt in $(seq 1 30); do
+        web_probe >/dev/null && break
+        [[ "$attempt" -lt 30 ]] || { echo "REAL API did not become healthy" >&2; exit 1; }
+        sleep 2
+      done
+    fi
     # A Phase 2 WEB_UI_ONLY update replaces precisely this independently
     # health-checked web/API container. The durable worker containers retain
     # their existing image and continue their in-flight work.
     [[ "$runtime_component" == web ]] && exit 0
     for worker_role in raikou-shin raikou-sei raikou-ko raikou-kai raiju; do
+      [[ "$runtime_component" == controller && "$worker_role" != raikou-shin ]] && continue
       container="s3-oci-${worker_role}"
       [[ "$worker_role" == raiju ]] && container=s3-oci-transfer-worker
+      worker_command=(python3 -m app.real_worker)
+      worker_runtime=()
+      if [[ "$worker_role" == raikou-shin ]]; then
+        rm -f "$runtime_root/raikou-shin.json"
+        worker_command=(python3 -m app.controller_worker)
+        worker_runtime=(-e RAIJIN_COMPONENT_HEARTBEAT_FILE=/run/platform-status/raikou-shin.json -v "$runtime_root:/run/platform-status:rw,z")
+      fi
       podman run -d --name "$container" --replace --restart unless-stopped \
+        --stop-timeout 120 \
         --network "$network" \
         -e "RAIJIN_WORKER_ID=${worker_role}-vm" -e "RAIJIN_WORKER_ROLE=$worker_role" \
         -e RAIJIN_OPERATION_MODE=REAL \
@@ -152,8 +163,17 @@ case "$mode" in
         -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
         -v "$mode_control_root:/run/mode-control:ro,z" \
         -v "$oci_runtime_config:/run/oci-runtime/oci-runtime.json:ro,z" \
-        "$image" python3 -m app.real_worker
+        "${worker_runtime[@]}" \
+        "$image" "${worker_command[@]}"
     done
+    if [[ "$runtime_component" == controller ]]; then
+      for attempt in $(seq 1 30); do
+        [[ -s "$runtime_root/raikou-shin.json" ]] && break
+        [[ "$attempt" -lt 30 ]] || { echo "Controller did not publish a heartbeat" >&2; exit 1; }
+        sleep 1
+      done
+      exit 0
+    fi
     ;;
   SIMULATION)
     podman run --rm --network "$network" \

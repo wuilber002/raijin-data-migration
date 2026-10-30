@@ -520,19 +520,25 @@
       const value = impact || {};
       const classification = {
         WEB_UI_ONLY: uiText("Somente interface web"), DOCUMENTATION_ONLY: uiText("Somente documentação"),
+        CONTROLLER_ONLY: uiText("Somente controller"),
         FULL_PLATFORM: uiText("Plataforma completa"), UNKNOWN: uiText("Não classificado"),
       }[value.classification] || uiText("Não classificado");
       const componentLabels = {
         WEB_UI: uiText("Interface web"), WORKERS: uiText("Workers de migração"),
+        CONTROLLER: uiText("Controller de migração"),
         DATABASE_OR_API: uiText("API e banco de dados"), HOST_RUNTIME: uiText("Runtime do host"), DOCUMENTATION: uiText("Documentação"),
       };
       const components = (value.components || []).map(component => componentLabels[component] || component).join(", ") || "—";
-      const transferImpact = value.transfer_impact === "NONE"
+      const transferImpact = value.classification === "CONTROLLER_ONLY"
+        ? uiText("Transferências já despachadas continuam; novas decisões aguardam a retomada do controller.")
+        : value.transfer_impact === "NONE"
         ? uiText("Nenhuma lógica de transferência foi alterada.")
         : value.transfer_impact === "CONTROLLED_PAUSE"
           ? uiText("A instalação controlada pausará brevemente os componentes e os workers serão reiniciados.")
           : uiText("Impacto de transferência ainda não classificado.");
-      const phaseOne = value.installation_strategy === "WEB_ONLY_ROLLING"
+      const phaseOne = value.installation_strategy === "CONTROLLER_ONLY_ROLLING"
+        ? uiText("Esta atualização trocará somente o controller após o ciclo transacional atual; workers de restore e transferência continuarão ativos.")
+        : value.installation_strategy === "WEB_ONLY_ROLLING"
         ? uiText("Esta atualização trocará somente a interface web; os workers e transferências em curso continuarão ativos.")
         : uiText("Esta atualização exige backup e reinício controlado da plataforma.");
       return `<section class="console-update-impact"><h3>${escapeHtml(uiText("Impacto da atualização"))}</h3><p><strong>${escapeHtml(uiText("Classificação"))}:</strong> ${escapeHtml(classification)}</p><p><strong>${escapeHtml(uiText("Componentes alterados"))}:</strong> ${escapeHtml(components)}</p><p><strong>${escapeHtml(uiText("Impacto nas transferências"))}:</strong> ${escapeHtml(transferImpact)}</p><p class="hint">${escapeHtml(phaseOne)}</p></section>`;

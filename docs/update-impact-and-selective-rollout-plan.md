@@ -89,11 +89,19 @@ são parados, portanto transferências já em andamento continuam. A sessão web
 é encerrada como parte da reinicialização da aplicação, e o operador entra
 novamente após o health check.
 
+Também está implementado o recorte `CONTROLLER_ONLY`: somente mudanças no
+entrypoint isolado `app/controller_worker.py`, acompanhadas opcionalmente de
+testes, podem substituir `s3-oci-raikou-shin`. O novo controller precisa
+publicar seu heartbeat após iniciar; ele recebe SIGTERM apenas entre ciclos
+transacionais de planejamento. Restores e transferências já despachadas não
+são interrompidos. Em falha, a imagem e a revisão anteriores do controller
+são restauradas.
+
 Qualquer ausência, erro de manifesto, caminho fora da allowlist, alteração de
-API/banco/worker/runtime ou falha de health mantém o caminho seguro
-`FULL_CONTROLLED_RESTART`; em falha do rollout web, a imagem e a revisão web
-anteriores são restauradas. Os rollouts seletivos de controller, workers e
-banco continuam pendentes dos contratos e testes indicados abaixo.
+API/banco/código compartilhado de worker/runtime ou falha de health mantém o
+caminho seguro `FULL_CONTROLLED_RESTART`. Os rollouts seletivos de restore,
+discovery, auditoria, transferência e banco continuam pendentes dos contratos
+e testes indicados abaixo.
 
 ### Arquitetura-alvo
 
