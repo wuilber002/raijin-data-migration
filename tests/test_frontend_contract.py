@@ -149,6 +149,8 @@ def test_console_update_uses_a_blocking_raijin_workflow_modal_not_browser_confir
     assert 'apiCall("/api/auth/logout", {method:"POST"})' in script
     assert "console-update-workflow-progress" in page
     assert "console-update-workflow-steps" in page
+    assert "RECONNECTING:3" in script
+    assert 'state:"RECONNECTING", progress:90' in script
 
 
 def test_console_displays_host_authored_update_impact_before_installation():

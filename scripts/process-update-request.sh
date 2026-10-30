@@ -166,6 +166,11 @@ apply_update() {
   fi
   previous="$current"
   write_result DEPLOYING "Installing the approved source revision." "$current" "$available" "$previous" 65
+  # Console sessions are revoked on every service restart by design. Publish a
+  # terminal pre-restart state briefly while the old web process can still
+  # answer, so the operator sees why the next page is the login screen.
+  write_result RESTARTING "The platform will restart now; the current console session will be closed." "$current" "$available" "$previous" 80
+  sleep 2
   systemctl stop "$service"
   if ! git -C "$install_root" checkout --detach --quiet "$available"; then
     git -C "$install_root" checkout --detach --quiet "$previous" || true

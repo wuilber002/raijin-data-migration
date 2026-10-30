@@ -715,6 +715,8 @@
   "Processando atualização…": "Processando atualização…",
   "Reconectando à plataforma…": "Reconectando à plataforma…",
   "Validando a revisão aprovada e a fila drenada.": "Validando a revisão aprovada e a fila drenada.",
+  "A plataforma será reiniciada agora; a sessão atual será encerrada.": "A plataforma será reiniciada agora; a sessão atual será encerrada.",
+  "Reiniciando a plataforma e validando o health check local.": "Reiniciando a plataforma e validando o health check local.",
   "Progresso": "Progresso",
   "Atualização concluída. Sua sessão atual será encerrada para concluir a instalação.": "Atualização concluída. Sua sessão atual será encerrada para concluir a instalação.",
   "Entrar novamente": "Entrar novamente",

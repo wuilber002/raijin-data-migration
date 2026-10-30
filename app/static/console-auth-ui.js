@@ -503,12 +503,12 @@
         ["VALIDATING", "Validar revisão e fila"], ["BACKING_UP", "Criar backup do PostgreSQL"],
         ["DEPLOYING", "Instalar nova revisão"], ["VERIFYING", "Reiniciar e validar plataforma"],
       ];
-      const order = {VALIDATING:0, BACKING_UP:1, DEPLOYING:2, VERIFYING:3, SUCCEEDED:4, ROLLED_BACK:4, FAILED:4, REJECTED:0};
+      const order = {VALIDATING:0, BACKING_UP:1, DEPLOYING:2, RESTARTING:3, RECONNECTING:3, VERIFYING:3, SUCCEEDED:4, ROLLED_BACK:4, FAILED:4, REJECTED:0};
       const current = order[state.state] ?? 0;
       return `<ol class="console-update-workflow-steps">${phases.map(([phase, label], index) => `<li class="${index < current || state.state === "SUCCEEDED" ? "complete" : index === current ? "active" : ""}"><span class="console-update-workflow-step-mark">${index < current || state.state === "SUCCEEDED" ? "✓" : index === current ? "•" : ""}</span>${escapeHtml(uiText(label))}</li>`).join("")}</ol>`;
     };
     const updateWorkflowProgress = state => {
-      const fallback = {VALIDATING:10, BACKING_UP:35, DEPLOYING:65, VERIFYING:90, SUCCEEDED:100, ROLLED_BACK:100, FAILED:100, REJECTED:0};
+      const fallback = {VALIDATING:10, BACKING_UP:35, DEPLOYING:65, RESTARTING:80, RECONNECTING:90, VERIFYING:90, SUCCEEDED:100, ROLLED_BACK:100, FAILED:100, REJECTED:0};
       return Math.max(0, Math.min(100, Number.isFinite(Number(state.progress)) ? Number(state.progress) : (fallback[state.state] || 0)));
     };
     const updateImpactMarkup = (impact, includeFiles = true) => {
@@ -538,8 +538,15 @@
       const finalSuccess = state.state === "SUCCEEDED";
       const finalFailure = ["FAILED", "ROLLED_BACK", "REJECTED"].includes(state.state);
       if (finalSuccess || finalFailure) updateWorkflowLocked = false;
-      const reconnecting = state.state === "RESTARTING";
-      const message = reconnecting ? uiText("Reconectando à plataforma…") : (state.message || uiText("Processando atualização…"));
+      const reconnecting = state.state === "RECONNECTING";
+      const message = reconnecting ? uiText("Reconectando à plataforma…") : ({
+        VALIDATING: uiText("Validando a revisão aprovada e a fila drenada."),
+        BACKING_UP: uiText("Criando backup do PostgreSQL antes da atualização."),
+        DEPLOYING: uiText("Instalando a revisão aprovada."),
+        RESTARTING: uiText("A plataforma será reiniciada agora; a sessão atual será encerrada."),
+        VERIFYING: uiText("Reiniciando a plataforma e validando o health check local."),
+        SUCCEEDED: uiText("Atualização concluída e validada pelo health check local."),
+      }[state.state] || state.message || uiText("Processando atualização…"));
       const action = finalSuccess
         ? `<p class="console-update-workflow-final" data-console-i18n="Atualização concluída. Sua sessão atual será encerrada para concluir a instalação."></p><button type="button" id="console-update-workflow-logout" data-console-i18n="Entrar novamente"></button>`
         : finalFailure
@@ -562,7 +569,7 @@
         showUpdateWorkflow(state);
         if (["SUCCEEDED", "FAILED", "ROLLED_BACK", "REJECTED"].includes(state.state) && !state.pending) return;
       } catch (_) {
-        showUpdateWorkflow({state:"RESTARTING", progress:90});
+        showUpdateWorkflow({state:"RECONNECTING", progress:90});
       }
       updateWorkflowPollTimer = window.setTimeout(pollUpdateWorkflow, 1500);
     };
@@ -630,6 +637,8 @@
         AVAILABLE: uiText("Uma revisão aprovada está disponível."),
         BACKING_UP: uiText("Criando backup do PostgreSQL antes da atualização."),
         DEPLOYING: uiText("Instalando a revisão aprovada."),
+        RESTARTING: uiText("A plataforma será reiniciada agora; a sessão atual será encerrada."),
+        VERIFYING: uiText("Reiniciando a plataforma e validando o health check local."),
         SUCCEEDED: uiText("Atualização concluída e validada pelo health check local."),
         ROLLED_BACK: uiText("A nova revisão falhou; a revisão anterior foi restaurada."),
       }[updateState.state] || updateState.message || "";
