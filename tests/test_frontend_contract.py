@@ -182,6 +182,12 @@ def test_update_workflow_does_not_render_completed_check_as_completed_installati
     assert 'state:"VALIDATING", progress:10' in script
 
 
+def test_active_update_step_uses_spinner_instead_of_pulsing_dot():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert ".console-update-workflow-steps li.active .console-update-workflow-step-mark::after" in page
+    assert "animation:console-update-check-spin .75s linear infinite" in page
+
+
 def test_dashboard_versions_the_injected_console_auth_asset_to_avoid_stale_ui():
     main = (ROOT / "app/main.py").read_text(encoding="utf-8")
     assert 'console-auth-ui.js?v={RAIJIN_BUILD_REVISION}' in main
