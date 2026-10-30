@@ -563,7 +563,8 @@
         : value.installation_strategy === "WEB_ONLY_ROLLING"
         ? uiText("Esta atualização trocará somente a interface web; os workers e transferências em curso continuarão ativos.")
         : uiText("Esta atualização exige backup e reinício controlado da plataforma.");
-      return `<section class="console-update-impact"><h3>${escapeHtml(uiText("Impacto da atualização"))}</h3><p><strong>${escapeHtml(uiText("Classificação"))}:</strong> ${escapeHtml(classification)}</p><p><strong>${escapeHtml(uiText("Componentes alterados"))}:</strong> ${escapeHtml(components)}</p><p><strong>${escapeHtml(uiText("Impacto nas transferências"))}:</strong> ${escapeHtml(transferImpact)}</p><p class="hint">${escapeHtml(phaseOne)}</p></section>`;
+      const requiredSchema = Number.isInteger(Number(value.required_database_schema_revision)) ? `v${Number(value.required_database_schema_revision)}` : "—";
+      return `<section class="console-update-impact"><h3>${escapeHtml(uiText("Impacto da atualização"))}</h3><p><strong>${escapeHtml(uiText("Classificação"))}:</strong> ${escapeHtml(classification)}</p><p><strong>${escapeHtml(uiText("Componentes alterados"))}:</strong> ${escapeHtml(components)}</p><p><strong>${escapeHtml(uiText("Schema exigido"))}:</strong> <code>${escapeHtml(requiredSchema)}</code></p><p><strong>${escapeHtml(uiText("Impacto nas transferências"))}:</strong> ${escapeHtml(transferImpact)}</p><p class="hint">${escapeHtml(phaseOne)}</p></section>`;
     };
     const showUpdateWorkflow = state => {
       latestUpdateState = {...(latestUpdateState || {}), ...state};

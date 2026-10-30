@@ -91,6 +91,12 @@ try:
     ))
 except Exception:
     manifest = {}
+database_migration = manifest.get("database_migration", {}) if isinstance(manifest, dict) else {}
+required_database_revision = (
+    database_migration.get("required_revision") if isinstance(database_migration, dict)
+    and database_migration.get("mode") == "EXPAND_ONLY"
+    and isinstance(database_migration.get("required_revision"), int) else None
+)
 
 web_rollout = manifest.get("selective_rollout", {}).get("web_ui", {}) if isinstance(manifest, dict) else {}
 controller_rollout = manifest.get("selective_rollout", {}).get("controller", {}) if isinstance(manifest, dict) else {}
@@ -195,6 +201,7 @@ print(json.dumps({
         else "not_web_ui_only"
     ),
     "changed_files": paths,
+    "required_database_schema_revision": required_database_revision,
 }, separators=(",", ":")))
 PY
 }

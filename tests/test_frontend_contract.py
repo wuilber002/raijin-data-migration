@@ -256,6 +256,8 @@ def test_update_agent_requires_expand_only_database_manifest():
     assert "PYTHONPATH=/app python3 scripts/migrate-production.py" in agent
     assert '"database_schema_revision"' in agent
     assert 'Schema do banco' in script
+    assert 'required_database_schema_revision' in agent
+    assert 'Schema exigido' in script
 
 
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():
