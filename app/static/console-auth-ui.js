@@ -504,6 +504,7 @@
     let updateCheckInProgress = false;
     let updateWorkflowActive = false;
     let updateWorkflowLocked = false;
+    let updateWorkflowSelective = false;
     let updateWorkflowPollTimer = null;
     const updateWorkflowContent = updateModal.querySelector("#console-update-workflow-content");
     const updateWorkflowSteps = state => {
@@ -585,7 +586,9 @@
         SUCCEEDED: uiText("Atualização concluída e validada pelo health check local."),
       }[state.state] || state.message || uiText("Processando atualização…"));
       const action = finalSuccess
-        ? `<p class="console-update-workflow-final" data-console-i18n="Atualização concluída. Sua sessão atual será encerrada para concluir a instalação."></p><button type="button" id="console-update-workflow-logout" data-console-i18n="Entrar novamente"></button>`
+        ? updateWorkflowSelective
+          ? `<p class="console-update-workflow-final" data-console-i18n="Atualização seletiva concluída. Sua sessão permaneceu ativa."></p><button type="button" class="secondary" id="console-update-workflow-close" data-console-i18n="Fechar"></button>`
+          : `<p class="console-update-workflow-final" data-console-i18n="Atualização concluída. Sua sessão atual será encerrada para concluir a instalação."></p><button type="button" id="console-update-workflow-logout" data-console-i18n="Entrar novamente"></button>`
         : finalFailure
           ? `<p class="error"><strong>${escapeHtml(uiText("Atualização não foi concluída."))}</strong> ${escapeHtml(state.message || uiText("A revisão anterior foi preservada. Verifique Settings antes de tentar novamente."))}</p><button type="button" class="secondary" id="console-update-workflow-close" data-console-i18n="Fechar"></button>`
           : "";
@@ -627,6 +630,7 @@
         updateWorkflowActive = false; window.closeModal?.("#console-update-workflow-modal");
       });
       updateModal.querySelector("#console-update-workflow-confirm").addEventListener("click", async event => {
+        updateWorkflowSelective = ["WEB_ONLY_ROLLING", "CONTROLLER_ONLY_ROLLING", "RESTORE_WORKER_ROLLING", "DISCOVERY_WORKER_ROLLING", "AUDIT_WORKER_ROLLING", "TRANSFER_WORKER_ROLLING"].includes(latestUpdateState?.impact?.installation_strategy);
         const button = event.currentTarget; button.disabled = true;
         updateWorkflowLocked = true;
         updateModal.querySelector("h2").dataset.consoleI18n = "Atualização da plataforma em andamento";

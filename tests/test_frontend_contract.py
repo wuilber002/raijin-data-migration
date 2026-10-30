@@ -262,6 +262,13 @@ def test_update_agent_requires_expand_only_database_manifest():
     assert '"$current" -ge "$required"' in agent
 
 
+def test_selective_update_keeps_console_session_active_in_final_modal():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert "updateWorkflowSelective" in script
+    assert "Atualização seletiva concluída. Sua sessão permaneceu ativa." in script
+    assert '"CONTROLLER_ONLY_ROLLING"' in script
+
+
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert 'const awaitingAgent = updateWorkflowLocked && state.pending && state.state === "AVAILABLE"' in script
