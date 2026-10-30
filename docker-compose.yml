@@ -88,6 +88,7 @@ services:
         condition: service_started
       fujin-local:
         condition: service_healthy
+    command: ["python3", "-m", "app.controller_worker"]
     environment: &local-raikou-worker-environment
       RAIJIN_OPERATION_MODE: REAL
       RAIJIN_WORKER_ROLE: raikou-shin
@@ -95,7 +96,6 @@ services:
       DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       OCI_RUNTIME_CONFIG_FILE: /run/oci-runtime/oci-runtime.json
-    command: ["python3", "-m", "app.real_worker"]
     secrets: [postgres_password]
     networks: [default, fujin-local-data]
     dns: [172.30.0.53]
@@ -105,6 +105,7 @@ services:
 
   local-raikou-sei:
     <<: *local-raikou-worker
+    command: ["python3", "-m", "app.component_worker"]
     environment:
       <<: *local-raikou-worker-environment
       RAIJIN_WORKER_ROLE: raikou-sei
@@ -112,6 +113,7 @@ services:
 
   local-raikou-ko:
     <<: *local-raikou-worker
+    command: ["python3", "-m", "app.component_worker"]
     environment:
       <<: *local-raikou-worker-environment
       RAIJIN_WORKER_ROLE: raikou-ko
@@ -119,6 +121,7 @@ services:
 
   local-raikou-kai:
     <<: *local-raikou-worker
+    command: ["python3", "-m", "app.component_worker"]
     environment:
       <<: *local-raikou-worker-environment
       RAIJIN_WORKER_ROLE: raikou-kai
@@ -146,7 +149,7 @@ services:
       DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       OCI_RUNTIME_CONFIG_FILE: /run/oci-runtime/oci-runtime.json
-    command: ["python3", "-m", "app.real_worker"]
+    command: ["python3", "-m", "app.component_worker"]
     secrets: [postgres_password]
     networks: [default, fujin-local-data]
     dns: [172.30.0.53]
@@ -308,6 +311,7 @@ services:
         condition: service_healthy
       simulation-app:
         condition: service_healthy
+    command: ["python3", "-m", "app.controller_worker"]
     environment: &simulation-raikou-worker-environment
       RAIJIN_OPERATION_MODE: SIMULATION
       RAIJIN_SIMULATOR_BASE_URL: http://simulator:8090
@@ -315,12 +319,12 @@ services:
       RAIJIN_WORKER_ID: raikou-shin-simulation
       DATABASE_URL: postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation
       POSTGRES_PASSWORD_FILE: /run/secrets/simulation_postgres_password
-    command: ["python3", "-m", "app.real_worker"]
     secrets:
       - simulation_postgres_password
 
   simulation-raikou-sei:
     <<: *simulation-raikou-worker
+    command: ["python3", "-m", "app.component_worker"]
     environment:
       <<: *simulation-raikou-worker-environment
       RAIJIN_WORKER_ROLE: raikou-sei
@@ -328,6 +332,7 @@ services:
 
   simulation-raikou-ko:
     <<: *simulation-raikou-worker
+    command: ["python3", "-m", "app.component_worker"]
     environment:
       <<: *simulation-raikou-worker-environment
       RAIJIN_WORKER_ROLE: raikou-ko
@@ -335,6 +340,7 @@ services:
 
   simulation-raikou-kai:
     <<: *simulation-raikou-worker
+    command: ["python3", "-m", "app.component_worker"]
     environment:
       <<: *simulation-raikou-worker-environment
       RAIJIN_WORKER_ROLE: raikou-kai
@@ -358,7 +364,7 @@ services:
       RAIJIN_WORKER_ID: raiju-transfer
       DATABASE_URL: postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation
       POSTGRES_PASSWORD_FILE: /run/secrets/simulation_postgres_password
-    command: ["python3", "-m", "app.real_worker"]
+    command: ["python3", "-m", "app.component_worker"]
     secrets:
       - simulation_postgres_password
 

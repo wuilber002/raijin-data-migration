@@ -144,12 +144,11 @@ case "$mode" in
       [[ "$runtime_component" == controller && "$worker_role" != raikou-shin ]] && continue
       container="s3-oci-${worker_role}"
       [[ "$worker_role" == raiju ]] && container=s3-oci-transfer-worker
-      worker_command=(python3 -m app.real_worker)
-      worker_runtime=()
+      rm -f "$runtime_root/${worker_role}.json"
+      worker_command=(python3 -m app.component_worker)
+      worker_runtime=(-e "RAIJIN_COMPONENT_HEARTBEAT_FILE=/run/platform-status/${worker_role}.json" -v "$runtime_root:/run/platform-status:rw,z")
       if [[ "$worker_role" == raikou-shin ]]; then
-        rm -f "$runtime_root/raikou-shin.json"
         worker_command=(python3 -m app.controller_worker)
-        worker_runtime=(-e RAIJIN_COMPONENT_HEARTBEAT_FILE=/run/platform-status/raikou-shin.json -v "$runtime_root:/run/platform-status:rw,z")
       fi
       podman run -d --name "$container" --replace --restart unless-stopped \
         --stop-timeout 120 \
@@ -174,6 +173,13 @@ case "$mode" in
       done
       exit 0
     fi
+    for worker_role in raikou-shin raikou-sei raikou-ko raikou-kai raiju; do
+      for attempt in $(seq 1 30); do
+        [[ -s "$runtime_root/${worker_role}.json" ]] && break
+        [[ "$attempt" -lt 30 ]] || { echo "${worker_role} did not publish a heartbeat" >&2; exit 1; }
+        sleep 1
+      done
+    done
     ;;
   SIMULATION)
     podman run --rm --network "$network" \

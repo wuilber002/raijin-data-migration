@@ -103,6 +103,12 @@ caminho seguro `FULL_CONTROLLED_RESTART`. Os rollouts seletivos de restore,
 discovery, auditoria, transferência e banco continuam pendentes dos contratos
 e testes indicados abaixo.
 
+Os entrypoints e heartbeats desses quatro consumers já são isolados por papel,
+mas isso ainda não autoriza seus rollouts seletivos: sua lógica de negócio
+continua no módulo compartilhado `app.real_worker.py`. Uma modificação nesse
+módulo segue sendo classificada como atualização integral até a extração e os
+contratos específicos de cada papel estarem concluídos.
+
 ### Arquitetura-alvo
 
 ```mermaid

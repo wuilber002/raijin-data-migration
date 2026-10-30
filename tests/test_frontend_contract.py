@@ -185,8 +185,17 @@ def test_controller_rollout_has_isolated_entrypoint_and_heartbeat_contract():
     runtime = (ROOT / "scripts/start-runtime.sh").read_text(encoding="utf-8")
     assert 'ROLE = "raikou-shin"' in controller
     assert "write_heartbeat(state=\"READY\")" in controller
-    assert "RAIJIN_COMPONENT_HEARTBEAT_FILE=/run/platform-status/raikou-shin.json" in runtime
+    assert 'RAIJIN_COMPONENT_HEARTBEAT_FILE=/run/platform-status/${worker_role}.json' in runtime
     assert '[[ "$runtime_component" == controller ]]' in runtime
+
+
+def test_worker_components_have_isolated_entrypoint_and_heartbeats():
+    worker = (ROOT / "app/component_worker.py").read_text(encoding="utf-8")
+    runtime = (ROOT / "scripts/start-runtime.sh").read_text(encoding="utf-8")
+    assert 'SUPPORTED_ROLES = frozenset({"raikou-sei", "raikou-ko", "raikou-kai", "raiju"})' in worker
+    assert "write_heartbeat(state=\"READY\")" in worker
+    assert "app.component_worker" in runtime
+    assert 'RAIJIN_COMPONENT_HEARTBEAT_FILE=/run/platform-status/${worker_role}.json' in runtime
 
 
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():
