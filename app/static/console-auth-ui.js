@@ -571,7 +571,14 @@
       try {
         const state = await apiCall("/api/admin/updates");
         latestUpdateState = state;
-        showUpdateWorkflow(state);
+        // The request file is visible before the root timer has written its
+        // first progress state. Do not render the prior AVAILABLE result
+        // (which correctly carries 100% for a completed *check*) as though
+        // installation itself had completed.
+        const awaitingAgent = updateWorkflowLocked && state.pending && state.state === "AVAILABLE";
+        showUpdateWorkflow(awaitingAgent
+          ? {...state, state:"VALIDATING", progress:10, message:uiText("Validando a revisão aprovada e a fila drenada.")}
+          : state);
         if (["SUCCEEDED", "FAILED", "ROLLED_BACK", "REJECTED"].includes(state.state) && !state.pending) return;
       } catch (_) {
         showUpdateWorkflow({state:"RECONNECTING", progress:90});

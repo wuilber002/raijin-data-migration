@@ -176,6 +176,12 @@ def test_console_displays_host_authored_update_impact_before_installation():
     assert "Esta atualização trocará somente a interface web" in script
 
 
+def test_update_workflow_does_not_render_completed_check_as_completed_installation():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert 'const awaitingAgent = updateWorkflowLocked && state.pending && state.state === "AVAILABLE"' in script
+    assert 'state:"VALIDATING", progress:10' in script
+
+
 def test_dashboard_versions_the_injected_console_auth_asset_to_avoid_stale_ui():
     main = (ROOT / "app/main.py").read_text(encoding="utf-8")
     assert 'console-auth-ui.js?v={RAIJIN_BUILD_REVISION}' in main
