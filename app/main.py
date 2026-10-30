@@ -4755,6 +4755,8 @@ def console_update_control_state() -> dict:
         "components": [str(value)[:64] for value in raw_impact.get("components", []) if isinstance(value, str)][:12],
         "transfer_impact": str(raw_impact.get("transfer_impact") or "UNKNOWN")[:64],
         "installation_strategy": str(raw_impact.get("installation_strategy") or "FULL_CONTROLLED_RESTART")[:64],
+        "rollout_eligible": bool(raw_impact.get("rollout_eligible")),
+        "rollout_eligibility_reason": str(raw_impact.get("rollout_eligibility_reason") or "")[:128],
         "changed_files": [str(value)[:512] for value in raw_impact.get("changed_files", []) if isinstance(value, str)][:100],
     }
     state["pending"] = request_file.exists() or request_file.with_suffix(".processing").exists()

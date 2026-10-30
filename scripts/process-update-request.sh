@@ -23,6 +23,7 @@ source "$config"
 update_enabled="${RAIJIN_UPDATE_ENABLED:-false}"
 remote="${RAIJIN_UPDATE_REMOTE:-origin}"
 ref="${RAIJIN_UPDATE_REF:-refs/remotes/origin/main}"
+selective_web_only="${RAIJIN_UPDATE_SELECTIVE_WEB_ONLY:-false}"
 
 valid_remote='^[A-Za-z0-9_.-]+$'
 [[ "$update_enabled" == true && "$remote" =~ $valid_remote ]] || exit 0
@@ -32,21 +33,23 @@ update_impact() {
   [[ "$current" =~ ^[0-9a-f]{40}$ && "$available" =~ ^[0-9a-f]{40}$ ]] || {
     printf '%s\n' '{}'; return 0;
   }
-  python3 - "$install_root" "$current" "$available" <<'PY'
+  python3 - "$install_root" "$current" "$available" "$selective_web_only" <<'PY'
 import json
 import subprocess
 import sys
 
-root, current, available = sys.argv[1:]
+root, current, available, selective_web_only = sys.argv[1:]
 try:
-    paths = subprocess.check_output(
+    all_paths = subprocess.check_output(
         ["git", "-C", root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", current, available],
         text=True, stderr=subprocess.DEVNULL,
     ).splitlines()
 except Exception:
-    paths = []
+    all_paths = []
 
-paths = paths[:100]
+# Classification is a security decision, so it always examines the complete
+# diff. Only the administrative evidence sent to the web console is capped.
+paths = all_paths[:100]
 web_ui = lambda path: path.startswith(("app/static/", "images/"))
 docs = lambda path: path.startswith("docs/") or path in {"README.md", "LICENSE"}
 host = lambda path: path.startswith(("scripts/", "docker/", "terraform/")) or path in {"Dockerfile", "docker-compose.yml", "requirements.txt", "requirements-dev.txt"}
@@ -54,15 +57,36 @@ worker = lambda path: path in {"app/real_worker.py", "app/cloud_backends.py", "a
 database = lambda path: path.startswith("app/") and any(token in path for token in ("migration", "schema", "main.py"))
 
 components = []
-if any(web_ui(path) for path in paths): components.append("WEB_UI")
-if any(worker(path) for path in paths): components.append("WORKERS")
-if any(database(path) for path in paths): components.append("DATABASE_OR_API")
-if any(host(path) for path in paths): components.append("HOST_RUNTIME")
-if not components and paths: components.append("DOCUMENTATION")
+if any(web_ui(path) for path in all_paths): components.append("WEB_UI")
+if any(worker(path) for path in all_paths): components.append("WORKERS")
+if any(database(path) for path in all_paths): components.append("DATABASE_OR_API")
+if any(host(path) for path in all_paths): components.append("HOST_RUNTIME")
+if not components and all_paths: components.append("DOCUMENTATION")
 
-if paths and all(web_ui(path) for path in paths):
+manifest = {}
+try:
+    manifest = json.loads(subprocess.check_output(
+        ["git", "-C", root, "show", f"{available}:release-manifest.json"],
+        text=True, stderr=subprocess.DEVNULL,
+    ))
+except Exception:
+    manifest = {}
+
+web_rollout = manifest.get("selective_rollout", {}).get("web_ui", {}) if isinstance(manifest, dict) else {}
+manifest_authorizes_web = (
+    isinstance(manifest, dict)
+    and manifest.get("manifest_version") == 1
+    and isinstance(web_rollout, dict)
+    and web_rollout.get("enabled") is True
+    and web_rollout.get("contract_version") == 1
+    and web_rollout.get("allowed_path_prefixes") == ["app/static/", "images/"]
+)
+web_only_candidate = bool(all_paths) and all(web_ui(path) for path in all_paths)
+web_rollout_enabled = selective_web_only.lower() == "true"
+
+if web_only_candidate:
     classification, transfer_impact = "WEB_UI_ONLY", "NONE"
-elif paths and all(docs(path) for path in paths):
+elif all_paths and all(docs(path) for path in all_paths):
     classification, transfer_impact = "DOCUMENTATION_ONLY", "NONE"
 else:
     classification, transfer_impact = "FULL_PLATFORM", "CONTROLLED_PAUSE"
@@ -71,9 +95,14 @@ print(json.dumps({
     "classification": classification,
     "components": components,
     "transfer_impact": transfer_impact,
-    # Phase 1 is intentionally conservative: every accepted source revision
-    # follows the existing backup + full-service restart protocol.
-    "installation_strategy": "FULL_CONTROLLED_RESTART",
+    "installation_strategy": "WEB_ONLY_ROLLING" if web_only_candidate and manifest_authorizes_web and web_rollout_enabled else "FULL_CONTROLLED_RESTART",
+    "rollout_eligible": bool(web_only_candidate and manifest_authorizes_web and web_rollout_enabled),
+    "rollout_eligibility_reason": (
+        "manifest_authorized" if web_only_candidate and manifest_authorizes_web and web_rollout_enabled
+        else "host_policy_disabled" if web_only_candidate and manifest_authorizes_web
+        else "manifest_not_authorized" if web_only_candidate
+        else "not_web_ui_only"
+    ),
     "changed_files": paths,
 }, separators=(",", ":")))
 PY
@@ -140,8 +169,64 @@ runtime_is_drained() {
   [[ "$task_count" =~ ^[0-9]+$ && "$discovery_count" =~ ^[0-9]+$ && "$wave_count" =~ ^[0-9]+$ && "$task_count" == 0 && "$discovery_count" == 0 && "$wave_count" == 0 ]]
 }
 
+update_strategy() {
+  local current="$1" available="$2"
+  update_impact "$current" "$available" | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get("installation_strategy", "FULL_CONTROLLED_RESTART"))
+except Exception:
+    print("FULL_CONTROLLED_RESTART")
+'
+}
+
+release_image_for_revision() {
+  local revision="$1"
+  printf 'localhost/s3-oci-migration:%s\n' "$revision"
+}
+
+build_release_image() {
+  local revision="$1" version image
+  version="$(tr -d '[:space:]' <"$install_root/VERSION")"
+  [[ -n "$version" ]] || return 1
+  image="$(release_image_for_revision "$revision")"
+  podman build --no-cache \
+    --build-arg "RAIJIN_SERVICE_VERSION=$version" \
+    --build-arg "RAIJIN_BUILD_REVISION=$revision" \
+    -t "$image" "$install_root"
+}
+
+apply_web_only_update() {
+  local current="$1" available="$2" previous_image candidate_image
+  previous_image="$(podman inspect --format '{{.ImageName}}' s3-oci-app 2>/dev/null || true)"
+  [[ -n "$previous_image" ]] || {
+    write_result FAILED "Could not identify the running web container image." "$current" "$available" "$current"
+    return 1
+  }
+  write_result DEPLOYING "Building and installing the approved web-only revision." "$current" "$available" "$current" 55
+  if ! git -C "$install_root" checkout --detach --quiet "$available"; then
+    write_result FAILED "Could not checkout the approved web-only revision." "$current" "$available" "$current"
+    return 1
+  fi
+  if ! build_release_image "$available"; then
+    git -C "$install_root" checkout --detach --quiet "$current" || true
+    write_result FAILED "Could not build the approved web-only revision." "$current" "$available" "$current"
+    return 1
+  fi
+  candidate_image="$(release_image_for_revision "$available")"
+  write_result VERIFYING "Replacing only the web console and validating its local health check." "$available" "$available" "$current" 85
+  if RAIJIN_IMAGE="$candidate_image" RAIJIN_RUNTIME_COMPONENT=web "$install_root/scripts/start-runtime.sh" REAL; then
+    write_result SUCCEEDED "Web-only update completed; migration workers remained running." "$available" "$available" "$current" 100
+    return 0
+  fi
+  git -C "$install_root" checkout --detach --quiet "$current" || true
+  RAIJIN_IMAGE="$previous_image" RAIJIN_RUNTIME_COMPONENT=web "$install_root/scripts/start-runtime.sh" REAL || true
+  write_result ROLLED_BACK "Web-only update failed health validation; the previous web revision was restored." "$current" "$available" "$current" 100
+  return 1
+}
+
 apply_update() {
-  local requested="$1" current available previous
+  local requested="$1" current available previous strategy
   current="$(revision HEAD)"
   write_result VALIDATING "Validating the approved revision and drained queue." "$current" "$requested" "" 10
   available="$(check_update false)" || return 1
@@ -151,13 +236,18 @@ apply_update() {
     write_result REJECTED "Requested revision is not the currently approved update." "$current" "$available"
     return 0
   fi
-  if ! runtime_is_drained; then
+  strategy="$(update_strategy "$current" "$available")"
+  if [[ "$strategy" != WEB_ONLY_ROLLING ]] && ! runtime_is_drained; then
     write_result REJECTED "Update requires a fully drained queue and no active restore or transfer." "$current" "$available"
     return 0
   fi
   if [[ -n "$(git -C "$install_root" status --porcelain)" ]]; then
     write_result REJECTED "Installed release contains local source changes; automatic update is unsafe." "$current" "$available"
     return 0
+  fi
+  if [[ "$strategy" == WEB_ONLY_ROLLING ]]; then
+    apply_web_only_update "$current" "$available"
+    return $?
   fi
   write_result BACKING_UP "Creating a PostgreSQL backup before update." "$current" "$available" "" 35
   if ! "$backup"; then

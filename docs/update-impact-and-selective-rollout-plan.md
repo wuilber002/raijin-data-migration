@@ -70,6 +70,29 @@ produção sem uma fronteira de execução independente.
 
 ## Fase 2 — rollout realmente seletivo
 
+### Estado de implementação
+
+O primeiro recorte desta fase está implementado: `WEB_UI_ONLY`. Uma revisão
+somente recebe a estratégia `WEB_ONLY_ROLLING` quando todos estes controles
+são verdadeiros:
+
+1. o diff contém exclusivamente `app/static/` e/ou `images/`;
+2. o `release-manifest.json` da própria revisão, lido pelo agente root,
+   autoriza o contrato `web_ui` versão 1 e sua allowlist de caminhos;
+3. a política root-owned `RAIJIN_UPDATE_SELECTIVE_WEB_ONLY=true` está ativa.
+
+Nesse caso, o agente cria a imagem da revisão e substitui somente
+`s3-oci-app`, aguardando seu `/healthz`. Os containers de Raikou e Raiju não
+são parados, portanto transferências já em andamento continuam. A sessão web
+é encerrada como parte da reinicialização da aplicação, e o operador entra
+novamente após o health check.
+
+Qualquer ausência, erro de manifesto, caminho fora da allowlist, alteração de
+API/banco/worker/runtime ou falha de health mantém o caminho seguro
+`FULL_CONTROLLED_RESTART`; em falha do rollout web, a imagem e a revisão web
+anteriores são restauradas. Os rollouts seletivos de controller, workers e
+banco continuam pendentes dos contratos e testes indicados abaixo.
+
 ### Arquitetura-alvo
 
 ```mermaid

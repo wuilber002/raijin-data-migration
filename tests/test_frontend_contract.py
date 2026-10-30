@@ -163,7 +163,12 @@ def test_console_displays_host_authored_update_impact_before_installation():
     assert "console-update-status-layout" in script
     assert "console-update-status-layout" in (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "WEB_UI_ONLY" in update_agent
-    assert '"installation_strategy": "FULL_CONTROLLED_RESTART"' in update_agent
+    assert '"installation_strategy": "WEB_ONLY_ROLLING"' in update_agent
+    assert "apply_web_only_update" in update_agent
+    assert "RAIJIN_RUNTIME_COMPONENT=web" in update_agent
+    assert "all_paths = subprocess.check_output" in update_agent
+    assert "all(web_ui(path) for path in all_paths)" in update_agent
+    assert "Esta atualização trocará somente a interface web" in script
 
 
 def test_dashboard_versions_the_injected_console_auth_asset_to_avoid_stale_ui():

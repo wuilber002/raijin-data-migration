@@ -739,6 +739,8 @@
   "A instalação controlada pausará brevemente os componentes e os workers serão reiniciados.": "A instalação controlada pausará brevemente os componentes e os workers serão reiniciados.",
   "Impacto de transferência ainda não classificado.": "Impacto de transferência ainda não classificado.",
   "Nesta Fase 1, toda atualização continua usando backup e reinício controlado da plataforma.": "Nesta Fase 1, toda atualização continua usando backup e reinício controlado da plataforma.",
+  "Esta atualização exige backup e reinício controlado da plataforma.": "Esta atualização exige backup e reinício controlado da plataforma.",
+  "Esta atualização trocará somente a interface web; os workers e transferências em curso continuarão ativos.": "Esta atualização trocará somente a interface web; os workers e transferências em curso continuarão ativos.",
   "Instalar atualização": "Instalar atualização",
   "Revisão instalada": "Revisão instalada",
   "Revisão disponível": "Revisão disponível",

@@ -527,7 +527,9 @@
         : value.transfer_impact === "CONTROLLED_PAUSE"
           ? uiText("A instalação controlada pausará brevemente os componentes e os workers serão reiniciados.")
           : uiText("Impacto de transferência ainda não classificado.");
-      const phaseOne = uiText("Nesta Fase 1, toda atualização continua usando backup e reinício controlado da plataforma.");
+      const phaseOne = value.installation_strategy === "WEB_ONLY_ROLLING"
+        ? uiText("Esta atualização trocará somente a interface web; os workers e transferências em curso continuarão ativos.")
+        : uiText("Esta atualização exige backup e reinício controlado da plataforma.");
       const changedFiles = includeFiles && value.changed_files?.length
         ? `<details class="console-update-impact-files"><summary>${escapeHtml(uiText("Arquivos alterados"))} (${value.changed_files.length})</summary><ul>${value.changed_files.map(path => `<li><code>${escapeHtml(path)}</code></li>`).join("")}</ul></details>` : "";
       return `<section class="console-update-impact"><h3>${escapeHtml(uiText("Impacto da atualização"))}</h3><p><strong>${escapeHtml(uiText("Classificação"))}:</strong> ${escapeHtml(classification)}</p><p><strong>${escapeHtml(uiText("Componentes alterados"))}:</strong> ${escapeHtml(components)}</p><p><strong>${escapeHtml(uiText("Impacto nas transferências"))}:</strong> ${escapeHtml(transferImpact)}</p><p class="hint">${escapeHtml(phaseOne)}</p>${changedFiles}</section>`;

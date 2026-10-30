@@ -11,6 +11,11 @@ update_control_root=/var/lib/s3-oci-migration/update-control
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 image="${RAIJIN_IMAGE:-localhost/s3-oci-migration:latest}"
 network=s3-oci-migration
+runtime_component="${RAIJIN_RUNTIME_COMPONENT:-full}"
+[[ "$runtime_component" == full || "$runtime_component" == web ]] || {
+  echo "RAIJIN_RUNTIME_COMPONENT must be full or web" >&2
+  exit 2
+}
 
 # The web console is loopback-only by default. Operators can persist a
 # different host interface/port in /etc/s3-oci-migration/web-bind.env.
@@ -129,6 +134,10 @@ case "$mode" in
       [[ "$attempt" -lt 30 ]] || { echo "REAL API did not become healthy" >&2; exit 1; }
       sleep 2
     done
+    # A Phase 2 WEB_UI_ONLY update replaces precisely this independently
+    # health-checked web/API container. The durable worker containers retain
+    # their existing image and continue their in-flight work.
+    [[ "$runtime_component" == web ]] && exit 0
     for worker_role in raikou-shin raikou-sei raikou-ko raikou-kai raiju; do
       container="s3-oci-${worker_role}"
       [[ "$worker_role" == raiju ]] && container=s3-oci-transfer-worker

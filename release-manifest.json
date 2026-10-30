@@ -1,0 +1,18 @@
+{
+  "manifest_version": 1,
+  "contracts": {
+    "web_api": 1,
+    "worker_protocol": 1,
+    "database_schema": 1
+  },
+  "selective_rollout": {
+    "web_ui": {
+      "enabled": true,
+      "contract_version": 1,
+      "allowed_path_prefixes": [
+        "app/static/",
+        "images/"
+      ]
+    }
+  }
+}

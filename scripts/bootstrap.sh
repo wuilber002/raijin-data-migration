@@ -101,8 +101,17 @@ if [[ ! -e "$update_config" ]]; then
 RAIJIN_UPDATE_ENABLED=true
 RAIJIN_UPDATE_REMOTE=origin
 RAIJIN_UPDATE_REF=refs/remotes/origin/main
+# Selective rollout is a root-owned opt-in. It only applies to a candidate
+# whose immutable Git manifest authorizes WEB_UI_ONLY and whose changed paths
+# are exclusively static assets. All other updates retain the full protocol.
+RAIJIN_UPDATE_SELECTIVE_WEB_ONLY=true
 EOF
   chmod 0600 "$update_config"
+fi
+# Existing deployments retain their administrator-owned update policy. Add the
+# new conservative default once, rather than replacing that file.
+if ! grep -q '^RAIJIN_UPDATE_SELECTIVE_WEB_ONLY=' "$update_config"; then
+  printf '\n# Permit only manifest-authorized static UI rollouts; every other update remains full.\nRAIJIN_UPDATE_SELECTIVE_WEB_ONLY=true\n' >>"$update_config"
 fi
 source "$install_root/scripts/web-auth.sh"
 source "$install_root/scripts/console-auth-lifecycle.sh"
