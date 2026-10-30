@@ -130,6 +130,16 @@ def test_console_audit_labels_the_target_user_for_user_created_events():
     assert '`${row.event_type} (${row.target})`' in script
 
 
+def test_update_check_keeps_a_stable_busy_indicator_until_the_host_finishes():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "updateCheckInProgress" in script
+    assert "Verificando atualizações" in script
+    assert "if (updateCheckInProgress && !updatePending) updateCheckInProgress = false" in script
+    assert "console-update-check-progress" in page
+    assert "console-update-check-spinner" in page
+
+
 def test_dashboard_versions_the_injected_console_auth_asset_to_avoid_stale_ui():
     main = (ROOT / "app/main.py").read_text(encoding="utf-8")
     assert 'console-auth-ui.js?v={RAIJIN_BUILD_REVISION}' in main

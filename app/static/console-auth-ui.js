@@ -451,7 +451,7 @@
       <h3 data-console-i18n="Atualizações da plataforma"></h3>
       <p class="hint" data-console-i18n="Consulta uma revisão aprovada no GitHub. A instalação exige fila completamente drenada, backup e validação local de saúde."></p>
       <div id="console-update-status" class="report-content"></div>
-      <div class="row"><button type="button" class="secondary" id="console-update-check" data-console-i18n="Verificar atualizações"></button><button type="button" id="console-update-apply" data-console-i18n="Instalar atualização"></button></div>
+      <div class="row"><button type="button" class="secondary console-update-check" id="console-update-check"></button><button type="button" id="console-update-apply" data-console-i18n="Instalar atualização"></button></div>
       <hr class="console-section-divider">
       <h3 data-console-i18n="Gerenciamento de usuários"></h3>
       <form id="console-create-user" class="row">
@@ -484,6 +484,17 @@
     };
     let latestUpdateState = null;
     let updateRefreshTimer = null;
+    let updateCheckInProgress = false;
+    const renderUpdateCheckButton = (busy, disabled) => {
+      const button = card.querySelector("#console-update-check");
+      if (!button) return;
+      button.classList.toggle("is-busy", busy);
+      button.disabled = Boolean(disabled);
+      button.setAttribute("aria-busy", String(Boolean(busy)));
+      button.setAttribute("aria-label", uiText(busy ? "Verificando atualizações" : "Verificar atualizações"));
+      button.innerHTML = `<span class="console-update-check-idle" data-console-i18n="Verificar atualizações"></span><span class="console-update-check-progress" role="status"><span data-console-i18n="Verificando atualizações"></span><span class="console-update-check-spinner" aria-hidden="true"></span></span>`;
+      applyAuthTranslations(button);
+    };
     const render = async () => {
       const [users, sessions, audit, authSettings, webBind, bindAddresses, updateState] = await Promise.all([
         apiCall("/api/admin/users"), apiCall("/api/admin/sessions"),
@@ -514,7 +525,11 @@
       }[updateState.state] || updateState.message || "";
       latestUpdateState = updateState;
       card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
-      card.querySelector("#console-update-check").disabled = updatePending;
+      // A request is processed by the host agent asynchronously. Keep the
+      // progress indication visible through its pending state, not only while
+      // the short API request that creates it is in flight.
+      if (updateCheckInProgress && !updatePending) updateCheckInProgress = false;
+      renderUpdateCheckButton(updateCheckInProgress, updatePending || updateCheckInProgress);
       card.querySelector("#console-update-apply").disabled = updatePending || !updateAvailable;
       clearTimeout(updateRefreshTimer);
       if (updatePending || ["BACKING_UP", "DEPLOYING", "VERIFYING", "ROLLING_BACK"].includes(updateState.state)) {
@@ -563,7 +578,17 @@
       await render();
     });
     card.querySelector("#console-update-check").addEventListener("click", async () => {
-      await apiCall("/api/admin/updates/check", {method:"POST"}); await render();
+      if (updateCheckInProgress) return;
+      updateCheckInProgress = true;
+      renderUpdateCheckButton(true, true);
+      try {
+        await apiCall("/api/admin/updates/check", {method:"POST"});
+        await render();
+      } catch (error) {
+        updateCheckInProgress = false;
+        renderUpdateCheckButton(false, Boolean(latestUpdateState?.pending));
+        throw error;
+      }
     });
     card.querySelector("#console-update-apply").addEventListener("click", async () => {
       if (!latestUpdateState?.available_revision || !window.confirm(uiText("A atualização criará um backup, reiniciará a plataforma e encerrará sua sessão atual. Será necessário entrar novamente. Continuar?"))) return;
