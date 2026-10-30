@@ -490,6 +490,15 @@
     updateModal.innerHTML = `<div class="modal-panel console-update-workflow-panel"><h2 id="console-update-workflow-title" data-console-i18n="Atualização da plataforma em andamento"></h2><div id="console-update-workflow-content"></div></div>`;
     document.body.append(updateModal);
     applyAuthTranslations(updateModal);
+    const updateCommitsModal = document.createElement("section");
+    updateCommitsModal.id = "console-update-commits-modal";
+    updateCommitsModal.className = "modal hidden";
+    updateCommitsModal.setAttribute("role", "dialog");
+    updateCommitsModal.setAttribute("aria-modal", "true");
+    updateCommitsModal.setAttribute("aria-labelledby", "console-update-commits-title");
+    updateCommitsModal.innerHTML = `<div class="modal-panel console-update-commits-panel"><div class="modal-header"><h2 id="console-update-commits-title" data-console-i18n="Commits desta atualização"></h2><button type="button" class="secondary" data-close-update-commits data-console-i18n="Fechar"></button></div><p class="hint" id="console-update-commits-range"></p><ol id="console-update-commits-list" class="console-update-commits-list"></ol><p class="hint hidden" id="console-update-commits-truncated"></p></div>`;
+    document.body.append(updateCommitsModal);
+    applyAuthTranslations(updateCommitsModal);
 
     const auditQuery = () => {
       const form = card.querySelector("#console-audit-filter");
@@ -507,6 +516,21 @@
     let updateWorkflowSelective = false;
     let updateWorkflowPollTimer = null;
     const updateWorkflowContent = updateModal.querySelector("#console-update-workflow-content");
+    const showUpdateCommits = () => {
+      const impact = latestUpdateState?.impact || {};
+      const commits = Array.isArray(impact.commits) ? impact.commits : [];
+      const count = Number.isInteger(Number(impact.commit_count)) ? Number(impact.commit_count) : commits.length;
+      updateCommitsModal.querySelector("#console-update-commits-range").textContent = `${uiText("Revisão instalada")}: ${latestUpdateState?.current_revision || "—"} → ${uiText("Revisão disponível")}: ${latestUpdateState?.available_revision || "—"}`;
+      updateCommitsModal.querySelector("#console-update-commits-list").innerHTML = commits.length
+        ? commits.map(commit => `<li><code>${escapeHtml(String(commit.revision || "").slice(0, 12))}</code><span>${escapeHtml(commit.subject || "—")}</span></li>`).join("")
+        : `<li class="hint">${escapeHtml(uiText("Nenhum commit adicional foi informado para esta atualização."))}</li>`;
+      const truncated = updateCommitsModal.querySelector("#console-update-commits-truncated");
+      truncated.classList.toggle("hidden", !impact.commits_truncated);
+      truncated.textContent = impact.commits_truncated
+        ? uiText("Exibindo os primeiros {{shown}} de {{total}} commits.", {shown: commits.length, total: count}) : "";
+      if (window.openModal) window.openModal("#console-update-commits-modal"); else updateCommitsModal.classList.remove("hidden");
+    };
+    updateCommitsModal.querySelector("[data-close-update-commits]").addEventListener("click", () => window.closeModal?.("#console-update-commits-modal"));
     const updateWorkflowSteps = state => {
       const phases = [
         ["VALIDATING", "Validar revisão e fila"], ["BACKING_UP", "Criar backup do PostgreSQL"],
@@ -694,7 +718,13 @@
       const impactPreview = updateAvailable ? updateImpactMarkup(updateState.impact) : "";
       const failedUpdate = ["FAILED", "ROLLED_BACK", "REJECTED"].includes(updateState.state);
       const schemaRevision = Number.isInteger(Number(updateState.database_schema_revision)) ? `v${Number(updateState.database_schema_revision)}` : "—";
-      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p><strong>${uiText("Schema do banco")}:</strong> <code>${escapeHtml(schemaRevision)}</code></p><p class="${failedUpdate ? "console-update-status-error" : "hint"}"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
+      const commitCount = Number.isInteger(Number(updateState.impact?.commit_count)) ? Number(updateState.impact.commit_count) : 0;
+      const availableRevision = escapeHtml(updateState.available_revision || "—");
+      const availableRevisionMarkup = updateAvailable && commitCount > 0
+        ? `<button type="button" class="console-update-revision" id="console-update-commits-button" title="${escapeHtml(uiText("Ver commits desta atualização"))}"><code>${availableRevision}</code><span>(${commitCount})</span></button>`
+        : `<code>${availableRevision}</code>`;
+      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> ${availableRevisionMarkup}</p><p><strong>${uiText("Schema do banco")}:</strong> <code>${escapeHtml(schemaRevision)}</code></p><p class="${failedUpdate ? "console-update-status-error" : "hint"}"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
+      card.querySelector("#console-update-commits-button")?.addEventListener("click", showUpdateCommits);
       let failureBanner = document.querySelector("#console-update-failure-banner");
       if (failedUpdate) {
         if (!failureBanner) { failureBanner = document.createElement("div"); failureBanner.id = "console-update-failure-banner"; failureBanner.className = "console-update-failure-banner"; document.querySelector(".topbar")?.after(failureBanner); }

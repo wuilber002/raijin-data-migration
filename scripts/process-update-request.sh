@@ -55,6 +55,19 @@ except Exception:
 # Classification is a security decision, so it always examines the complete
 # diff. Only the administrative evidence sent to the web console is capped.
 paths = all_paths[:100]
+try:
+    commit_rows = subprocess.check_output(
+        ["git", "-C", root, "log", "--format=%H%x1f%s", current + ".." + available],
+        text=True, stderr=subprocess.DEVNULL,
+    ).splitlines()
+except Exception:
+    commit_rows = []
+commit_count = len(commit_rows)
+commits = []
+for row in commit_rows[:100]:
+    revision, separator, subject = row.partition("\x1f")
+    if revision and separator:
+        commits.append({"revision": revision, "subject": subject})
 web_ui = lambda path: path.startswith(("app/static/", "images/"))
 controller = lambda path: path == "app/controller_worker.py"
 restore = lambda path: path == "app/restore_execution.py"
@@ -201,6 +214,9 @@ print(json.dumps({
         else "not_web_ui_only"
     ),
     "changed_files": paths,
+    "commits": commits,
+    "commit_count": commit_count,
+    "commits_truncated": commit_count > len(commits),
     "required_database_schema_revision": required_database_revision,
 }, separators=(",", ":")))
 PY
