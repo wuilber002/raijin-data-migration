@@ -247,12 +247,15 @@ def test_transfer_execution_isolated_from_generic_worker_loop():
 
 def test_update_agent_requires_expand_only_database_manifest():
     agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert "required_database_revision" in agent
     assert 'mode == "EXPAND_ONLY"' in agent
     assert "apply_database_migration" in agent
     assert 'if ! build_release_image "$available"; then' in agent
     assert 'if ! apply_database_migration "$available"; then' in agent
     assert "PYTHONPATH=/app python3 scripts/migrate-production.py" in agent
+    assert '"database_schema_revision"' in agent
+    assert 'Schema do banco' in script
 
 
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():

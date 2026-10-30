@@ -201,10 +201,12 @@ PY
 
 write_result() {
   local state="$1" message="$2" current="${3:-}" available="${4:-}" previous="${5:-}"
-  local progress="${6:-0}"
+  local progress="${6:-0}" database_revision
+  database_revision="$(podman exec s3-oci-postgres psql -U migration -d migration -Atc 'SELECT coalesce(max(version), 0) FROM raijin_schema_revisions' 2>/dev/null || true)"
+  [[ "$database_revision" =~ ^[0-9]+$ ]] || database_revision=""
   local impact
   impact="$(update_impact "$current" "$available")" || impact='{}'
-  python3 - "$state" "$message" "$current" "$available" "$previous" "$progress" "$impact" >"$result.tmp" <<'PY'
+  python3 - "$state" "$message" "$current" "$available" "$previous" "$progress" "$impact" "$database_revision" >"$result.tmp" <<'PY'
 import datetime
 import json
 import sys
@@ -219,6 +221,7 @@ print(json.dumps({
     "previous_revision": sys.argv[5] or None,
     "progress": max(0, min(100, int(sys.argv[6] or 0))),
     "impact": impact,
+    "database_schema_revision": int(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8].isdigit() else None,
     "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }, separators=(",", ":")))
 PY

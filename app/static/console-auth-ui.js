@@ -685,7 +685,8 @@
       latestUpdateState = updateState;
       const impactPreview = updateAvailable ? updateImpactMarkup(updateState.impact) : "";
       const failedUpdate = ["FAILED", "ROLLED_BACK", "REJECTED"].includes(updateState.state);
-      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="${failedUpdate ? "console-update-status-error" : "hint"}"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
+      const schemaRevision = Number.isInteger(Number(updateState.database_schema_revision)) ? `v${Number(updateState.database_schema_revision)}` : "—";
+      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p><strong>${uiText("Schema do banco")}:</strong> <code>${escapeHtml(schemaRevision)}</code></p><p class="${failedUpdate ? "console-update-status-error" : "hint"}"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
       let failureBanner = document.querySelector("#console-update-failure-banner");
       if (failedUpdate) {
         if (!failureBanner) { failureBanner = document.createElement("div"); failureBanner.id = "console-update-failure-banner"; failureBanner.className = "console-update-failure-banner"; document.querySelector(".topbar")?.after(failureBanner); }
