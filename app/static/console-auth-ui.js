@@ -580,8 +580,8 @@
       button.classList.toggle("is-busy", busy);
       button.disabled = Boolean(disabled);
       button.setAttribute("aria-busy", String(Boolean(busy)));
-      button.setAttribute("aria-label", uiText(busy ? "Verificando atualizações" : "Verificar atualizações"));
-      button.innerHTML = `<span class="console-update-check-idle" data-console-i18n="Verificar atualizações"></span><span class="console-update-check-progress" role="status"><span data-console-i18n="Verificando atualizações"></span><span class="console-update-check-spinner" aria-hidden="true"></span></span>`;
+      button.setAttribute("aria-label", uiText(busy ? "Verificando" : "Verificar atualizações"));
+      button.innerHTML = `<span class="console-update-check-idle" data-console-i18n="Verificar atualizações"></span><span class="console-update-check-progress" role="status"><span data-console-i18n="Verificando"></span><span class="console-update-check-spinner" aria-hidden="true"></span></span>`;
       applyAuthTranslations(button);
     };
     const render = async () => {

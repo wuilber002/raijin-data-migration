@@ -705,6 +705,7 @@
   "Consulta uma revisão aprovada no GitHub. A instalação exige fila completamente drenada, backup e validação local de saúde.": "Checks an approved revision on GitHub. Installation requires a fully drained queue, backup, and local health validation.",
   "Verificar atualizações": "Check for updates",
   "Verificando atualizações": "Checking updates",
+  "Verificando": "Checking",
   "Atualização da plataforma em andamento": "Platform update in progress",
   "Confirme a instalação da atualização": "Confirm update installation",
   "Validar revisão e fila": "Validate revision and queue",
