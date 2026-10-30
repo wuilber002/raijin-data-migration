@@ -394,6 +394,29 @@ def test_real_source_freezes_generic_private_endpoint_profile_before_execution()
     assert "changed.example.invalid" not in frozen
     assert connection_endpoint_configuration(connection)["s3_endpoint_url"] == "https://changed.example.invalid"
     assert '"s3_addressing_style": "virtual"' in frozen
+    import app.main as module
+    assert module.source_s3_transfer_endpoint_mode(source) == "PRIVATE"
+    source.aws_endpoint_snapshot_json = "{}"
+    connection.s3_endpoint_url = None
+    assert module.source_s3_transfer_endpoint_mode(source) == "PUBLIC"
+
+
+def test_source_list_exposes_frozen_s3_transfer_endpoint_mode():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        connection = AwsConnection(
+            label="private-transfer", secret_ocid="ocid1.vaultsecret.oc1..private",
+            aws_account_id="123456789012", default_region="us-east-1", control_bucket="control",
+            s3_endpoint_url="https://bucket.vpce-example.s3.us-east-1.vpce.amazonaws.com",
+        )
+        source = Source(name="private-transfer-source", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", aws_connection=connection)
+        freeze_source_endpoint_configuration(source, connection)
+        session.add(source)
+        session.commit()
+        assert list_sources(session=session)[0]["s3_transfer_endpoint_mode"] == "PRIVATE"
 
 
 def test_transfer_queue_keeps_virtual_availability_separate_from_lease_clock():

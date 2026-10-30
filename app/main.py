@@ -3690,6 +3690,21 @@ def freeze_source_endpoint_configuration(source: Source, connection: AwsConnecti
     source.aws_endpoint_snapshot_json = json.dumps(connection_endpoint_configuration(connection), sort_keys=True)
 
 
+def source_s3_transfer_endpoint_mode(source: Source) -> str:
+    """Classify the S3 data-plane route effective for one source.
+
+    The snapshot is authoritative whenever it includes the field. Older
+    sources without a snapshot retain the connection value used by the worker.
+    """
+    try:
+        snapshot = json.loads(source.aws_endpoint_snapshot_json or "{}")
+    except (TypeError, ValueError):
+        snapshot = {}
+    endpoint = (snapshot.get("s3_endpoint_url") if "s3_endpoint_url" in snapshot
+                else (source.aws_connection.s3_endpoint_url if source.aws_connection else None))
+    return "PRIVATE" if isinstance(endpoint, str) and endpoint.strip() else "PUBLIC"
+
+
 def aws_client_options(connection: AwsConnection, service: str, config):
     """Return neutral boto3 kwargs for public or explicitly configured endpoints."""
     endpoint = {
@@ -9717,6 +9732,7 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
              "destination_route_locked": source_route_is_locked(session, s.id),
              "aws_bucket_region": s.aws_bucket_region,
              "aws_connection_id": s.aws_connection_id,
+             "s3_transfer_endpoint_mode": source_s3_transfer_endpoint_mode(s),
              "business_priority": int(s.business_priority or 999),
              "aws_connection_label": (s.aws_connection.label if s.aws_connection else
                                       ("Simulated backend" if runtime_context.is_simulation else "Unassigned AWS connection")),
