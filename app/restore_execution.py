@@ -28,6 +28,8 @@ from app.runtime_context import mode_switch_requested
 
 
 ROLE = "raikou-sei"
+# Controlled Phase 2 rollout probe: restore-only replacement validation.
+ROLLOUT_PROBE = "phase2-restore-1"
 
 
 def run_once(role: str = ROLE) -> None:
