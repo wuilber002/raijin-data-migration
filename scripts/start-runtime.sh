@@ -108,6 +108,12 @@ fi
 
 case "$mode" in
   REAL)
+    podman run --rm --network "$network" \
+      -e RAIJIN_OPERATION_MODE=REAL \
+      -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
+      -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
+      -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
+      "$image" python3 scripts/migrate-production.py
     if [[ "$runtime_component" == full || "$runtime_component" == web ]]; then
       podman run -d --name s3-oci-app --replace --restart unless-stopped \
       --network "$network" -p "$RAIJIN_WEB_BIND_PUBLISH" \

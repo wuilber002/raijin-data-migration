@@ -145,6 +145,10 @@ flowchart LR
    agente root, declarando componentes e requisitos de schema.
 6. Implementar health checks específicos por componente e rollback por
    componente, não apenas pelo serviço monolítico.
+7. Banco produtivo usa revisões explícitas e append-only: a versão 1 é o
+   baseline atual; uma revisão futura só pode expandir o schema. Remoções e
+   renomeações exigem uma release posterior após a aplicação N/N+1 não usar o
+   campo antigo.
 
 ### Política de rollout proposta
 

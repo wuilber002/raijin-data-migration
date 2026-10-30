@@ -53,6 +53,7 @@ from app.backend_contracts import ExecutionContext, ListObjectsRequest
 from app.closure_report import build_artifacts, canonical_json, safe_filename, sha256
 from app.duration_format import format_duration
 from app.runtime_context import RAIJIN_BUILD_REVISION, RAIJIN_SERVICE_VERSION, SIMULATOR_SERVICE_VERSION, load_runtime_context
+from app.production_migrations import migrate as migrate_production_schema
 from app.simulator_admin import SimulatorAdminClient, SimulatorAdminError
 from app.simulator_ports import SimulatedSourcePort, SimulatorTransportError
 from app.web_auth import ConsoleRole, PasswordHasher, generate_csrf_token, generate_session_token, hash_opaque_token, load_web_auth_settings, normalize_username, read_password_file, validate_password
@@ -2291,7 +2292,12 @@ def create_schema() -> None:
     # backend before touching its isolated schema. Operations may still be
     # disabled while the following simulator phases are being implemented.
     cloud_backend.readiness(require_operations=False)
-    Base.metadata.create_all(engine)
+    # Production schema changes are versioned and serialized by the explicit
+    # migrator. The startup call is intentionally idempotent for development
+    # and direct execution; managed runtime invokes the same migrator before
+    # starting this API container.
+    migrate_production_schema(engine, Base.metadata)
+    return
     # ``create_all`` does not alter the singleton on an upgraded deployment.
     # Add this auth-policy column before bootstrap reads the mapped row.
     existing_auth_columns = {
