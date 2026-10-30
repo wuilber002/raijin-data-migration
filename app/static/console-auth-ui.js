@@ -704,7 +704,6 @@
       // A request is processed by the host agent asynchronously. Keep the
       // progress indication visible through its pending state, not only while
       // the short API request that creates it is in flight.
-      if (updateCheckInProgress && !updatePending) updateCheckInProgress = false;
       renderUpdateCheckButton(updateCheckInProgress, updatePending || updateCheckInProgress);
       card.querySelector("#console-update-apply").disabled = updatePending || !updateAvailable;
       clearTimeout(updateRefreshTimer);
@@ -758,8 +757,15 @@
       updateCheckInProgress = true;
       renderUpdateCheckButton(true, true);
       try {
+        const priorUpdatedAt = latestUpdateState?.updated_at || "";
         await apiCall("/api/admin/updates/check", {method:"POST"});
-        await render();
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          await render();
+          if ((latestUpdateState?.updated_at || "") !== priorUpdatedAt && !latestUpdateState?.pending) break;
+          await new Promise(resolve => window.setTimeout(resolve, 500));
+        }
+        updateCheckInProgress = false;
+        renderUpdateCheckButton(false, Boolean(latestUpdateState?.pending));
       } catch (error) {
         updateCheckInProgress = false;
         renderUpdateCheckButton(false, Boolean(latestUpdateState?.pending));
