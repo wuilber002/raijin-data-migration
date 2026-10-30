@@ -287,6 +287,42 @@ build_release_image() {
     -t "$image" "$install_root"
 }
 
+required_database_revision() {
+  local revision="$1"
+  git -C "$install_root" show "$revision:release-manifest.json" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin).get("database_migration", {})
+    required = value.get("required_revision")
+    mode = value.get("mode")
+    if isinstance(required, int) and required >= 1 and mode == "EXPAND_ONLY":
+        print(required)
+except Exception:
+    pass
+'
+}
+
+apply_database_migration() {
+  local revision="$1" required current
+  required="$(required_database_revision "$revision")"
+  [[ "$required" =~ ^[0-9]+$ ]] || {
+    write_result FAILED "Approved release has no valid expand-only database migration declaration." "$(revision HEAD)" "$revision"
+    return 1
+  }
+  current="$(podman exec s3-oci-postgres psql -U migration -d migration -Atc 'SELECT coalesce(max(version), 0) FROM raijin_schema_revisions' 2>/dev/null || true)"
+  if [[ "$current" =~ ^[0-9]+$ && "$current" -gt "$required" ]]; then
+    write_result FAILED "Database schema is newer than the approved release requires." "$(revision HEAD)" "$revision"
+    return 1
+  fi
+  write_result DEPLOYING "Applying approved expand-only database migrations." "$(revision HEAD)" "$revision" "" 60
+  podman run --rm --network s3-oci-migration \
+    -e RAIJIN_OPERATION_MODE=REAL \
+    -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
+    -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
+    -v /etc/s3-oci-migration/secrets/postgres_password:/run/secrets/postgres_password:ro,z \
+    "$(release_image_for_revision "$revision")" python3 scripts/migrate-production.py
+}
+
 apply_web_only_update() {
   local current="$1" available="$2" previous_image candidate_image
   previous_image="$(podman inspect --format '{{.ImageName}}' s3-oci-app 2>/dev/null || true)"
@@ -426,19 +462,26 @@ apply_update() {
     return 1
   fi
   previous="$current"
-  write_result DEPLOYING "Installing the approved source revision." "$current" "$available" "$previous" 65
+  write_result DEPLOYING "Building the approved source revision before the controlled restart." "$current" "$available" "$previous" 55
+  if ! git -C "$install_root" checkout --detach --quiet "$available"; then
+    write_result FAILED "Could not checkout the approved revision." "$current" "$available" "$previous"
+    return 1
+  fi
+  if ! build_release_image "$available"; then
+    git -C "$install_root" checkout --detach --quiet "$previous" || true
+    write_result FAILED "Could not build the approved revision." "$current" "$available" "$previous"
+    return 1
+  fi
+  if ! apply_database_migration "$available"; then
+    git -C "$install_root" checkout --detach --quiet "$previous" || true
+    return 1
+  fi
   # Console sessions are revoked on every service restart by design. Publish a
   # terminal pre-restart state briefly while the old web process can still
   # answer, so the operator sees why the next page is the login screen.
   write_result RESTARTING "The platform will restart now; the current console session will be closed." "$current" "$available" "$previous" 80
   sleep 2
   systemctl stop "$service"
-  if ! git -C "$install_root" checkout --detach --quiet "$available"; then
-    git -C "$install_root" checkout --detach --quiet "$previous" || true
-    systemctl start "$service" || true
-    write_result FAILED "Could not checkout the approved revision." "$previous" "$available" "$previous"
-    return 1
-  fi
   write_result VERIFYING "Restarting the platform and validating the local health check." "$available" "$available" "$previous" 90
   if systemctl start "$service"; then
     write_result SUCCEEDED "Update completed and the new revision passed the local health check." "$available" "$available" "$previous" 100
