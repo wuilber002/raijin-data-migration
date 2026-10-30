@@ -334,6 +334,8 @@ def test_update_revisions_use_aligned_monospace_hashes():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert ".console-update-revision-line{display:grid;grid-template-columns:8.6rem minmax(0,1fr)" in page
     assert "justify-self:start;width:fit-content;padding:.05rem .25rem" in page
+    assert ".console-update-revision{display:inline-flex" in page
+    assert "padding:0!important" in page
     assert "font-family:ui-monospace" in page
     assert "font-variant-ligatures:none" in page
 
