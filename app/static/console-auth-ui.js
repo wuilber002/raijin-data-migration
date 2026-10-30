@@ -729,7 +729,7 @@
       const availableRevisionMarkup = updateAvailable && commitCount > 0
         ? `<button type="button" class="console-update-revision" id="console-update-commits-button" title="${escapeHtml(uiText("Ver commits desta atualização"))}"><code>${availableRevision}</code><span>(${commitCount})</span></button>`
         : `<code>${availableRevision}</code>`;
-      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> ${availableRevisionMarkup}</p><p><strong>${uiText("Schema do banco")}:</strong> <code>${escapeHtml(schemaRevision)}</code></p><p class="${failedUpdate ? "console-update-status-error" : "hint"}"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
+      card.querySelector("#console-update-status").innerHTML = `<p class="console-update-revision-line"><strong>${uiText("Revisão instalada")}:</strong><code>${escapeHtml(updateState.current_revision || "—")}</code></p><p class="console-update-revision-line"><strong>${uiText("Revisão disponível")}:</strong>${availableRevisionMarkup}</p><p><strong>${uiText("Schema do banco")}:</strong> <code>${escapeHtml(schemaRevision)}</code></p><p class="${failedUpdate ? "console-update-status-error" : "hint"}"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
       card.querySelector("#console-update-commits-button")?.addEventListener("click", showUpdateCommits);
       let failureBanner = document.querySelector("#console-update-failure-banner");
       if (failedUpdate) {

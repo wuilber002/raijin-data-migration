@@ -303,6 +303,7 @@ def test_update_check_exposes_commit_subjects_and_available_revision_opens_them(
     assert "showUpdateCommits" in script
     assert "console-update-commits-button" in script
     assert '"#console-update-commits-range").innerHTML' in script
+    assert 'class="console-update-revision-line"' in script
 
 
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():
@@ -320,6 +321,13 @@ def test_active_update_step_uses_spinner_instead_of_pulsing_dot():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert ".console-update-workflow-steps li.active .console-update-workflow-step-mark::after" in page
     assert "animation:console-update-check-spin .75s linear infinite" in page
+
+
+def test_update_revisions_use_aligned_monospace_hashes():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert ".console-update-revision-line{display:grid;grid-template-columns:8.6rem minmax(0,1fr)" in page
+    assert "font-family:ui-monospace" in page
+    assert "font-variant-ligatures:none" in page
 
 
 def test_dashboard_versions_the_injected_console_auth_asset_to_avoid_stale_ui():
