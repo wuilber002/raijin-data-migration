@@ -12,6 +12,9 @@ from app.runtime_context import mode_switch_requested
 
 
 ROLE = "raikou-kai"
+# Controlled Phase 2 rollout probe. This inert marker proves that the audit
+# worker can be replaced independently of the other runtime components.
+ROLLOUT_PROBE = "phase2-audit-1"
 
 
 def run_once(role: str = ROLE) -> None:
