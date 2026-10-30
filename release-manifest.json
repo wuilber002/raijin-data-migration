@@ -41,7 +41,7 @@
       "enabled": true,
       "contract_version": 1,
       "allowed_paths": [
-        "app/discovery_worker.py"
+        "app/discovery_execution.py"
       ],
       "validation_path_prefixes": [
         "tests/"
