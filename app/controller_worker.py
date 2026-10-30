@@ -19,6 +19,8 @@ from app.real_worker import request_worker_shutdown, run_once, worker_loop_sleep
 
 
 ROLE = "raikou-shin"
+# Controlled Phase 2 rollout probe: controller-only replacement validation.
+ROLLOUT_PROBE = "phase2-controller-1"
 HEARTBEAT_FILE = Path(os.getenv("RAIJIN_COMPONENT_HEARTBEAT_FILE", "/run/platform-status/raikou-shin.json"))
 
 
