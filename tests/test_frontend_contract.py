@@ -151,6 +151,16 @@ def test_console_update_uses_a_blocking_raijin_workflow_modal_not_browser_confir
     assert "console-update-workflow-steps" in page
 
 
+def test_console_displays_host_authored_update_impact_before_installation():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    update_agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
+    assert "updateImpactMarkup" in script
+    assert "latestUpdateState?.impact" in script
+    assert "updateState.impact" in script
+    assert "WEB_UI_ONLY" in update_agent
+    assert '"installation_strategy": "FULL_CONTROLLED_RESTART"' in update_agent
+
+
 def test_dashboard_versions_the_injected_console_auth_asset_to_avoid_stale_ui():
     main = (ROOT / "app/main.py").read_text(encoding="utf-8")
     assert 'console-auth-ui.js?v={RAIJIN_BUILD_REVISION}' in main

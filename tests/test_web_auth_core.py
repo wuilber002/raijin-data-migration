@@ -122,7 +122,7 @@ def test_console_update_requests_are_single_flight_and_status_is_sanitized(tmp_p
     result.parent.mkdir()
     result.write_text(
         '{"state":"AVAILABLE","message":"Ready","current_revision":"' + "b" * 40 +
-        '","available_revision":"' + revision + '","previous_revision":null,"progress":65,"updated_at":"now"}',
+        '","available_revision":"' + revision + '","previous_revision":null,"progress":65,"impact":{"classification":"WEB_UI_ONLY","components":["WEB_UI"],"transfer_impact":"NONE","changed_files":["app/static/index.html"]},"updated_at":"now"}',
         encoding="utf-8",
     )
     monkeypatch.setenv("RAIJIN_UPDATE_REQUEST_FILE", str(request))
@@ -131,6 +131,8 @@ def test_console_update_requests_are_single_flight_and_status_is_sanitized(tmp_p
     assert state["state"] == "AVAILABLE"
     assert state["available_revision"] == revision
     assert state["progress"] == 65
+    assert state["impact"]["classification"] == "WEB_UI_ONLY"
+    assert state["impact"]["changed_files"] == ["app/static/index.html"]
     accepted = main.request_console_update("apply", revision=revision)
     assert accepted["accepted"] is True and accepted["pending"] is True
     with pytest.raises(main.HTTPException, match="already being processed"):

@@ -27,19 +27,78 @@ ref="${RAIJIN_UPDATE_REF:-refs/remotes/origin/main}"
 valid_remote='^[A-Za-z0-9_.-]+$'
 [[ "$update_enabled" == true && "$remote" =~ $valid_remote ]] || exit 0
 
+update_impact() {
+  local current="$1" available="$2"
+  [[ "$current" =~ ^[0-9a-f]{40}$ && "$available" =~ ^[0-9a-f]{40}$ ]] || {
+    printf '%s\n' '{}'; return 0;
+  }
+  python3 - "$install_root" "$current" "$available" <<'PY'
+import json
+import subprocess
+import sys
+
+root, current, available = sys.argv[1:]
+try:
+    paths = subprocess.check_output(
+        ["git", "-C", root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", current, available],
+        text=True, stderr=subprocess.DEVNULL,
+    ).splitlines()
+except Exception:
+    paths = []
+
+paths = paths[:100]
+web_ui = lambda path: path.startswith(("app/static/", "images/"))
+docs = lambda path: path.startswith("docs/") or path in {"README.md", "LICENSE"}
+host = lambda path: path.startswith(("scripts/", "docker/", "terraform/")) or path in {"Dockerfile", "docker-compose.yml", "requirements.txt", "requirements-dev.txt"}
+worker = lambda path: path in {"app/real_worker.py", "app/cloud_backends.py", "app/aws_restore_semantics.py"}
+database = lambda path: path.startswith("app/") and any(token in path for token in ("migration", "schema", "main.py"))
+
+components = []
+if any(web_ui(path) for path in paths): components.append("WEB_UI")
+if any(worker(path) for path in paths): components.append("WORKERS")
+if any(database(path) for path in paths): components.append("DATABASE_OR_API")
+if any(host(path) for path in paths): components.append("HOST_RUNTIME")
+if not components and paths: components.append("DOCUMENTATION")
+
+if paths and all(web_ui(path) for path in paths):
+    classification, transfer_impact = "WEB_UI_ONLY", "NONE"
+elif paths and all(docs(path) for path in paths):
+    classification, transfer_impact = "DOCUMENTATION_ONLY", "NONE"
+else:
+    classification, transfer_impact = "FULL_PLATFORM", "CONTROLLED_PAUSE"
+
+print(json.dumps({
+    "classification": classification,
+    "components": components,
+    "transfer_impact": transfer_impact,
+    # Phase 1 is intentionally conservative: every accepted source revision
+    # follows the existing backup + full-service restart protocol.
+    "installation_strategy": "FULL_CONTROLLED_RESTART",
+    "changed_files": paths,
+}, separators=(",", ":")))
+PY
+}
+
 write_result() {
   local state="$1" message="$2" current="${3:-}" available="${4:-}" previous="${5:-}"
   local progress="${6:-0}"
-  python3 - "$state" "$message" "$current" "$available" "$previous" "$progress" >"$result.tmp" <<'PY'
+  local impact
+  impact="$(update_impact "$current" "$available")" || impact='{}'
+  python3 - "$state" "$message" "$current" "$available" "$previous" "$progress" "$impact" >"$result.tmp" <<'PY'
 import datetime
 import json
 import sys
+try:
+    impact = json.loads(sys.argv[7])
+except (json.JSONDecodeError, IndexError):
+    impact = {}
 print(json.dumps({
     "state": sys.argv[1], "message": sys.argv[2],
     "current_revision": sys.argv[3] or None,
     "available_revision": sys.argv[4] or None,
     "previous_revision": sys.argv[5] or None,
     "progress": max(0, min(100, int(sys.argv[6] or 0))),
+    "impact": impact,
     "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }, separators=(",", ":")))
 PY

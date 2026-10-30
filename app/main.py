@@ -4733,6 +4733,7 @@ def console_update_control_state() -> dict:
         "available_revision": None,
         "previous_revision": None,
         "progress": 0,
+        "impact": {},
         "updated_at": None,
     }
     try:
@@ -4746,6 +4747,16 @@ def console_update_control_state() -> dict:
         state["progress"] = min(100, max(0, int(state.get("progress") or 0)))
     except (TypeError, ValueError):
         state["progress"] = 0
+    raw_impact = state.get("impact")
+    if not isinstance(raw_impact, dict):
+        raw_impact = {}
+    state["impact"] = {
+        "classification": str(raw_impact.get("classification") or "UNKNOWN")[:64],
+        "components": [str(value)[:64] for value in raw_impact.get("components", []) if isinstance(value, str)][:12],
+        "transfer_impact": str(raw_impact.get("transfer_impact") or "UNKNOWN")[:64],
+        "installation_strategy": str(raw_impact.get("installation_strategy") or "FULL_CONTROLLED_RESTART")[:64],
+        "changed_files": [str(value)[:512] for value in raw_impact.get("changed_files", []) if isinstance(value, str)][:100],
+    }
     state["pending"] = request_file.exists() or request_file.with_suffix(".processing").exists()
     return state
 

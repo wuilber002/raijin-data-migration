@@ -511,6 +511,27 @@
       const fallback = {VALIDATING:10, BACKING_UP:35, DEPLOYING:65, VERIFYING:90, SUCCEEDED:100, ROLLED_BACK:100, FAILED:100, REJECTED:0};
       return Math.max(0, Math.min(100, Number.isFinite(Number(state.progress)) ? Number(state.progress) : (fallback[state.state] || 0)));
     };
+    const updateImpactMarkup = (impact, includeFiles = true) => {
+      const value = impact || {};
+      const classification = {
+        WEB_UI_ONLY: uiText("Somente interface web"), DOCUMENTATION_ONLY: uiText("Somente documentação"),
+        FULL_PLATFORM: uiText("Plataforma completa"), UNKNOWN: uiText("Não classificado"),
+      }[value.classification] || uiText("Não classificado");
+      const componentLabels = {
+        WEB_UI: uiText("Interface web"), WORKERS: uiText("Workers de migração"),
+        DATABASE_OR_API: uiText("API e banco de dados"), HOST_RUNTIME: uiText("Runtime do host"), DOCUMENTATION: uiText("Documentação"),
+      };
+      const components = (value.components || []).map(component => componentLabels[component] || component).join(", ") || "—";
+      const transferImpact = value.transfer_impact === "NONE"
+        ? uiText("Nenhuma lógica de transferência foi alterada.")
+        : value.transfer_impact === "CONTROLLED_PAUSE"
+          ? uiText("A instalação controlada pausará brevemente os componentes e os workers serão reiniciados.")
+          : uiText("Impacto de transferência ainda não classificado.");
+      const phaseOne = uiText("Nesta Fase 1, toda atualização continua usando backup e reinício controlado da plataforma.");
+      const changedFiles = includeFiles && value.changed_files?.length
+        ? `<details class="console-update-impact-files"><summary>${escapeHtml(uiText("Arquivos alterados"))} (${value.changed_files.length})</summary><ul>${value.changed_files.map(path => `<li><code>${escapeHtml(path)}</code></li>`).join("")}</ul></details>` : "";
+      return `<section class="console-update-impact"><h3>${escapeHtml(uiText("Impacto da atualização"))}</h3><p><strong>${escapeHtml(uiText("Classificação"))}:</strong> ${escapeHtml(classification)}</p><p><strong>${escapeHtml(uiText("Componentes alterados"))}:</strong> ${escapeHtml(components)}</p><p><strong>${escapeHtml(uiText("Impacto nas transferências"))}:</strong> ${escapeHtml(transferImpact)}</p><p class="hint">${escapeHtml(phaseOne)}</p>${changedFiles}</section>`;
+    };
     const showUpdateWorkflow = state => {
       latestUpdateState = {...(latestUpdateState || {}), ...state};
       const progress = updateWorkflowProgress(state);
@@ -547,7 +568,7 @@
     };
     const openUpdateConfirmation = () => {
       updateWorkflowActive = true; updateWorkflowLocked = false;
-      updateWorkflowContent.innerHTML = `<p data-console-i18n="Uma atualização criará um backup, reiniciará a plataforma e encerrará sua sessão atual. Será necessário entrar novamente. Continuar?"></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(latestUpdateState?.available_revision || "—")}</code></p><div class="modal-actions"><button type="button" class="secondary" id="console-update-workflow-cancel" data-console-i18n="Cancelar"></button><button type="button" id="console-update-workflow-confirm" data-console-i18n="Instalar atualização"></button></div>`;
+      updateWorkflowContent.innerHTML = `<p data-console-i18n="Uma atualização criará um backup, reiniciará a plataforma e encerrará sua sessão atual. Será necessário entrar novamente. Continuar?"></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(latestUpdateState?.available_revision || "—")}</code></p>${updateImpactMarkup(latestUpdateState?.impact, false)}<div class="modal-actions"><button type="button" class="secondary" id="console-update-workflow-cancel" data-console-i18n="Cancelar"></button><button type="button" id="console-update-workflow-confirm" data-console-i18n="Instalar atualização"></button></div>`;
       updateModal.querySelector("h2").dataset.consoleI18n = "Confirme a instalação da atualização";
       applyAuthTranslations(updateModal);
       if (window.openModal) window.openModal("#console-update-workflow-modal"); else updateModal.classList.remove("hidden");
@@ -613,7 +634,7 @@
         ROLLED_BACK: uiText("A nova revisão falhou; a revisão anterior foi restaurada."),
       }[updateState.state] || updateState.message || "";
       latestUpdateState = updateState;
-      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
+      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>${updateImpactMarkup(updateState.impact)}`;
       // A request is processed by the host agent asynchronously. Keep the
       // progress indication visible through its pending state, not only while
       // the short API request that creates it is in flight.
