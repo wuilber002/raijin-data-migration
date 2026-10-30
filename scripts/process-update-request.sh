@@ -57,7 +57,7 @@ except Exception:
 paths = all_paths[:100]
 web_ui = lambda path: path.startswith(("app/static/", "images/"))
 controller = lambda path: path == "app/controller_worker.py"
-restore = lambda path: path == "app/restore_worker.py"
+restore = lambda path: path == "app/restore_execution.py"
 discovery = lambda path: path == "app/discovery_worker.py"
 audit = lambda path: path == "app/audit_worker.py"
 transfer = lambda path: path == "app/transfer_worker.py"
@@ -126,7 +126,7 @@ def authorized_worker_rollout(value, path):
         and value.get("allowed_paths") == [path]
         and value.get("validation_path_prefixes") == ["tests/"]
     )
-manifest_authorizes_restore = authorized_worker_rollout(restore_rollout, "app/restore_worker.py")
+manifest_authorizes_restore = authorized_worker_rollout(restore_rollout, "app/restore_execution.py")
 manifest_authorizes_discovery = authorized_worker_rollout(discovery_rollout, "app/discovery_worker.py")
 manifest_authorizes_audit = authorized_worker_rollout(audit_rollout, "app/audit_worker.py")
 manifest_authorizes_transfer = authorized_worker_rollout(transfer_rollout, "app/transfer_worker.py")
@@ -144,7 +144,7 @@ controller_only_candidate = (
 controller_rollout_enabled = selective_controller.lower() == "true"
 def isolated_candidate(predicate):
     return bool(runtime_paths) and all(predicate(path) for path in runtime_paths) and all(predicate(path) or validation(path) for path in all_paths)
-restore_only_candidate = isolated_candidate(restore)
+restore_only_candidate = isolated_candidate(lambda path: path == "app/restore_execution.py")
 discovery_only_candidate = isolated_candidate(discovery)
 audit_only_candidate = isolated_candidate(audit)
 transfer_only_candidate = isolated_candidate(transfer)

@@ -106,9 +106,12 @@ arquivo de entrada daquele consumer. Banco e lógica compartilhada continuam
 pendentes dos contratos e testes indicados abaixo.
 
 Os entrypoints e heartbeats desses quatro consumers são isolados por papel.
-Sua lógica de negócio continua no módulo compartilhado `app.real_worker.py`;
-uma modificação nele segue sendo classificada como atualização integral até a
-extração e os contratos específicos de cada papel estarem concluídos.
+O orquestrador de restore foi extraído para `app/restore_execution.py`; após a
+primeira instalação integral dessa extração, alterações limitadas a esse
+arquivo podem usar o rollout de restore. Os utilitários, protocolo durável e
+demais lógicas continuam em `app.real_worker.py`; uma modificação neles segue
+sendo classificada como atualização integral até as extrações equivalentes e
+os contratos específicos de cada papel estarem concluídos.
 
 ### Arquitetura-alvo
 

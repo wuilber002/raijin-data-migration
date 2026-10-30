@@ -205,6 +205,16 @@ def test_worker_components_have_isolated_entrypoint_and_heartbeats():
         assert f"app.{module}" in runtime
 
 
+def test_restore_execution_isolated_from_generic_worker_loop():
+    execution = (ROOT / "app/restore_execution.py").read_text(encoding="utf-8")
+    entrypoint = (ROOT / "app/restore_worker.py").read_text(encoding="utf-8")
+    update_agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
+    assert "def run_once(role: str = ROLE)" in execution
+    assert "claim_task(session, settings.task_lease_seconds, allowed_task_kinds)" in execution
+    assert "main(run_once)" in entrypoint
+    assert 'app/restore_execution.py' in update_agent
+
+
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert 'const awaitingAgent = updateWorkflowLocked && state.pending && state.state === "AVAILABLE"' in script

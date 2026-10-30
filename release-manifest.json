@@ -31,7 +31,7 @@
       "enabled": true,
       "contract_version": 1,
       "allowed_paths": [
-        "app/restore_worker.py"
+        "app/restore_execution.py"
       ],
       "validation_path_prefixes": [
         "tests/"

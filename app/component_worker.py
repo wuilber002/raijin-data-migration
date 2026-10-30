@@ -11,6 +11,7 @@ import json
 import os
 import signal
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,7 +38,7 @@ def write_heartbeat(*, state: str) -> None:
         print(f"{ROLE} heartbeat write failed: {type(error).__name__}", flush=True)
 
 
-def main() -> None:
+def main(execute_once: Callable[[str], None] = run_once) -> None:
     if ROLE not in SUPPORTED_ROLES:
         raise RuntimeError(f"Unsupported component worker role: {ROLE or 'unset'}")
     signal.signal(signal.SIGTERM, request_worker_shutdown)
@@ -46,7 +47,7 @@ def main() -> None:
     write_heartbeat(state="STARTING")
     while not worker_shutdown_requested():
         try:
-            run_once(ROLE)
+            execute_once(ROLE)
             failure_delay = 5
             write_heartbeat(state="READY")
         except Exception as error:
