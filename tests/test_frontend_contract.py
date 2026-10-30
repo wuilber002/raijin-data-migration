@@ -170,14 +170,17 @@ def test_console_displays_host_authored_update_impact_before_installation():
     assert 'else "CONTROLLER_ONLY_ROLLING" if controller_only_candidate' in update_agent
     assert "apply_web_only_update" in update_agent
     assert "apply_controller_only_update" in update_agent
+    assert "apply_isolated_worker_update" in update_agent
     assert "RAIJIN_RUNTIME_COMPONENT=web" in update_agent
     assert "RAIJIN_RUNTIME_COMPONENT=controller" in update_agent
+    assert "RAIJIN_RUNTIME_COMPONENT=\"$component\"" in update_agent
     assert "all_paths = subprocess.check_output" in update_agent
     assert "runtime_paths = [path for path in all_paths if not validation(path)]" in update_agent
     assert "all(web_ui(path) for path in runtime_paths)" in update_agent
     assert "all(web_ui(path) or validation(path) for path in all_paths)" in update_agent
     assert "Esta atualização trocará somente a interface web" in script
     assert "Esta atualização trocará somente o controller" in script
+    assert "Esta atualização trocará somente o worker de transferência" in script
 
 
 def test_controller_rollout_has_isolated_entrypoint_and_heartbeat_contract():
@@ -186,7 +189,7 @@ def test_controller_rollout_has_isolated_entrypoint_and_heartbeat_contract():
     assert 'ROLE = "raikou-shin"' in controller
     assert "write_heartbeat(state=\"READY\")" in controller
     assert 'RAIJIN_COMPONENT_HEARTBEAT_FILE=/run/platform-status/${worker_role}.json' in runtime
-    assert '[[ "$runtime_component" == controller ]]' in runtime
+    assert "controller) worker_roles=(raikou-shin)" in runtime
 
 
 def test_worker_components_have_isolated_entrypoint_and_heartbeats():
@@ -196,6 +199,10 @@ def test_worker_components_have_isolated_entrypoint_and_heartbeats():
     assert "write_heartbeat(state=\"READY\")" in worker
     assert "app.component_worker" in runtime
     assert 'RAIJIN_COMPONENT_HEARTBEAT_FILE=/run/platform-status/${worker_role}.json' in runtime
+    for module in ("restore_worker", "discovery_worker", "audit_worker", "transfer_worker"):
+        entrypoint = (ROOT / f"app/{module}.py").read_text(encoding="utf-8")
+        assert "from app.component_worker import main" in entrypoint
+        assert f"app.{module}" in runtime
 
 
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():

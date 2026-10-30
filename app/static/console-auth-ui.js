@@ -521,22 +521,44 @@
       const classification = {
         WEB_UI_ONLY: uiText("Somente interface web"), DOCUMENTATION_ONLY: uiText("Somente documentação"),
         CONTROLLER_ONLY: uiText("Somente controller"),
+        RESTORE_WORKER_ONLY: uiText("Somente worker de restore"),
+        DISCOVERY_WORKER_ONLY: uiText("Somente worker de discovery"),
+        AUDIT_WORKER_ONLY: uiText("Somente worker de auditoria"),
+        TRANSFER_WORKER_ONLY: uiText("Somente worker de transferência"),
         FULL_PLATFORM: uiText("Plataforma completa"), UNKNOWN: uiText("Não classificado"),
       }[value.classification] || uiText("Não classificado");
       const componentLabels = {
         WEB_UI: uiText("Interface web"), WORKERS: uiText("Workers de migração"),
         CONTROLLER: uiText("Controller de migração"),
+        RESTORE_WORKER: uiText("Worker de restore"), DISCOVERY_WORKER: uiText("Worker de discovery"),
+        AUDIT_WORKER: uiText("Worker de auditoria"), TRANSFER_WORKER: uiText("Worker de transferência"),
         DATABASE_OR_API: uiText("API e banco de dados"), HOST_RUNTIME: uiText("Runtime do host"), DOCUMENTATION: uiText("Documentação"),
       };
       const components = (value.components || []).map(component => componentLabels[component] || component).join(", ") || "—";
-      const transferImpact = value.classification === "CONTROLLER_ONLY"
+      const transferImpact = value.classification === "TRANSFER_WORKER_ONLY"
+        ? uiText("O worker de transferência será substituído após concluir o limite de trabalho durável; transferências retomam do checkpoint.")
+        : value.classification === "RESTORE_WORKER_ONLY"
+          ? uiText("Novos restores aguardam brevemente; transferências já despachadas continuam.")
+        : value.classification === "DISCOVERY_WORKER_ONLY"
+          ? uiText("Novas descobertas aguardam brevemente; transferências em curso continuam.")
+        : value.classification === "AUDIT_WORKER_ONLY"
+          ? uiText("Auditorias aguardam brevemente; restores e transferências em curso continuam.")
+        : value.classification === "CONTROLLER_ONLY"
         ? uiText("Transferências já despachadas continuam; novas decisões aguardam a retomada do controller.")
         : value.transfer_impact === "NONE"
         ? uiText("Nenhuma lógica de transferência foi alterada.")
         : value.transfer_impact === "CONTROLLED_PAUSE"
           ? uiText("A instalação controlada pausará brevemente os componentes e os workers serão reiniciados.")
           : uiText("Impacto de transferência ainda não classificado.");
-      const phaseOne = value.installation_strategy === "CONTROLLER_ONLY_ROLLING"
+      const phaseOne = value.installation_strategy === "TRANSFER_WORKER_ROLLING"
+        ? uiText("Esta atualização trocará somente o worker de transferência após seu checkpoint durável; os demais componentes continuarão ativos.")
+        : value.installation_strategy === "RESTORE_WORKER_ROLLING"
+          ? uiText("Esta atualização trocará somente o worker de restore após o limite de trabalho durável; os demais componentes continuarão ativos.")
+        : value.installation_strategy === "DISCOVERY_WORKER_ROLLING"
+          ? uiText("Esta atualização trocará somente o worker de discovery após o limite de trabalho durável; os demais componentes continuarão ativos.")
+        : value.installation_strategy === "AUDIT_WORKER_ROLLING"
+          ? uiText("Esta atualização trocará somente o worker de auditoria após o limite de trabalho durável; os demais componentes continuarão ativos.")
+        : value.installation_strategy === "CONTROLLER_ONLY_ROLLING"
         ? uiText("Esta atualização trocará somente o controller após o ciclo transacional atual; workers de restore e transferência continuarão ativos.")
         : value.installation_strategy === "WEB_ONLY_ROLLING"
         ? uiText("Esta atualização trocará somente a interface web; os workers e transferências em curso continuarão ativos.")

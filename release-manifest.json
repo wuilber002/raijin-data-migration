@@ -26,6 +26,46 @@
       "validation_path_prefixes": [
         "tests/"
       ]
+    },
+    "restore_worker": {
+      "enabled": true,
+      "contract_version": 1,
+      "allowed_paths": [
+        "app/restore_worker.py"
+      ],
+      "validation_path_prefixes": [
+        "tests/"
+      ]
+    },
+    "discovery_worker": {
+      "enabled": true,
+      "contract_version": 1,
+      "allowed_paths": [
+        "app/discovery_worker.py"
+      ],
+      "validation_path_prefixes": [
+        "tests/"
+      ]
+    },
+    "audit_worker": {
+      "enabled": true,
+      "contract_version": 1,
+      "allowed_paths": [
+        "app/audit_worker.py"
+      ],
+      "validation_path_prefixes": [
+        "tests/"
+      ]
+    },
+    "transfer_worker": {
+      "enabled": true,
+      "contract_version": 1,
+      "allowed_paths": [
+        "app/transfer_worker.py"
+      ],
+      "validation_path_prefixes": [
+        "tests/"
+      ]
     }
   }
 }

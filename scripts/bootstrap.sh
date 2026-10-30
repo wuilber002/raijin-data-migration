@@ -106,6 +106,10 @@ RAIJIN_UPDATE_REF=refs/remotes/origin/main
 # are exclusively static assets. All other updates retain the full protocol.
 RAIJIN_UPDATE_SELECTIVE_WEB_ONLY=true
 RAIJIN_UPDATE_SELECTIVE_CONTROLLER=true
+RAIJIN_UPDATE_SELECTIVE_RESTORE=true
+RAIJIN_UPDATE_SELECTIVE_DISCOVERY=true
+RAIJIN_UPDATE_SELECTIVE_AUDIT=true
+RAIJIN_UPDATE_SELECTIVE_TRANSFER=true
 EOF
   chmod 0600 "$update_config"
 fi
@@ -116,6 +120,9 @@ if ! grep -q '^RAIJIN_UPDATE_SELECTIVE_WEB_ONLY=' "$update_config"; then
 fi
 if ! grep -q '^RAIJIN_UPDATE_SELECTIVE_CONTROLLER=' "$update_config"; then
   printf '\n# Permit only manifest-authorized controller entrypoint rollouts.\nRAIJIN_UPDATE_SELECTIVE_CONTROLLER=true\n' >>"$update_config"
+fi
+if ! grep -q '^RAIJIN_UPDATE_SELECTIVE_RESTORE=' "$update_config"; then
+  printf '\n# Permit only manifest-authorized isolated worker-entrypoint rollouts.\nRAIJIN_UPDATE_SELECTIVE_RESTORE=true\nRAIJIN_UPDATE_SELECTIVE_DISCOVERY=true\nRAIJIN_UPDATE_SELECTIVE_AUDIT=true\nRAIJIN_UPDATE_SELECTIVE_TRANSFER=true\n' >>"$update_config"
 fi
 source "$install_root/scripts/web-auth.sh"
 source "$install_root/scripts/console-auth-lifecycle.sh"

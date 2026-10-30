@@ -25,6 +25,10 @@ remote="${RAIJIN_UPDATE_REMOTE:-origin}"
 ref="${RAIJIN_UPDATE_REF:-refs/remotes/origin/main}"
 selective_web_only="${RAIJIN_UPDATE_SELECTIVE_WEB_ONLY:-false}"
 selective_controller="${RAIJIN_UPDATE_SELECTIVE_CONTROLLER:-false}"
+selective_restore="${RAIJIN_UPDATE_SELECTIVE_RESTORE:-false}"
+selective_discovery="${RAIJIN_UPDATE_SELECTIVE_DISCOVERY:-false}"
+selective_audit="${RAIJIN_UPDATE_SELECTIVE_AUDIT:-false}"
+selective_transfer="${RAIJIN_UPDATE_SELECTIVE_TRANSFER:-false}"
 
 valid_remote='^[A-Za-z0-9_.-]+$'
 [[ "$update_enabled" == true && "$remote" =~ $valid_remote ]] || exit 0
@@ -34,12 +38,12 @@ update_impact() {
   [[ "$current" =~ ^[0-9a-f]{40}$ && "$available" =~ ^[0-9a-f]{40}$ ]] || {
     printf '%s\n' '{}'; return 0;
   }
-  python3 - "$install_root" "$current" "$available" "$selective_web_only" "$selective_controller" <<'PY'
+  python3 - "$install_root" "$current" "$available" "$selective_web_only" "$selective_controller" "$selective_restore" "$selective_discovery" "$selective_audit" "$selective_transfer" <<'PY'
 import json
 import subprocess
 import sys
 
-root, current, available, selective_web_only, selective_controller = sys.argv[1:]
+root, current, available, selective_web_only, selective_controller, selective_restore, selective_discovery, selective_audit, selective_transfer = sys.argv[1:]
 try:
     all_paths = subprocess.check_output(
         ["git", "-C", root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", current, available],
@@ -53,6 +57,10 @@ except Exception:
 paths = all_paths[:100]
 web_ui = lambda path: path.startswith(("app/static/", "images/"))
 controller = lambda path: path == "app/controller_worker.py"
+restore = lambda path: path == "app/restore_worker.py"
+discovery = lambda path: path == "app/discovery_worker.py"
+audit = lambda path: path == "app/audit_worker.py"
+transfer = lambda path: path == "app/transfer_worker.py"
 validation = lambda path: path.startswith("tests/")
 docs = lambda path: path.startswith("docs/") or path in {"README.md", "LICENSE"}
 host = lambda path: path.startswith(("scripts/", "docker/", "terraform/")) or path in {"Dockerfile", "docker-compose.yml", "requirements.txt", "requirements-dev.txt"}
@@ -66,6 +74,10 @@ runtime_paths = [path for path in all_paths if not validation(path)]
 components = []
 if any(web_ui(path) for path in runtime_paths): components.append("WEB_UI")
 if any(controller(path) for path in runtime_paths): components.append("CONTROLLER")
+if any(restore(path) for path in runtime_paths): components.append("RESTORE_WORKER")
+if any(discovery(path) for path in runtime_paths): components.append("DISCOVERY_WORKER")
+if any(audit(path) for path in runtime_paths): components.append("AUDIT_WORKER")
+if any(transfer(path) for path in runtime_paths): components.append("TRANSFER_WORKER")
 if any(worker(path) for path in runtime_paths): components.append("WORKERS")
 if any(database(path) for path in runtime_paths): components.append("DATABASE_OR_API")
 if any(host(path) for path in runtime_paths): components.append("HOST_RUNTIME")
@@ -82,6 +94,10 @@ except Exception:
 
 web_rollout = manifest.get("selective_rollout", {}).get("web_ui", {}) if isinstance(manifest, dict) else {}
 controller_rollout = manifest.get("selective_rollout", {}).get("controller", {}) if isinstance(manifest, dict) else {}
+restore_rollout = manifest.get("selective_rollout", {}).get("restore_worker", {}) if isinstance(manifest, dict) else {}
+discovery_rollout = manifest.get("selective_rollout", {}).get("discovery_worker", {}) if isinstance(manifest, dict) else {}
+audit_rollout = manifest.get("selective_rollout", {}).get("audit_worker", {}) if isinstance(manifest, dict) else {}
+transfer_rollout = manifest.get("selective_rollout", {}).get("transfer_worker", {}) if isinstance(manifest, dict) else {}
 manifest_authorizes_web = (
     isinstance(manifest, dict)
     and manifest.get("manifest_version") == 1
@@ -100,6 +116,20 @@ manifest_authorizes_controller = (
     and controller_rollout.get("allowed_paths") == ["app/controller_worker.py"]
     and controller_rollout.get("validation_path_prefixes") == ["tests/"]
 )
+def authorized_worker_rollout(value, path):
+    return (
+        isinstance(manifest, dict)
+        and manifest.get("manifest_version") == 1
+        and isinstance(value, dict)
+        and value.get("enabled") is True
+        and value.get("contract_version") == 1
+        and value.get("allowed_paths") == [path]
+        and value.get("validation_path_prefixes") == ["tests/"]
+    )
+manifest_authorizes_restore = authorized_worker_rollout(restore_rollout, "app/restore_worker.py")
+manifest_authorizes_discovery = authorized_worker_rollout(discovery_rollout, "app/discovery_worker.py")
+manifest_authorizes_audit = authorized_worker_rollout(audit_rollout, "app/audit_worker.py")
+manifest_authorizes_transfer = authorized_worker_rollout(transfer_rollout, "app/transfer_worker.py")
 web_only_candidate = (
     bool(runtime_paths)
     and all(web_ui(path) for path in runtime_paths)
@@ -112,11 +142,29 @@ controller_only_candidate = (
     and all(controller(path) or validation(path) for path in all_paths)
 )
 controller_rollout_enabled = selective_controller.lower() == "true"
+def isolated_candidate(predicate):
+    return bool(runtime_paths) and all(predicate(path) for path in runtime_paths) and all(predicate(path) or validation(path) for path in all_paths)
+restore_only_candidate = isolated_candidate(restore)
+discovery_only_candidate = isolated_candidate(discovery)
+audit_only_candidate = isolated_candidate(audit)
+transfer_only_candidate = isolated_candidate(transfer)
+restore_rollout_enabled = selective_restore.lower() == "true"
+discovery_rollout_enabled = selective_discovery.lower() == "true"
+audit_rollout_enabled = selective_audit.lower() == "true"
+transfer_rollout_enabled = selective_transfer.lower() == "true"
 
 if web_only_candidate:
     classification, transfer_impact = "WEB_UI_ONLY", "NONE"
 elif controller_only_candidate:
     classification, transfer_impact = "CONTROLLER_ONLY", "NONE"
+elif restore_only_candidate:
+    classification, transfer_impact = "RESTORE_WORKER_ONLY", "NONE"
+elif discovery_only_candidate:
+    classification, transfer_impact = "DISCOVERY_WORKER_ONLY", "NONE"
+elif audit_only_candidate:
+    classification, transfer_impact = "AUDIT_WORKER_ONLY", "NONE"
+elif transfer_only_candidate:
+    classification, transfer_impact = "TRANSFER_WORKER_ONLY", "CHECKPOINTED_RESTART"
 elif all_paths and all(docs(path) or validation(path) for path in all_paths):
     classification, transfer_impact = "DOCUMENTATION_ONLY", "NONE"
 else:
@@ -126,8 +174,8 @@ print(json.dumps({
     "classification": classification,
     "components": components,
     "transfer_impact": transfer_impact,
-    "installation_strategy": "WEB_ONLY_ROLLING" if web_only_candidate and manifest_authorizes_web and web_rollout_enabled else "CONTROLLER_ONLY_ROLLING" if controller_only_candidate and manifest_authorizes_controller and controller_rollout_enabled else "FULL_CONTROLLED_RESTART",
-    "rollout_eligible": bool((web_only_candidate and manifest_authorizes_web and web_rollout_enabled) or (controller_only_candidate and manifest_authorizes_controller and controller_rollout_enabled)),
+    "installation_strategy": "WEB_ONLY_ROLLING" if web_only_candidate and manifest_authorizes_web and web_rollout_enabled else "CONTROLLER_ONLY_ROLLING" if controller_only_candidate and manifest_authorizes_controller and controller_rollout_enabled else "RESTORE_WORKER_ROLLING" if restore_only_candidate and manifest_authorizes_restore and restore_rollout_enabled else "DISCOVERY_WORKER_ROLLING" if discovery_only_candidate and manifest_authorizes_discovery and discovery_rollout_enabled else "AUDIT_WORKER_ROLLING" if audit_only_candidate and manifest_authorizes_audit and audit_rollout_enabled else "TRANSFER_WORKER_ROLLING" if transfer_only_candidate and manifest_authorizes_transfer and transfer_rollout_enabled else "FULL_CONTROLLED_RESTART",
+    "rollout_eligible": bool((web_only_candidate and manifest_authorizes_web and web_rollout_enabled) or (controller_only_candidate and manifest_authorizes_controller and controller_rollout_enabled) or (restore_only_candidate and manifest_authorizes_restore and restore_rollout_enabled) or (discovery_only_candidate and manifest_authorizes_discovery and discovery_rollout_enabled) or (audit_only_candidate and manifest_authorizes_audit and audit_rollout_enabled) or (transfer_only_candidate and manifest_authorizes_transfer and transfer_rollout_enabled)),
     "rollout_eligibility_reason": (
         "manifest_authorized" if web_only_candidate and manifest_authorizes_web and web_rollout_enabled
         else "manifest_authorized" if controller_only_candidate and manifest_authorizes_controller and controller_rollout_enabled
@@ -135,6 +183,15 @@ print(json.dumps({
         else "host_policy_disabled" if controller_only_candidate and manifest_authorizes_controller
         else "manifest_not_authorized" if web_only_candidate
         else "manifest_not_authorized" if controller_only_candidate
+        else "manifest_authorized" if restore_only_candidate and manifest_authorizes_restore and restore_rollout_enabled
+        else "manifest_authorized" if discovery_only_candidate and manifest_authorizes_discovery and discovery_rollout_enabled
+        else "manifest_authorized" if audit_only_candidate and manifest_authorizes_audit and audit_rollout_enabled
+        else "manifest_authorized" if transfer_only_candidate and manifest_authorizes_transfer and transfer_rollout_enabled
+        else "host_policy_disabled" if restore_only_candidate and manifest_authorizes_restore
+        else "host_policy_disabled" if discovery_only_candidate and manifest_authorizes_discovery
+        else "host_policy_disabled" if audit_only_candidate and manifest_authorizes_audit
+        else "host_policy_disabled" if transfer_only_candidate and manifest_authorizes_transfer
+        else "manifest_not_authorized" if restore_only_candidate or discovery_only_candidate or audit_only_candidate or transfer_only_candidate
         else "not_web_ui_only"
     ),
     "changed_files": paths,
@@ -288,6 +345,35 @@ apply_controller_only_update() {
   return 1
 }
 
+apply_isolated_worker_update() {
+  local current="$1" available="$2" component="$3" container="$4" label="$5" previous_image candidate_image
+  previous_image="$(podman inspect --format '{{.ImageName}}' "$container" 2>/dev/null || true)"
+  [[ -n "$previous_image" ]] || {
+    write_result FAILED "Could not identify the running ${label} container image." "$current" "$available" "$current"
+    return 1
+  }
+  write_result DEPLOYING "Building the approved isolated ${label} revision." "$current" "$available" "$current" 55
+  if ! git -C "$install_root" checkout --detach --quiet "$available"; then
+    write_result FAILED "Could not checkout the approved ${label} revision." "$current" "$available" "$current"
+    return 1
+  fi
+  if ! build_release_image "$available"; then
+    git -C "$install_root" checkout --detach --quiet "$current" || true
+    write_result FAILED "Could not build the approved ${label} revision." "$current" "$available" "$current"
+    return 1
+  fi
+  candidate_image="$(release_image_for_revision "$available")"
+  write_result VERIFYING "Replacing only the ${label} worker and validating its heartbeat." "$available" "$available" "$current" 85
+  if RAIJIN_IMAGE="$candidate_image" RAIJIN_RUNTIME_COMPONENT="$component" "$install_root/scripts/start-runtime.sh" REAL; then
+    write_result SUCCEEDED "${label} worker-only update completed; other workers remained running." "$available" "$available" "$current" 100
+    return 0
+  fi
+  git -C "$install_root" checkout --detach --quiet "$current" || true
+  RAIJIN_IMAGE="$previous_image" RAIJIN_RUNTIME_COMPONENT="$component" "$install_root/scripts/start-runtime.sh" REAL || true
+  write_result ROLLED_BACK "${label} worker-only update failed heartbeat validation; the previous revision was restored." "$current" "$available" "$current" 100
+  return 1
+}
+
 apply_update() {
   local requested="$1" current available previous strategy
   current="$(revision HEAD)"
@@ -300,7 +386,7 @@ apply_update() {
     return 0
   fi
   strategy="$(update_strategy "$current" "$available")"
-  if [[ "$strategy" != WEB_ONLY_ROLLING && "$strategy" != CONTROLLER_ONLY_ROLLING ]] && ! runtime_is_drained; then
+  if [[ "$strategy" != WEB_ONLY_ROLLING && "$strategy" != CONTROLLER_ONLY_ROLLING && "$strategy" != RESTORE_WORKER_ROLLING && "$strategy" != DISCOVERY_WORKER_ROLLING && "$strategy" != AUDIT_WORKER_ROLLING && "$strategy" != TRANSFER_WORKER_ROLLING ]] && ! runtime_is_drained; then
     write_result REJECTED "Update requires a fully drained queue and no active restore or transfer." "$current" "$available"
     return 0
   fi
@@ -316,6 +402,24 @@ apply_update() {
     apply_controller_only_update "$current" "$available"
     return $?
   fi
+  case "$strategy" in
+    RESTORE_WORKER_ROLLING)
+      apply_isolated_worker_update "$current" "$available" restore s3-oci-raikou-sei "restore"
+      return $?
+      ;;
+    DISCOVERY_WORKER_ROLLING)
+      apply_isolated_worker_update "$current" "$available" discovery s3-oci-raikou-ko "discovery"
+      return $?
+      ;;
+    AUDIT_WORKER_ROLLING)
+      apply_isolated_worker_update "$current" "$available" audit s3-oci-raikou-kai "audit"
+      return $?
+      ;;
+    TRANSFER_WORKER_ROLLING)
+      apply_isolated_worker_update "$current" "$available" transfer s3-oci-transfer-worker "transfer"
+      return $?
+      ;;
+  esac
   write_result BACKING_UP "Creating a PostgreSQL backup before update." "$current" "$available" "" 35
   if ! "$backup"; then
     write_result FAILED "PostgreSQL backup failed; no update was applied." "$current" "$available"

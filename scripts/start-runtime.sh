@@ -12,7 +12,7 @@ oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 image="${RAIJIN_IMAGE:-localhost/s3-oci-migration:latest}"
 network=s3-oci-migration
 runtime_component="${RAIJIN_RUNTIME_COMPONENT:-full}"
-[[ "$runtime_component" == full || "$runtime_component" == web || "$runtime_component" == controller ]] || {
+[[ "$runtime_component" == full || "$runtime_component" == web || "$runtime_component" == controller || "$runtime_component" == restore || "$runtime_component" == discovery || "$runtime_component" == audit || "$runtime_component" == transfer ]] || {
   echo "RAIJIN_RUNTIME_COMPONENT must be full, web, or controller" >&2
   exit 2
 }
@@ -108,7 +108,7 @@ fi
 
 case "$mode" in
   REAL)
-    if [[ "$runtime_component" != controller ]]; then
+    if [[ "$runtime_component" == full || "$runtime_component" == web ]]; then
       podman run -d --name s3-oci-app --replace --restart unless-stopped \
       --network "$network" -p "$RAIJIN_WEB_BIND_PUBLISH" \
       -e RAIJIN_OPERATION_MODE=REAL \
@@ -140,8 +140,15 @@ case "$mode" in
     # health-checked web/API container. The durable worker containers retain
     # their existing image and continue their in-flight work.
     [[ "$runtime_component" == web ]] && exit 0
-    for worker_role in raikou-shin raikou-sei raikou-ko raikou-kai raiju; do
-      [[ "$runtime_component" == controller && "$worker_role" != raikou-shin ]] && continue
+    worker_roles=(raikou-shin raikou-sei raikou-ko raikou-kai raiju)
+    case "$runtime_component" in
+      controller) worker_roles=(raikou-shin) ;;
+      restore) worker_roles=(raikou-sei) ;;
+      discovery) worker_roles=(raikou-ko) ;;
+      audit) worker_roles=(raikou-kai) ;;
+      transfer) worker_roles=(raiju) ;;
+    esac
+    for worker_role in "${worker_roles[@]}"; do
       container="s3-oci-${worker_role}"
       [[ "$worker_role" == raiju ]] && container=s3-oci-transfer-worker
       rm -f "$runtime_root/${worker_role}.json"
@@ -149,6 +156,14 @@ case "$mode" in
       worker_runtime=(-e "RAIJIN_COMPONENT_HEARTBEAT_FILE=/run/platform-status/${worker_role}.json" -v "$runtime_root:/run/platform-status:rw,z")
       if [[ "$worker_role" == raikou-shin ]]; then
         worker_command=(python3 -m app.controller_worker)
+      elif [[ "$worker_role" == raikou-sei ]]; then
+        worker_command=(python3 -m app.restore_worker)
+      elif [[ "$worker_role" == raikou-ko ]]; then
+        worker_command=(python3 -m app.discovery_worker)
+      elif [[ "$worker_role" == raikou-kai ]]; then
+        worker_command=(python3 -m app.audit_worker)
+      elif [[ "$worker_role" == raiju ]]; then
+        worker_command=(python3 -m app.transfer_worker)
       fi
       podman run -d --name "$container" --replace --restart unless-stopped \
         --stop-timeout 120 \
@@ -165,15 +180,7 @@ case "$mode" in
         "${worker_runtime[@]}" \
         "$image" "${worker_command[@]}"
     done
-    if [[ "$runtime_component" == controller ]]; then
-      for attempt in $(seq 1 30); do
-        [[ -s "$runtime_root/raikou-shin.json" ]] && break
-        [[ "$attempt" -lt 30 ]] || { echo "Controller did not publish a heartbeat" >&2; exit 1; }
-        sleep 1
-      done
-      exit 0
-    fi
-    for worker_role in raikou-shin raikou-sei raikou-ko raikou-kai raiju; do
+    for worker_role in "${worker_roles[@]}"; do
       for attempt in $(seq 1 30); do
         [[ -s "$runtime_root/${worker_role}.json" ]] && break
         [[ "$attempt" -lt 30 ]] || { echo "${worker_role} did not publish a heartbeat" >&2; exit 1; }

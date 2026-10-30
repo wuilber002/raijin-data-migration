@@ -99,15 +99,16 @@ são restauradas.
 
 Qualquer ausência, erro de manifesto, caminho fora da allowlist, alteração de
 API/banco/código compartilhado de worker/runtime ou falha de health mantém o
-caminho seguro `FULL_CONTROLLED_RESTART`. Os rollouts seletivos de restore,
-discovery, auditoria, transferência e banco continuam pendentes dos contratos
-e testes indicados abaixo.
+caminho seguro `FULL_CONTROLLED_RESTART`. Além de web e controller, os
+entrypoints isolados de restore, discovery, auditoria e transferência podem
+ser substituídos seletivamente quando a alteração for limitada estritamente ao
+arquivo de entrada daquele consumer. Banco e lógica compartilhada continuam
+pendentes dos contratos e testes indicados abaixo.
 
-Os entrypoints e heartbeats desses quatro consumers já são isolados por papel,
-mas isso ainda não autoriza seus rollouts seletivos: sua lógica de negócio
-continua no módulo compartilhado `app.real_worker.py`. Uma modificação nesse
-módulo segue sendo classificada como atualização integral até a extração e os
-contratos específicos de cada papel estarem concluídos.
+Os entrypoints e heartbeats desses quatro consumers são isolados por papel.
+Sua lógica de negócio continua no módulo compartilhado `app.real_worker.py`;
+uma modificação nele segue sendo classificada como atualização integral até a
+extração e os contratos específicos de cada papel estarem concluídos.
 
 ### Arquitetura-alvo
 
