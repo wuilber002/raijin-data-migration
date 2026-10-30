@@ -450,8 +450,11 @@
       <hr class="console-section-divider">
       <h3 data-console-i18n="Atualizações da plataforma"></h3>
       <p class="hint" data-console-i18n="Consulta uma revisão aprovada no GitHub. A instalação exige fila completamente drenada, backup e validação local de saúde."></p>
-      <div id="console-update-status" class="report-content"></div>
-      <div class="row"><button type="button" class="secondary console-update-check" id="console-update-check"></button><button type="button" id="console-update-apply" data-console-i18n="Instalar atualização"></button></div>
+      <div class="console-update-layout">
+        <div id="console-update-status"></div>
+        <div id="console-update-impact-slot"></div>
+        <div class="row console-update-actions"><button type="button" class="secondary console-update-check" id="console-update-check"></button><button type="button" id="console-update-apply" data-console-i18n="Instalar atualização"></button></div>
+      </div>
       <hr class="console-section-divider">
       <h3 data-console-i18n="Gerenciamento de usuários"></h3>
       <form id="console-create-user" class="row">
@@ -511,7 +514,7 @@
       const fallback = {VALIDATING:10, BACKING_UP:35, DEPLOYING:65, RESTARTING:80, RECONNECTING:90, VERIFYING:90, SUCCEEDED:100, ROLLED_BACK:100, FAILED:100, REJECTED:0};
       return Math.max(0, Math.min(100, Number.isFinite(Number(state.progress)) ? Number(state.progress) : (fallback[state.state] || 0)));
     };
-    const updateImpactMarkup = (impact, includeFiles = true) => {
+    const updateImpactMarkup = impact => {
       const value = impact || {};
       const classification = {
         WEB_UI_ONLY: uiText("Somente interface web"), DOCUMENTATION_ONLY: uiText("Somente documentação"),
@@ -530,9 +533,7 @@
       const phaseOne = value.installation_strategy === "WEB_ONLY_ROLLING"
         ? uiText("Esta atualização trocará somente a interface web; os workers e transferências em curso continuarão ativos.")
         : uiText("Esta atualização exige backup e reinício controlado da plataforma.");
-      const changedFiles = includeFiles && value.changed_files?.length
-        ? `<details class="console-update-impact-files"><summary>${escapeHtml(uiText("Arquivos alterados"))} (${value.changed_files.length})</summary><ul>${value.changed_files.map(path => `<li><code>${escapeHtml(path)}</code></li>`).join("")}</ul></details>` : "";
-      return `<section class="console-update-impact"><h3>${escapeHtml(uiText("Impacto da atualização"))}</h3><p><strong>${escapeHtml(uiText("Classificação"))}:</strong> ${escapeHtml(classification)}</p><p><strong>${escapeHtml(uiText("Componentes alterados"))}:</strong> ${escapeHtml(components)}</p><p><strong>${escapeHtml(uiText("Impacto nas transferências"))}:</strong> ${escapeHtml(transferImpact)}</p><p class="hint">${escapeHtml(phaseOne)}</p>${changedFiles}</section>`;
+      return `<section class="console-update-impact"><h3>${escapeHtml(uiText("Impacto da atualização"))}</h3><p><strong>${escapeHtml(uiText("Classificação"))}:</strong> ${escapeHtml(classification)}</p><p><strong>${escapeHtml(uiText("Componentes alterados"))}:</strong> ${escapeHtml(components)}</p><p><strong>${escapeHtml(uiText("Impacto nas transferências"))}:</strong> ${escapeHtml(transferImpact)}</p><p class="hint">${escapeHtml(phaseOne)}</p></section>`;
     };
     const showUpdateWorkflow = state => {
       latestUpdateState = {...(latestUpdateState || {}), ...state};
@@ -646,7 +647,8 @@
       }[updateState.state] || updateState.message || "";
       latestUpdateState = updateState;
       const impactPreview = updateAvailable ? updateImpactMarkup(updateState.impact) : "";
-      card.querySelector("#console-update-status").innerHTML = `<div class="console-update-status-layout"><div><p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p></div>${impactPreview}</div>`;
+      card.querySelector("#console-update-status").innerHTML = `<p><strong>${uiText("Revisão instalada")}:</strong> <code>${escapeHtml(updateState.current_revision || "—")}</code></p><p><strong>${uiText("Revisão disponível")}:</strong> <code>${escapeHtml(updateState.available_revision || "—")}</code></p><p class="hint"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
+      card.querySelector("#console-update-impact-slot").innerHTML = impactPreview;
       // A request is processed by the host agent asynchronously. Keep the
       // progress indication visible through its pending state, not only while
       // the short API request that creates it is in flight.

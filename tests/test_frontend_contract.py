@@ -160,8 +160,10 @@ def test_console_displays_host_authored_update_impact_before_installation():
     assert "latestUpdateState?.impact" in script
     assert "updateState.impact" in script
     assert "const impactPreview = updateAvailable ? updateImpactMarkup(updateState.impact) : \"\"" in script
-    assert "console-update-status-layout" in script
-    assert "console-update-status-layout" in (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'id="console-update-impact-slot"' in script
+    assert 'class="row console-update-actions"' in script
+    assert "console-update-impact-files" not in script
+    assert "console-update-layout" in (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "WEB_UI_ONLY" in update_agent
     assert '"installation_strategy": "WEB_ONLY_ROLLING"' in update_agent
     assert "apply_web_only_update" in update_agent
