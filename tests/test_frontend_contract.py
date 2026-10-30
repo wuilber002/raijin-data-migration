@@ -225,6 +225,16 @@ def test_discovery_execution_isolated_from_generic_worker_loop():
     assert 'app/discovery_execution.py' in update_agent
 
 
+def test_audit_execution_isolated_from_generic_worker_loop():
+    execution = (ROOT / "app/audit_execution.py").read_text(encoding="utf-8")
+    entrypoint = (ROOT / "app/audit_worker.py").read_text(encoding="utf-8")
+    update_agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
+    assert "with task_lease_heartbeat(task.id, settings.task_lease_seconds)" in execution
+    assert "verify_wave(session, task)" in execution
+    assert "main(run_once)" in entrypoint
+    assert 'app/audit_execution.py' in update_agent
+
+
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert 'const awaitingAgent = updateWorkflowLocked && state.pending && state.state === "AVAILABLE"' in script

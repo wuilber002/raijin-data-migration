@@ -106,13 +106,14 @@ arquivo de entrada daquele consumer. Banco e lógica compartilhada continuam
 pendentes dos contratos e testes indicados abaixo.
 
 Os entrypoints e heartbeats desses quatro consumers são isolados por papel.
-Os orquestradores de restore e discovery foram extraídos para
-`app/restore_execution.py` e `app/discovery_execution.py`; após a primeira
-instalação integral dessas extrações, alterações limitadas ao respectivo
-arquivo podem usar seu rollout seletivo. Os utilitários, protocolo durável e
-demais lógicas continuam em `app.real_worker.py`; uma modificação neles segue
-sendo classificada como atualização integral até as extrações equivalentes e
-os contratos específicos de cada papel estarem concluídos.
+Os orquestradores de restore, discovery e auditoria foram extraídos para
+`app/restore_execution.py`, `app/discovery_execution.py` e
+`app/audit_execution.py`; após a primeira instalação integral dessas
+extrações, alterações limitadas ao respectivo arquivo podem usar seu rollout
+seletivo. Os utilitários, protocolo durável e demais lógicas continuam em
+`app.real_worker.py`; uma modificação neles segue sendo classificada como
+atualização integral até as extrações equivalentes e os contratos específicos
+de cada papel estarem concluídos.
 
 ### Arquitetura-alvo
 

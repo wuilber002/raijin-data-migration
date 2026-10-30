@@ -51,7 +51,7 @@
       "enabled": true,
       "contract_version": 1,
       "allowed_paths": [
-        "app/audit_worker.py"
+        "app/audit_execution.py"
       ],
       "validation_path_prefixes": [
         "tests/"
