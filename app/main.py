@@ -2297,7 +2297,9 @@ def create_schema() -> None:
     # and direct execution; managed runtime invokes the same migrator before
     # starting this API container.
     migrate_production_schema(engine, Base.metadata)
-    return
+    # Compatibility bridge for the homologation schema created before the
+    # revision table existed. It is idempotent and remains only until that
+    # environment has completed this first versioned release.
     # ``create_all`` does not alter the singleton on an upgraded deployment.
     # Add this auth-policy column before bootstrap reads the mapped row.
     existing_auth_columns = {
