@@ -170,7 +170,9 @@ def test_console_displays_host_authored_update_impact_before_installation():
     assert "apply_web_only_update" in update_agent
     assert "RAIJIN_RUNTIME_COMPONENT=web" in update_agent
     assert "all_paths = subprocess.check_output" in update_agent
-    assert "all(web_ui(path) for path in all_paths)" in update_agent
+    assert "runtime_paths = [path for path in all_paths if not validation(path)]" in update_agent
+    assert "all(web_ui(path) for path in runtime_paths)" in update_agent
+    assert "all(web_ui(path) or validation(path) for path in all_paths)" in update_agent
     assert "Esta atualização trocará somente a interface web" in script
 
 

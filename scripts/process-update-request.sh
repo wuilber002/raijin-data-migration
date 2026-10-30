@@ -51,17 +51,22 @@ except Exception:
 # diff. Only the administrative evidence sent to the web console is capped.
 paths = all_paths[:100]
 web_ui = lambda path: path.startswith(("app/static/", "images/"))
+validation = lambda path: path.startswith("tests/")
 docs = lambda path: path.startswith("docs/") or path in {"README.md", "LICENSE"}
 host = lambda path: path.startswith(("scripts/", "docker/", "terraform/")) or path in {"Dockerfile", "docker-compose.yml", "requirements.txt", "requirements-dev.txt"}
 worker = lambda path: path in {"app/real_worker.py", "app/cloud_backends.py", "app/aws_restore_semantics.py"}
 database = lambda path: path.startswith("app/") and any(token in path for token in ("migration", "schema", "main.py"))
 
+# Test files provide release evidence but are not copied into the runtime
+# image. They must not turn an otherwise static-only rollout into a platform
+# restart. Every other path remains part of the runtime classification.
+runtime_paths = [path for path in all_paths if not validation(path)]
 components = []
-if any(web_ui(path) for path in all_paths): components.append("WEB_UI")
-if any(worker(path) for path in all_paths): components.append("WORKERS")
-if any(database(path) for path in all_paths): components.append("DATABASE_OR_API")
-if any(host(path) for path in all_paths): components.append("HOST_RUNTIME")
-if not components and all_paths: components.append("DOCUMENTATION")
+if any(web_ui(path) for path in runtime_paths): components.append("WEB_UI")
+if any(worker(path) for path in runtime_paths): components.append("WORKERS")
+if any(database(path) for path in runtime_paths): components.append("DATABASE_OR_API")
+if any(host(path) for path in runtime_paths): components.append("HOST_RUNTIME")
+if not components and runtime_paths: components.append("DOCUMENTATION")
 
 manifest = {}
 try:
@@ -80,13 +85,18 @@ manifest_authorizes_web = (
     and web_rollout.get("enabled") is True
     and web_rollout.get("contract_version") == 1
     and web_rollout.get("allowed_path_prefixes") == ["app/static/", "images/"]
+    and web_rollout.get("validation_path_prefixes") == ["tests/"]
 )
-web_only_candidate = bool(all_paths) and all(web_ui(path) for path in all_paths)
+web_only_candidate = (
+    bool(runtime_paths)
+    and all(web_ui(path) for path in runtime_paths)
+    and all(web_ui(path) or validation(path) for path in all_paths)
+)
 web_rollout_enabled = selective_web_only.lower() == "true"
 
 if web_only_candidate:
     classification, transfer_impact = "WEB_UI_ONLY", "NONE"
-elif all_paths and all(docs(path) for path in all_paths):
+elif all_paths and all(docs(path) or validation(path) for path in all_paths):
     classification, transfer_impact = "DOCUMENTATION_ONLY", "NONE"
 else:
     classification, transfer_impact = "FULL_PLATFORM", "CONTROLLED_PAUSE"

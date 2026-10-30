@@ -76,7 +76,9 @@ O primeiro recorte desta fase está implementado: `WEB_UI_ONLY`. Uma revisão
 somente recebe a estratégia `WEB_ONLY_ROLLING` quando todos estes controles
 são verdadeiros:
 
-1. o diff contém exclusivamente `app/static/` e/ou `images/`;
+1. o diff de runtime contém exclusivamente `app/static/` e/ou `images/`;
+   arquivos em `tests/` são evidência de validação e não são empacotados na
+   imagem de runtime;
 2. o `release-manifest.json` da própria revisão, lido pelo agente root,
    autoriza o contrato `web_ui` versão 1 e sua allowlist de caminhos;
 3. a política root-owned `RAIJIN_UPDATE_SELECTIVE_WEB_ONLY=true` está ativa.

@@ -12,6 +12,9 @@
       "allowed_path_prefixes": [
         "app/static/",
         "images/"
+      ],
+      "validation_path_prefixes": [
+        "tests/"
       ]
     }
   }
