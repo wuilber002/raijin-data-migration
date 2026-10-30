@@ -638,7 +638,13 @@
         showUpdateWorkflow(awaitingAgent
           ? {...state, state:"VALIDATING", progress:10, message:uiText("Validando a revisão aprovada e a fila drenada.")}
           : state);
-        if (["SUCCEEDED", "FAILED", "ROLLED_BACK", "REJECTED"].includes(state.state) && !state.pending) return;
+        if (["SUCCEEDED", "FAILED", "ROLLED_BACK", "REJECTED"].includes(state.state) && !state.pending) {
+          // A selective rollout keeps this page alive. Refresh the Settings
+          // card using the terminal host state so it cannot retain the prior
+          // AVAILABLE revision or leave the install button enabled.
+          await render();
+          return;
+        }
       } catch (_) {
         showUpdateWorkflow({state:"RECONNECTING", progress:90});
       }

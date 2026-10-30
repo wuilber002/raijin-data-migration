@@ -277,11 +277,14 @@ def test_update_check_waits_for_host_agent_result_before_clearing_spinner():
 
 
 def test_update_check_exposes_commit_subjects_and_available_revision_opens_them():
+    main = (ROOT / "app/main.py").read_text(encoding="utf-8")
     agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert '"log", "--format=%H%x1f%s"' in agent
     assert '"commits": commits' in agent
     assert '"commit_count": commit_count' in agent
+    assert '"commits": [' in main
+    assert '"commit_count": commit_count' in main
     assert "console-update-commits-modal" in script
     assert "showUpdateCommits" in script
     assert "console-update-commits-button" in script
@@ -291,6 +294,11 @@ def test_update_workflow_does_not_render_completed_check_as_completed_installati
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert 'const awaitingAgent = updateWorkflowLocked && state.pending && state.state === "AVAILABLE"' in script
     assert 'state:"VALIDATING", progress:10' in script
+
+
+def test_selective_update_refreshes_settings_with_terminal_host_state():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert "await render();\n          return;" in script
 
 
 def test_active_update_step_uses_spinner_instead_of_pulsing_dot():

@@ -4742,6 +4742,7 @@ def console_update_control_state() -> dict:
         "previous_revision": None,
         "progress": 0,
         "impact": {},
+        "database_schema_revision": None,
         "updated_at": None,
     }
     try:
@@ -4758,6 +4759,10 @@ def console_update_control_state() -> dict:
     raw_impact = state.get("impact")
     if not isinstance(raw_impact, dict):
         raw_impact = {}
+    try:
+        commit_count = min(100000, max(0, int(raw_impact.get("commit_count") or 0)))
+    except (TypeError, ValueError):
+        commit_count = 0
     state["impact"] = {
         "classification": str(raw_impact.get("classification") or "UNKNOWN")[:64],
         "components": [str(value)[:64] for value in raw_impact.get("components", []) if isinstance(value, str)][:12],
@@ -4766,6 +4771,16 @@ def console_update_control_state() -> dict:
         "rollout_eligible": bool(raw_impact.get("rollout_eligible")),
         "rollout_eligibility_reason": str(raw_impact.get("rollout_eligibility_reason") or "")[:128],
         "changed_files": [str(value)[:512] for value in raw_impact.get("changed_files", []) if isinstance(value, str)][:100],
+        "commits": [
+            {
+                "revision": str(value.get("revision") or "")[:40],
+                "subject": str(value.get("subject") or "")[:512],
+            }
+            for value in raw_impact.get("commits", [])[:100]
+            if isinstance(value, dict)
+        ],
+        "commit_count": commit_count,
+        "commits_truncated": bool(raw_impact.get("commits_truncated")),
     }
     state["pending"] = request_file.exists() or request_file.with_suffix(".processing").exists()
     return state
