@@ -795,7 +795,7 @@
       try {
         const priorUpdatedAt = latestUpdateState?.updated_at || "";
         await apiCall("/api/admin/updates/check", {method:"POST"});
-        for (let attempt = 0; attempt < 12; attempt += 1) {
+        for (let attempt = 0; attempt < 60; attempt += 1) {
           await render();
           if ((latestUpdateState?.updated_at || "") !== priorUpdatedAt && !latestUpdateState?.pending) break;
           await new Promise(resolve => window.setTimeout(resolve, 500));

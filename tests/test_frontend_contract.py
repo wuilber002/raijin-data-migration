@@ -293,8 +293,14 @@ def test_selective_update_keeps_console_session_active_in_final_modal():
 def test_update_check_waits_for_host_agent_result_before_clearing_spinner():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert "const priorUpdatedAt = latestUpdateState?.updated_at || \"\"" in script
-    assert "attempt < 12" in script
+    assert "attempt < 60" in script
     assert "window.setTimeout(resolve, 500)" in script
+
+
+def test_update_state_keeps_request_processing_file_visible_to_console():
+    main = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    assert 'processing_file = request_file.with_name(f"{request_file.name}.processing")' in main
+    assert "request_file.exists() or processing_file.exists()" in main
 
 
 def test_update_check_exposes_commit_subjects_and_available_revision_opens_them():

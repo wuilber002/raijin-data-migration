@@ -4782,7 +4782,12 @@ def console_update_control_state() -> dict:
         "commit_count": commit_count,
         "commits_truncated": bool(raw_impact.get("commits_truncated")),
     }
-    state["pending"] = request_file.exists() or request_file.with_suffix(".processing").exists()
+    # The root agent atomically claims ``request.json`` by renaming it to
+    # ``request.json.processing``. Keep that exact filename visible to the
+    # console while the check is running; ``with_suffix`` would incorrectly
+    # look for ``request.processing`` and make the UI stop polling too early.
+    processing_file = request_file.with_name(f"{request_file.name}.processing")
+    state["pending"] = request_file.exists() or processing_file.exists()
     return state
 
 
