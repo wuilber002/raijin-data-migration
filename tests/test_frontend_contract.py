@@ -187,6 +187,13 @@ def test_console_hides_admin_settings_navigation_for_non_admin_roles():
     assert "gear[data-required-role=\"ADMIN\"]" in script
 
 
+def test_console_limits_session_and_auth_audit_tables_to_ten_visible_rows():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "#console-sessions,#console-auth-audit{max-height:30.25rem;overflow:auto}" in page
+    assert "#console-sessions button{box-sizing:border-box;min-height:2rem;height:2rem" in page
+    assert "#console-sessions td:last-child{width:1%;white-space:nowrap}" in page
+
+
 def test_console_disables_dynamic_migration_mutations_for_viewers():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert "migrationMutationIds" in script
