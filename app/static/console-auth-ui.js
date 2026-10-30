@@ -1,4 +1,7 @@
 (() => {
+  // Controlled Phase 2 rollout probe: this static-only marker validates that
+  // a WEB_UI_ONLY revision replaces only the web/API container.
+  document.documentElement.dataset.raijinWebRolloutProbe = "phase2-web-1";
   const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
   const apiCall = (...args) => window.api ? window.api(...args) : Promise.reject(new Error("Console API is not ready"));
   const uiText = (value, options) => window.t ? window.t(value, options) : value;
