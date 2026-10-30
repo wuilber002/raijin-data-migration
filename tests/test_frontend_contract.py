@@ -259,6 +259,13 @@ def test_audit_rollout_probe_is_isolated_to_its_worker_entrypoint():
     assert 'app/audit_execution.py' in update_agent
 
 
+def test_transfer_rollout_probe_is_isolated_to_its_worker_entrypoint():
+    execution = (ROOT / "app/transfer_execution.py").read_text(encoding="utf-8")
+    update_agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
+    assert 'ROLLOUT_PROBE = "phase2-transfer-1"' in execution
+    assert 'app/transfer_execution.py' in update_agent
+
+
 def test_update_agent_requires_expand_only_database_manifest():
     agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")

@@ -13,6 +13,9 @@ from app.runtime_context import mode_switch_requested
 
 
 ROLE = "raiju"
+# Controlled Phase 2 rollout probe. This inert marker proves that the Raiju
+# transfer worker can restart independently and retain its durable checkpoint.
+ROLLOUT_PROBE = "phase2-transfer-1"
 
 
 def run_once(role: str = ROLE) -> None:
