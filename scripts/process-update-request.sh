@@ -60,7 +60,7 @@ controller = lambda path: path == "app/controller_worker.py"
 restore = lambda path: path == "app/restore_execution.py"
 discovery = lambda path: path == "app/discovery_execution.py"
 audit = lambda path: path == "app/audit_execution.py"
-transfer = lambda path: path == "app/transfer_worker.py"
+transfer = lambda path: path == "app/transfer_execution.py"
 validation = lambda path: path.startswith("tests/")
 docs = lambda path: path.startswith("docs/") or path in {"README.md", "LICENSE"}
 host = lambda path: path.startswith(("scripts/", "docker/", "terraform/")) or path in {"Dockerfile", "docker-compose.yml", "requirements.txt", "requirements-dev.txt"}
@@ -129,7 +129,7 @@ def authorized_worker_rollout(value, path):
 manifest_authorizes_restore = authorized_worker_rollout(restore_rollout, "app/restore_execution.py")
 manifest_authorizes_discovery = authorized_worker_rollout(discovery_rollout, "app/discovery_execution.py")
 manifest_authorizes_audit = authorized_worker_rollout(audit_rollout, "app/audit_execution.py")
-manifest_authorizes_transfer = authorized_worker_rollout(transfer_rollout, "app/transfer_worker.py")
+manifest_authorizes_transfer = authorized_worker_rollout(transfer_rollout, "app/transfer_execution.py")
 web_only_candidate = (
     bool(runtime_paths)
     and all(web_ui(path) for path in runtime_paths)
@@ -147,7 +147,7 @@ def isolated_candidate(predicate):
 restore_only_candidate = isolated_candidate(lambda path: path == "app/restore_execution.py")
 discovery_only_candidate = isolated_candidate(lambda path: path == "app/discovery_execution.py")
 audit_only_candidate = isolated_candidate(lambda path: path == "app/audit_execution.py")
-transfer_only_candidate = isolated_candidate(transfer)
+transfer_only_candidate = isolated_candidate(lambda path: path == "app/transfer_execution.py")
 restore_rollout_enabled = selective_restore.lower() == "true"
 discovery_rollout_enabled = selective_discovery.lower() == "true"
 audit_rollout_enabled = selective_audit.lower() == "true"

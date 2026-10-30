@@ -61,7 +61,7 @@
       "enabled": true,
       "contract_version": 1,
       "allowed_paths": [
-        "app/transfer_worker.py"
+        "app/transfer_execution.py"
       ],
       "validation_path_prefixes": [
         "tests/"

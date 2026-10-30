@@ -235,6 +235,16 @@ def test_audit_execution_isolated_from_generic_worker_loop():
     assert 'app/audit_execution.py' in update_agent
 
 
+def test_transfer_execution_isolated_from_generic_worker_loop():
+    execution = (ROOT / "app/transfer_execution.py").read_text(encoding="utf-8")
+    entrypoint = (ROOT / "app/transfer_worker.py").read_text(encoding="utf-8")
+    update_agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
+    assert "reconcile_completed_continuous_item_leases" in execution
+    assert "transfer_continuous(session, task, settings)" in execution
+    assert "main(run_once)" in entrypoint
+    assert 'app/transfer_execution.py' in update_agent
+
+
 def test_update_workflow_does_not_render_completed_check_as_completed_installation():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert 'const awaitingAgent = updateWorkflowLocked && state.pending && state.state === "AVAILABLE"' in script
