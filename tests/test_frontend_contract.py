@@ -429,6 +429,10 @@ def test_console_limits_sessions_to_five_rows_and_keeps_revoke_compact():
     assert ".console-session-list,#console-auth-audit{max-height:30.25rem;overflow:auto}" in page
     assert ".console-session-list button{box-sizing:border-box;min-height:1.7rem!important;height:1.7rem!important" in page
     assert ".console-session-tabs" in page
+    assert "console-session-tab-controls" in script
+    assert 'id="console-session-pagination"' in script
+    assert 'query("#console-session-pagination").classList.toggle("hidden", sessionTab !== "history")' in script
+    assert "Exibindo as 10 páginas mais recentes" not in script
     assert 'apiCall("/api/admin/sessions?active_only=true")' in script
     assert 'apiCall(`/api/admin/sessions/history?page=${sessionHistoryPage}&page_size=5`)' in script
     assert "sessions.slice(0, 5)" not in script

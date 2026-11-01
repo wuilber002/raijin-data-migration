@@ -483,7 +483,7 @@
       </form>
       <div id="console-users" class="report-content" data-console-i18n="Carregando usuários…"></div>
       <hr class="console-section-divider">
-      <h3 data-console-i18n="Sessões"></h3><div class="console-session-tabs" role="tablist" aria-label="Sessões"><button type="button" class="secondary active" data-session-tab="active" role="tab" aria-selected="true">Ativas</button><button type="button" class="secondary" data-session-tab="history" role="tab" aria-selected="false">Histórico</button></div><div id="console-active-sessions" class="console-session-list report-content" data-console-i18n="Carregando sessões…"></div><div id="console-session-history" class="console-session-list report-content hidden"></div>
+      <h3 data-console-i18n="Sessões"></h3><div class="console-session-tabs"><div class="console-session-tab-controls" role="tablist" aria-label="Sessões"><button type="button" class="secondary active" data-session-tab="active" role="tab" aria-selected="true">Ativas</button><button type="button" class="secondary" data-session-tab="history" role="tab" aria-selected="false">Histórico</button></div><div id="console-session-pagination"></div></div><div id="console-active-sessions" class="console-session-list report-content" data-console-i18n="Carregando sessões…"></div><div id="console-session-history" class="console-session-list report-content hidden"></div>
       </section>
       <section class="card" id="console-audit-section"><h2 data-console-i18n="Auditoria recente de autenticação"></h2>
       <form id="console-audit-filter" class="row">
@@ -779,7 +779,9 @@
       const historyItems = Array.isArray(sessionHistory.items) ? sessionHistory.items : [];
       const historyPages = Math.min(10, Number(sessionHistory.total_pages || 1));
       const pagination = historyPages > 1 ? `<nav class="console-session-pagination" aria-label="Paginação do histórico">${Array.from({length:historyPages}, (_, index) => `<button type="button" class="secondary${index + 1 === Number(sessionHistory.page) ? " active" : ""}" data-session-history-page="${index + 1}" aria-current="${index + 1 === Number(sessionHistory.page) ? "page" : "false"}">${index + 1}</button>`).join("")}</nav>` : "";
-      query("#console-session-history").innerHTML = `${historyItems.length ? sessionTable(historyItems) : `<p class="hint">${uiText("Nenhuma sessão no histórico.")}</p>`}${pagination}${sessionHistory.truncated ? `<p class="hint">${uiText("Exibindo as 10 páginas mais recentes, com 5 sessões por página.")}</p>` : ""}`;
+      query("#console-session-history").innerHTML = historyItems.length ? sessionTable(historyItems) : `<p class="hint">${uiText("Nenhuma sessão no histórico.")}</p>`;
+      query("#console-session-pagination").innerHTML = pagination;
+      query("#console-session-pagination").classList.toggle("hidden", sessionTab !== "history");
       queryAll("[data-session-tab]").forEach(button => { const selected = button.dataset.sessionTab === sessionTab; button.classList.toggle("active", selected); button.setAttribute("aria-selected", String(selected)); });
       query("#console-active-sessions").classList.toggle("hidden", sessionTab !== "active");
       query("#console-session-history").classList.toggle("hidden", sessionTab !== "history");
@@ -792,6 +794,7 @@
         queryAll("[data-session-tab]").forEach(item => { const selected = item === button; item.classList.toggle("active", selected); item.setAttribute("aria-selected", String(selected)); });
         query("#console-active-sessions").classList.toggle("hidden", sessionTab !== "active");
         query("#console-session-history").classList.toggle("hidden", sessionTab !== "history");
+        query("#console-session-pagination").classList.toggle("hidden", sessionTab !== "history");
       }));
       queryAll("[data-session-history-page]").forEach(button => button.addEventListener("click", async () => {
         sessionHistoryPage = Number(button.dataset.sessionHistoryPage) || 1; await render();
