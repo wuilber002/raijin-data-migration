@@ -458,6 +458,7 @@ def test_console_creates_users_in_a_dedicated_modal_with_identity_fields():
 
 def test_console_user_actions_use_a_password_confirmation_modal():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id = "console-reset-user-password-modal"' in script
     assert 'data-reset-user-password="${user.id}"' in script
     assert 'name="confirmation"' in script
@@ -467,14 +468,17 @@ def test_console_user_actions_use_a_password_confirmation_modal():
     assert 'console-user-actions' in script
     assert 'data-close-reset-password' not in script
     assert 'console-password-reset-panel' in script
+    assert '.console-password-reset-panel form{grid-template-columns:1fr}' in page
 
 
 def test_console_user_edit_modal_keeps_login_read_only():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert 'id = "console-edit-user-modal"' in script
     assert 'data-edit-user="${user.id}"' in script
-    assert 'name="username" autocomplete="username" readonly' in script
+    assert 'name="username" autocomplete="username" disabled aria-disabled="true"' in script
     assert 'body:JSON.stringify({first_name:form.first_name.value, last_name:form.last_name.value})' in script
+    assert 'data-close-edit-user' not in script
+    assert 'is-disabled' in script
 
 
 def test_console_uses_an_on_off_switch_for_user_activation():
