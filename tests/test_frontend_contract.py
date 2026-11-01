@@ -375,6 +375,18 @@ def test_console_hides_admin_settings_navigation_for_non_admin_roles():
     assert "gear[data-required-role=\"ADMIN\"]" in script
 
 
+def test_console_navigation_visibility_matches_viewer_operator_and_admin_roles():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert "applyNavigationRoleVisibility" in script
+    assert '["dashboard", "migrations"]' in script
+    assert 'control.dataset.requiredRole = "OPERATOR"' in script
+    assert 'window.showView?.("queue", {scroll:false})' in script
+    assert 'identity.user.role === "VIEWER" ? "queue" : "dashboard"' in script
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "minimumRole={dashboard:'OPERATOR',migrations:'OPERATOR',settings:'ADMIN'}" in page
+    assert "view=role==='VIEWER'?'queue':'dashboard'" in page
+
+
 def test_console_limits_session_and_auth_audit_tables_to_ten_visible_rows():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "#console-sessions,#console-auth-audit{max-height:30.25rem;overflow:auto}" in page

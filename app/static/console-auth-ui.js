@@ -45,6 +45,14 @@
       control.setAttribute("aria-disabled", String(!permitted));
     });
   };
+  const applyNavigationRoleVisibility = () => {
+    ["dashboard", "migrations"].forEach(view => {
+      const control = document.querySelector(`[data-view="${view}"]`);
+      if (!control) return;
+      control.dataset.requiredRole = "OPERATOR";
+      control.dataset.hideWhenDenied = "";
+    });
+  };
   const installAdminSecurityAlerts = () => {
     const baseRenderTopAlerts = window.renderTopAlerts;
     if (typeof baseRenderTopAlerts !== "function") return;
@@ -189,8 +197,13 @@
     try { identity = await apiCall("/api/auth/me"); } catch (_) { return; }
     if (!identity.enabled) return;
     window.raijinConsoleRole = identity.user.role;
+    applyNavigationRoleVisibility();
     markMigrationMutationControls(document);
     applyRoleControls(identity.user.role);
+    const activeNavigation = document.querySelector(".nav [data-view].active");
+    if (activeNavigation?.classList.contains("hidden")) {
+      window.showView?.("queue", {scroll:false});
+    }
     const migrations = document.getElementById("view-migrations");
     if (migrations) {
       // Wave/project refreshes replace their rows in a single DOM update.
@@ -413,7 +426,7 @@
       document.querySelector('[data-view="settings"]')?.classList.add("hidden");
       document.querySelector('.gear[data-required-role="ADMIN"]')?.classList.add("hidden");
       if (document.getElementById("view-settings")?.classList.contains("active")) {
-        window.showView?.("dashboard");
+        window.showView?.(identity.user.role === "VIEWER" ? "queue" : "dashboard");
       }
       // An initial settings route can start its asynchronous loaders before
       // this identity check completes. Later route/language refreshes must
