@@ -396,6 +396,8 @@ def test_admin_settings_menu_opens_each_existing_settings_section_in_a_modal():
     assert 'id="console-general-section"' in script
     assert 'id="console-update-section"' in script
     assert 'const query = selector => card.querySelector(selector) || document.querySelector(selector);' in script
+    assert "window.raijinRefreshAdminSettings = render;" in script
+    assert "window.raijinRefreshAdminSettings?.().catch(()=>{})" in page
 
 
 def test_console_navigation_visibility_matches_viewer_operator_and_admin_roles():

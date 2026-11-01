@@ -852,6 +852,10 @@
         : key === "auth-bootstrap" ? "BOOTSTRAP_ADMIN_CREATED" : "";
       render().then(() => card.scrollIntoView({block:"start", behavior:"smooth"})).catch(() => {});
     });
+    // Settings now live in independent modals. Expose a refresh hook so a
+    // topic opened after authentication always receives current values,
+    // instead of depending on the retired Settings view lifecycle.
+    window.raijinRefreshAdminSettings = render;
     await render();
   }
   queueMicrotask(install);
