@@ -5040,7 +5040,7 @@ def console_list_sessions(request: FastAPIRequest,
 @app.get("/api/admin/sessions/history")
 def console_session_history(request: FastAPIRequest,
                             page: int = Query(default=1, ge=1, le=10),
-                            page_size: int = Query(default=10, ge=1, le=10),
+                            page_size: int = Query(default=5, ge=1, le=5),
                             session: Session = Depends(get_session)) -> dict:
     console_principal(request)
     now = utcnow()

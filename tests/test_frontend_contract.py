@@ -430,7 +430,7 @@ def test_console_limits_sessions_to_five_rows_and_keeps_revoke_compact():
     assert ".console-session-list button{box-sizing:border-box;min-height:1.7rem!important;height:1.7rem!important" in page
     assert ".console-session-tabs" in page
     assert 'apiCall("/api/admin/sessions?active_only=true")' in script
-    assert 'apiCall(`/api/admin/sessions/history?page=${sessionHistoryPage}&page_size=10`)' in script
+    assert 'apiCall(`/api/admin/sessions/history?page=${sessionHistoryPage}&page_size=5`)' in script
     assert "sessions.slice(0, 5)" not in script
     assert "historyPages = Math.min(10" in script
 

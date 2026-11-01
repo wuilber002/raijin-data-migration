@@ -714,7 +714,7 @@
     const render = async () => {
       const [users, activeSessions, sessionHistory, audit, authSettings, webBind, bindAddresses, updateState] = await Promise.all([
         apiCall("/api/admin/users"), apiCall("/api/admin/sessions?active_only=true"),
-        apiCall(`/api/admin/sessions/history?page=${sessionHistoryPage}&page_size=10`),
+        apiCall(`/api/admin/sessions/history?page=${sessionHistoryPage}&page_size=5`),
         apiCall(`/api/admin/auth-audit${auditQuery()}`),
         apiCall("/api/admin/auth-settings"), apiCall("/api/admin/web-bind"), apiCall("/api/admin/web-bind/addresses"), apiCall("/api/admin/updates"),
       ]);
@@ -779,7 +779,7 @@
       const historyItems = Array.isArray(sessionHistory.items) ? sessionHistory.items : [];
       const historyPages = Math.min(10, Number(sessionHistory.total_pages || 1));
       const pagination = historyPages > 1 ? `<nav class="console-session-pagination" aria-label="Paginação do histórico">${Array.from({length:historyPages}, (_, index) => `<button type="button" class="secondary${index + 1 === Number(sessionHistory.page) ? " active" : ""}" data-session-history-page="${index + 1}" aria-current="${index + 1 === Number(sessionHistory.page) ? "page" : "false"}">${index + 1}</button>`).join("")}</nav>` : "";
-      query("#console-session-history").innerHTML = `${historyItems.length ? sessionTable(historyItems) : `<p class="hint">${uiText("Nenhuma sessão no histórico.")}</p>`}${pagination}${sessionHistory.truncated ? `<p class="hint">${uiText("Exibindo as 10 páginas mais recentes.")}</p>` : ""}`;
+      query("#console-session-history").innerHTML = `${historyItems.length ? sessionTable(historyItems) : `<p class="hint">${uiText("Nenhuma sessão no histórico.")}</p>`}${pagination}${sessionHistory.truncated ? `<p class="hint">${uiText("Exibindo as 10 páginas mais recentes, com 5 sessões por página.")}</p>` : ""}`;
       queryAll("[data-session-tab]").forEach(button => { const selected = button.dataset.sessionTab === sessionTab; button.classList.toggle("active", selected); button.setAttribute("aria-selected", String(selected)); });
       query("#console-active-sessions").classList.toggle("hidden", sessionTab !== "active");
       query("#console-session-history").classList.toggle("hidden", sessionTab !== "history");
