@@ -355,6 +355,8 @@ def test_update_revisions_use_aligned_monospace_hashes():
     assert "justify-self:start;width:fit-content;padding:.05rem .25rem" in page
     assert ".console-update-revision{display:inline-flex" in page
     assert "padding:0!important" in page
+    assert "#console-update-status .console-update-revision{align-self:baseline" in page
+    assert "font-family:ui-monospace" in page
     assert "font-family:ui-monospace" in page
     assert "font-variant-ligatures:none" in page
 
