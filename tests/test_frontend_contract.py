@@ -464,11 +464,16 @@ def test_console_uses_an_on_off_switch_for_user_activation():
 def test_console_application_logs_support_periods_and_download():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "scripts/bootstrap.sh").read_text(encoding="utf-8")
+    runtime = (ROOT / "scripts/start-runtime.sh").read_text(encoding="utf-8")
     assert "console-application-logs-section" in script
     for label in ("1 hora", "6 horas", "12 horas", "1 dia", "Customizado"):
         assert label in script
     assert "/api/admin/application-logs/download" in script
     assert "raijinLoadApplicationLogs" in page
+    assert 'application_log_control_root=/var/lib/s3-oci-migration/application-log-control' in bootstrap
+    assert '"$application_log_control_root"' in bootstrap
+    assert 'install -d -m 0750 "$application_log_control_root"' in runtime
 
 
 def test_console_disables_dynamic_migration_mutations_for_viewers():

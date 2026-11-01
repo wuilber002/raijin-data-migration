@@ -18,6 +18,11 @@ runtime_component="${RAIJIN_RUNTIME_COMPONENT:-full}"
   exit 2
 }
 
+# The log collector and console exchange only bounded request/result files in
+# this root. Ensure a release that introduces the mount can start on an
+# existing host before the collector timer has had a chance to create it.
+install -d -m 0750 "$application_log_control_root"
+
 # The web console is loopback-only by default. Operators can persist a
 # different host interface/port in /etc/s3-oci-migration/web-bind.env.
 # See scripts/web-bind.sh for validation and supported values.

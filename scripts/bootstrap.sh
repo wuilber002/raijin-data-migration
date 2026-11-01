@@ -6,6 +6,7 @@ data_root=/var/lib/s3-oci-migration
 secret_root=/etc/s3-oci-migration/secrets
 runtime_root=/run/s3-oci-migration
 mode_control_root=/var/lib/s3-oci-migration/mode-control
+application_log_control_root=/var/lib/s3-oci-migration/application-log-control
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 deployment_profile_file=/etc/s3-oci-migration/deployment-profile
 web_bind_config=/etc/s3-oci-migration/web-bind.env
@@ -150,9 +151,10 @@ fi
 
 web_bind_control_root="$data_root/web-bind-control"
 update_control_root="$data_root/update-control"
-mkdir -p "$data_root/postgres" "$secret_root" "$runtime_root" "$mode_control_root" "$web_bind_control_root" "$update_control_root"
+mkdir -p "$data_root/postgres" "$secret_root" "$runtime_root" "$mode_control_root" "$web_bind_control_root" "$update_control_root" "$application_log_control_root"
 chmod 0750 "$web_bind_control_root"
 chmod 0750 "$update_control_root"
+chmod 0750 "$application_log_control_root"
 chmod 700 "$secret_root"
 # The web service is loopback-only. SSH is the sole administrative entrypoint,
 # and it accepts only the public key provisioned by Terraform/cloud-init.
