@@ -246,6 +246,7 @@
     userMenuTrigger.addEventListener("click", event => {
       event.stopPropagation();
       const willOpen = userMenuPanel.classList.contains("hidden");
+      if (willOpen) window.closeRaijinMenus?.(userMenuPanel);
       userMenuPanel.classList.toggle("hidden", !willOpen);
       userMenuTrigger.setAttribute("aria-expanded", String(willOpen));
     });

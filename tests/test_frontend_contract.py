@@ -95,6 +95,18 @@ def test_i18next_uses_versioned_local_catalogs_with_a_portuguese_fallback():
     assert (ROOT / "app/static/locales/en-US.json").exists()
 
 
+def test_opening_one_banner_menu_closes_the_other_banner_menus():
+    i18n = (ROOT / "app/static/i18n.js").read_text(encoding="utf-8")
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    console = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert "window.closeRaijinMenus" in i18n
+    assert "#language-menu-options" in i18n
+    assert "#settings-menu-options" in i18n
+    assert ".console-user-menu-panel" in i18n
+    assert "window.closeRaijinMenus?.(menu)" in page
+    assert "window.closeRaijinMenus?.(userMenuPanel)" in console
+
+
 def test_i18next_catalogs_have_portuguese_fallbacks_for_every_english_message():
     import json
 

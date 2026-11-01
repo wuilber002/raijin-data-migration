@@ -53,6 +53,18 @@
     trigger.setAttribute('aria-label', english ? 'Interface language: English (US)' : 'Idioma da interface: Português (Brasil)');
     document.querySelectorAll('#language-menu-options [data-language]').forEach(option => option.setAttribute('aria-checked', String(option.dataset.language === language)));
   };
+  window.closeRaijinMenus = except => {
+    [
+      ['#language-menu-options', '#language-trigger'],
+      ['#settings-menu-options', '#settings-menu-trigger'],
+      ['.console-user-menu-panel', '.console-user-menu-trigger'],
+    ].forEach(([menuSelector, triggerSelector]) => {
+      const menu = document.querySelector(menuSelector);
+      if (!menu || menu === except) return;
+      menu.classList.add('hidden');
+      document.querySelector(triggerSelector)?.setAttribute('aria-expanded', 'false');
+    });
+  };
   const applyLanguage = () => {
     translating = true;
     document.documentElement.lang = language === 'en' ? 'en-US' : 'pt-BR';
@@ -91,7 +103,7 @@
   window.t = (key, values) => window.i18next?.t(key, values) || key;
   window.uiText = text => language === 'en' ? translate(text) : text;
   window.setLanguage = async value => { language = value === 'en' ? 'en' : 'pt'; localStorage.setItem(STORAGE_KEY, language); await window.raijinI18nReady; await window.i18next.changeLanguage(localeFor(language)); applyLanguage(); document.querySelector('#language-menu-options')?.classList.add('hidden'); document.querySelector('#language-trigger')?.setAttribute('aria-expanded', 'false'); document.dispatchEvent(new CustomEvent('raijin:language-changed')); };
-  window.toggleLanguageMenu = event => { event?.stopPropagation(); const menu = document.querySelector('#language-menu-options'), trigger = document.querySelector('#language-trigger'); if (!menu || !trigger) return; const open = menu.classList.toggle('hidden'); trigger.setAttribute('aria-expanded', String(!open)); };
+  window.toggleLanguageMenu = event => { event?.stopPropagation(); const menu = document.querySelector('#language-menu-options'), trigger = document.querySelector('#language-trigger'); if (!menu || !trigger) return; const open = menu.classList.contains('hidden'); if (open) window.closeRaijinMenus(menu); menu.classList.toggle('hidden', !open); trigger.setAttribute('aria-expanded', String(open)); };
   window.addEventListener('DOMContentLoaded', () => {
     applyLanguage();
     document.addEventListener('click', event => { if (!event.target.closest('.language-menu')) { document.querySelector('#language-menu-options')?.classList.add('hidden'); document.querySelector('#language-trigger')?.setAttribute('aria-expanded', 'false'); } });
