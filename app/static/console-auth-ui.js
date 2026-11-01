@@ -475,12 +475,7 @@
       </div>
       </section>
       <section class="card" id="console-users-section"><h2 data-console-i18n="Gerenciamento de usuários"></h2>
-      <form id="console-create-user" class="row">
-        <label class="field"><span data-console-i18n="Usuário"></span><input name="username" pattern="(?:[a-z][a-z0-9_.-]{2,63}|[a-z0-9][a-z0-9._+-]{0,63}@[a-z0-9-]+(?:\.[a-z0-9-]+)+)" required></label>
-        <label class="field"><span data-console-i18n="Senha temporária"></span><input name="password" type="password" minlength="14" required></label>
-        <label class="field"><span data-console-i18n="Papel"></span><select name="role"><option>VIEWER</option><option>OPERATOR</option><option>ADMIN</option></select></label>
-        <button data-console-i18n="Criar usuário"></button>
-      </form>
+      <p><button type="button" id="console-open-create-user" data-console-i18n="Adicionar usuário"></button></p>
       <div id="console-users" class="report-content" data-console-i18n="Carregando usuários…"></div>
       <hr class="console-section-divider">
       <h3 data-console-i18n="Sessões"></h3><div class="console-session-tabs"><div class="console-session-tab-controls" role="tablist" aria-label="Sessões"><button type="button" class="secondary active" data-session-tab="active" role="tab" aria-selected="true">Ativas</button><button type="button" class="secondary" data-session-tab="history" role="tab" aria-selected="false">Histórico</button></div><div id="console-session-pagination"></div></div><div id="console-active-sessions" class="console-session-list report-content" data-console-i18n="Carregando sessões…"></div><div id="console-session-history" class="console-session-list report-content hidden"></div>
@@ -518,6 +513,32 @@
     updateCommitsModal.innerHTML = `<div class="modal-panel console-update-commits-panel"><div class="modal-header"><h2 id="console-update-commits-title" data-console-i18n="Commits desta atualização"></h2><button type="button" class="secondary" data-close-update-commits data-console-i18n="Fechar"></button></div><p class="hint" id="console-update-commits-range"></p><ol id="console-update-commits-list" class="console-update-commits-list"></ol><p class="hint hidden" id="console-update-commits-truncated"></p></div>`;
     document.body.append(updateCommitsModal);
     applyAuthTranslations(updateCommitsModal);
+    const createUserModal = document.createElement("section");
+    createUserModal.id = "console-create-user-modal";
+    createUserModal.className = "modal hidden";
+    createUserModal.setAttribute("role", "dialog");
+    createUserModal.setAttribute("aria-modal", "true");
+    createUserModal.setAttribute("aria-labelledby", "console-create-user-title");
+    createUserModal.innerHTML = `<div class="modal-panel console-profile-panel"><div class="modal-header"><h2 id="console-create-user-title" data-console-i18n="Adicionar usuário"></h2><button type="button" class="secondary" data-close-create-user data-console-i18n="Fechar"></button></div><form id="console-create-user" class="grid settings-grid"><label class="field"><span data-console-i18n="Nome"></span><input name="first_name" autocomplete="given-name" maxlength="64" required></label><label class="field"><span data-console-i18n="Sobrenome"></span><input name="last_name" autocomplete="family-name" maxlength="64" required></label><label class="field"><span data-console-i18n="E-mail ou usuário"></span><input name="username" autocomplete="username" pattern="(?:[a-z][a-z0-9_.-]{2,63}|[a-z0-9][a-z0-9._+-]{0,63}@[a-z0-9-]+(?:\\.[a-z0-9-]+)+)" required></label><label class="field"><span data-console-i18n="Perfil de acesso"></span><select name="role"><option>VIEWER</option><option>OPERATOR</option><option>ADMIN</option></select></label><div class="field action"><span class="field-label" data-console-i18n="A senha temporária será gerada pela plataforma e exibida uma única vez."></span><button data-console-i18n="Adicionar usuário"></button></div></form><div id="console-create-user-result" class="hidden"></div></div>`;
+    document.body.append(createUserModal);
+    applyAuthTranslations(createUserModal);
+    const resetCreateUserModal = () => {
+      createUserModal.querySelector("#console-create-user").reset();
+      const result = createUserModal.querySelector("#console-create-user-result");
+      result.replaceChildren(); result.classList.add("hidden");
+      createUserModal.querySelector("#console-create-user").classList.remove("hidden");
+    };
+    const closeCreateUserModal = () => {
+      resetCreateUserModal();
+      if (window.closeModal) window.closeModal("#console-create-user-modal");
+      else createUserModal.classList.add("hidden");
+    };
+    card.querySelector("#console-open-create-user").addEventListener("click", () => {
+      resetCreateUserModal();
+      if (window.openModal) window.openModal("#console-create-user-modal");
+      else createUserModal.classList.remove("hidden");
+    });
+    createUserModal.querySelector("[data-close-create-user]").addEventListener("click", closeCreateUserModal);
 
     const auditQuery = () => {
       const form = query("#console-audit-filter");
@@ -819,10 +840,15 @@
         await apiCall(`/api/admin/users/${button.dataset.resetMfa}/mfa/reset`, {method:"POST"}); await render();
       }));
     };
-    query("#console-create-user").addEventListener("submit", async event => {
+    createUserModal.querySelector("#console-create-user").addEventListener("submit", async event => {
       event.preventDefault(); const form = event.currentTarget;
-      await apiCall("/api/admin/users", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({username:form.username.value, password:form.password.value, role:form.role.value})});
-      form.reset(); await render();
+      const result = createUserModal.querySelector("#console-create-user-result");
+      const created = await apiCall("/api/admin/users", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({first_name:form.first_name.value, last_name:form.last_name.value, username:form.username.value, role:form.role.value})});
+      form.classList.add("hidden");
+      result.innerHTML = `<p class="ok"><strong>${escapeHtml(uiText("Usuário adicionado."))}</strong></p><p>${escapeHtml(uiText("Senha temporária — entregue-a ao usuário de forma segura; ela será exibida somente agora."))}</p><code class="console-temporary-password">${escapeHtml(created.temporary_password || "—")}</code><p><button type="button" class="secondary" data-close-created-user>${escapeHtml(uiText("Fechar"))}</button></p>`;
+      result.classList.remove("hidden");
+      result.querySelector("[data-close-created-user]").addEventListener("click", closeCreateUserModal);
+      await render();
     });
     query("#console-auth-policy").addEventListener("submit", async event => {
       event.preventDefault(); const form = event.currentTarget;

@@ -440,6 +440,15 @@ def test_console_limits_sessions_to_five_rows_and_keeps_revoke_compact():
     assert "historyPages = Math.min(10" in script
 
 
+def test_console_creates_users_in_a_dedicated_modal_with_identity_fields():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert 'id="console-open-create-user"' in script
+    assert 'createUserModal.id = "console-create-user-modal"' in script
+    for field in ("first_name", "last_name", "username", "role"):
+        assert f'name="{field}"' in script
+    assert "temporary_password" in script
+
+
 def test_console_disables_dynamic_migration_mutations_for_viewers():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert "migrationMutationIds" in script

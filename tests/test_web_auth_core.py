@@ -52,6 +52,25 @@ def test_bootstrap_creates_exactly_one_argon_admin(tmp_path, monkeypatch):
         assert [event.event_type for event in events] == ["BOOTSTRAP_ADMIN_CREATED"]
 
 
+def test_admin_user_creation_records_identity_and_returns_one_time_password(tmp_path, monkeypatch):
+    database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'user-create.db'}")
+    monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))
+    main.Base.metadata.create_all(database)
+    with main.SessionLocal() as session:
+        admin = main.ConsoleUser(username="admin", password_hash=PasswordHasher().hash("a secure test password"),
+                                 role=ConsoleRole.ADMIN)
+        session.add(admin); session.flush()
+        request = SimpleNamespace(state=SimpleNamespace(console_principal={"id": admin.id}), client=None, headers={})
+        created = main.console_create_user(main.ConsoleUserCreate(
+            first_name="Ana", last_name="Silva", username="ana.silva@example.com", role=ConsoleRole.OPERATOR,
+        ), request, session)
+        user = session.scalar(select(main.ConsoleUser).where(main.ConsoleUser.username == "ana.silva@example.com"))
+        assert user.display_name == "Ana Silva"
+        assert user.email == "ana.silva@example.com"
+        assert user.must_change_password is True
+        assert PasswordHasher().verify(user.password_hash, created["temporary_password"])
+
+
 def test_roles_and_route_policy_are_server_side_and_deny_unknown_paths():
     assert main.auth_route_requirement("/api/sources", "GET") is ConsoleRole.VIEWER
     assert main.auth_route_requirement("/api/sources", "POST") is ConsoleRole.OPERATOR

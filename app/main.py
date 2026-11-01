@@ -1982,8 +1982,10 @@ class ConsoleProfileUpdate(BaseModel):
 
 
 class ConsoleUserCreate(BaseModel):
+    first_name: str = Field(min_length=1, max_length=64)
+    last_name: str = Field(min_length=1, max_length=64)
     username: str = Field(min_length=3, max_length=320)
-    password: str = Field(min_length=14, max_length=1024)
+    password: str | None = Field(default=None, min_length=14, max_length=1024)
     role: ConsoleRole = ConsoleRole.VIEWER
     must_change_password: bool = True
 
@@ -4895,18 +4897,33 @@ def console_update_web_bind(payload: ConsoleWebBindUpdate, request: FastAPIReque
 def console_create_user(payload: ConsoleUserCreate, request: FastAPIRequest,
                         session: Session = Depends(get_session)) -> dict:
     try:
-        username, password = normalize_username(payload.username), validate_password(payload.password)
+        username = normalize_username(payload.username)
+        first_name, last_name = payload.first_name.strip(), payload.last_name.strip()
+        if not first_name or not last_name:
+            raise ValueError("First and last name are required")
+        display_name, email = normalize_console_profile(
+            f"{first_name} {last_name}",
+            username if "@" in username else None,
+        )
+        generated_password = payload.password is None
+        password = validate_password(payload.password or secrets.token_urlsafe(24))
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     if session.scalar(select(ConsoleUser.id).where(ConsoleUser.username == username)):
         raise HTTPException(status_code=409, detail="Username already exists")
     user = ConsoleUser(username=username, password_hash=PasswordHasher().hash(password), role=payload.role,
+                       display_name=display_name, email=email,
                        must_change_password=payload.must_change_password)
     session.add(user); session.flush()
     auth_audit(session, "USER_CREATED", actor_user_id=console_principal(request)["id"], target=username,
                request=request, detail={"role": payload.role.value})
     session.commit()
-    return console_user_view(user)
+    response = console_user_view(user)
+    if generated_password:
+        # This credential is returned exactly once to the authenticated
+        # administrator and is never stored in an audit record or browser cache.
+        response["temporary_password"] = password
+    return response
 
 
 @app.patch("/api/admin/users/{user_id}")
