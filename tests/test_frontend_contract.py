@@ -124,6 +124,32 @@ def test_console_auth_menu_and_profile_use_the_shared_translation_catalog():
     assert 'data-console-i18n="Meu perfil"' in script
 
 
+def test_console_dynamic_texts_have_catalog_entries():
+    import json
+
+    import re
+
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    catalog = json.loads((ROOT / "app/static/locales/en-US.json").read_text(encoding="utf-8"))
+    phrases = set()
+    for pattern in (r'uiText\("([^"]+)"', r'data-console-i18n="([^"]+)"'):
+        phrases.update(re.findall(pattern, script))
+    assert not {phrase for phrase in phrases if phrase not in catalog}
+
+
+def test_settings_menu_texts_have_catalog_entries():
+    import json
+
+    catalog = json.loads((ROOT / "app/static/locales/en-US.json").read_text(encoding="utf-8"))
+    for phrase in (
+        "Usuários", "Gerenciamento e sessões", "Auditoria", "Auditoria recente de autenticação",
+        "Operacional", "Configuração operacional", "Geral", "Acesso e endpoint da console",
+        "AWS", "Conexões e prontidão", "OCI", "Inventário de buckets OCI",
+        "Atualização", "Atualizações da plataforma", "Logs", "Visualizar e baixar logs",
+    ):
+        assert phrase in catalog
+
+
 def test_console_audit_labels_the_target_user_for_user_created_events():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert 'row.event_type === "USER_CREATED" && row.target' in script
