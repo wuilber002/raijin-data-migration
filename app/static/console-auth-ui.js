@@ -424,7 +424,7 @@
       // controls. Do not make an OPERATOR/VIEWER discover administrative
       // integration blocks that the server must correctly deny anyway.
       document.querySelector('[data-view="settings"]')?.classList.add("hidden");
-      document.querySelector('.gear[data-required-role="ADMIN"]')?.classList.add("hidden");
+      document.querySelector('.settings-menu[data-required-role="ADMIN"]')?.classList.add("hidden");
       if (document.getElementById("view-settings")?.classList.contains("active")) {
         window.showView?.(identity.user.role === "VIEWER" ? "queue" : "dashboard");
       }
@@ -445,7 +445,7 @@
     const card = document.createElement("section");
     card.className = "card"; card.id = "console-access-management";
     card.innerHTML = `
-      <h2 data-console-i18n="Acesso ao console"></h2>
+      <h2 id="console-general-section" data-console-i18n="Acesso ao console"></h2>
       <p class="hint" data-console-i18n="Usuários locais, sessões ativas no navegador e evidências de auditoria de autenticação."></p>
       <form id="console-auth-policy" class="row">
         <label class="field"><span data-console-i18n="Histórico de reutilização de senha"></span><input name="password_history_count" type="number" min="0" max="12" required></label>
@@ -464,7 +464,7 @@
       </form>
       <p class="hint" id="console-web-bind-status"></p>
       <hr class="console-section-divider">
-      <h3 data-console-i18n="Atualizações da plataforma"></h3>
+      <h3 id="console-update-section" data-console-i18n="Atualizações da plataforma"></h3>
       <p class="hint" data-console-i18n="Consulta uma revisão aprovada no GitHub. A instalação exige fila completamente drenada, backup e validação local de saúde."></p>
       <div class="console-update-layout">
         <div class="console-update-summary">
@@ -474,7 +474,7 @@
         <div id="console-update-impact-slot"></div>
       </div>
       <hr class="console-section-divider">
-      <h3 data-console-i18n="Gerenciamento de usuários"></h3>
+      <h3 id="console-users-section" data-console-i18n="Gerenciamento de usuários"></h3>
       <form id="console-create-user" class="row">
         <label class="field"><span data-console-i18n="Usuário"></span><input name="username" pattern="(?:[a-z][a-z0-9_.-]{2,63}|[a-z0-9][a-z0-9._+-]{0,63}@[a-z0-9-]+(?:\.[a-z0-9-]+)+)" required></label>
         <label class="field"><span data-console-i18n="Senha temporária"></span><input name="password" type="password" minlength="14" required></label>
@@ -484,7 +484,7 @@
       <div id="console-users" class="report-content" data-console-i18n="Carregando usuários…"></div>
       <hr class="console-section-divider">
       <h3 data-console-i18n="Sessões"></h3><div id="console-sessions" class="report-content" data-console-i18n="Carregando sessões…"></div>
-      <h3 data-console-i18n="Auditoria recente de autenticação"></h3>
+      <h3 id="console-audit-section" data-console-i18n="Auditoria recente de autenticação"></h3>
       <form id="console-audit-filter" class="row">
         <label class="field"><span data-console-i18n="Responsável"></span><input name="actor" pattern="[a-z][a-z0-9_.-]{2,63}"></label>
         <label class="field"><span data-console-i18n="Evento"></span><input name="event_type" placeholder="LOGIN_SUCCEEDED"></label>

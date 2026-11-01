@@ -371,10 +371,27 @@ def test_dashboard_versions_the_injected_console_auth_asset_to_avoid_stale_ui():
 def test_console_hides_admin_settings_navigation_for_non_admin_roles():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
-    assert 'class="gear secondary" data-required-role="ADMIN" data-hide-when-denied' in page
+    assert 'class="settings-menu" data-required-role="ADMIN" data-hide-when-denied' in page
     assert 'id="activity-auto-refresh" data-required-role="ADMIN"' in page
     assert "applyRoleControls(identity.user.role)" in script
-    assert "gear[data-required-role=\"ADMIN\"]" in script
+    assert "settings-menu[data-required-role=\"ADMIN\"]" in script
+
+
+def test_admin_settings_menu_navigates_to_each_existing_settings_section():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    for section in (
+        "console-users-section", "console-audit-section", "settings-operational",
+        "console-general-section", "settings-aws", "settings-oci", "console-update-section",
+    ):
+        assert f"openSettingsSection('{section}')" in page
+    assert "function toggleSettingsMenu" in page
+    assert "function openSettingsSection(sectionId)" in page
+    assert "scrollIntoView({top:0,behavior:'smooth',block:'start'})" in page
+    assert 'id="console-users-section"' in script
+    assert 'id="console-audit-section"' in script
+    assert 'id="console-general-section"' in script
+    assert 'id="console-update-section"' in script
 
 
 def test_console_navigation_visibility_matches_viewer_operator_and_admin_roles():
@@ -1424,7 +1441,7 @@ def test_simulation_mode_keeps_the_regular_console_and_exposes_a_red_admin_page(
     assert 'href="/?view=dashboard">Status</a>' in simulation
     assert 'href="/?view=queue">Queue</a>' in simulation
     assert 'href="/?view=migrations">Migrations</a>' in simulation
-    assert page.index('id="simulation-nav"') < page.index('class="gear secondary"')
+    assert page.index('id="simulation-nav"') < page.index('class="settings-menu"')
     assert simulation.index('class="simulation-active"') < simulation.index('class="gear"')
     assert ".simulation-nav{background:transparent!important" in page
     assert ".simulation-active{background:#b91c1c" in simulation
