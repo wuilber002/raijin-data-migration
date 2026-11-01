@@ -429,6 +429,7 @@ def test_console_limits_sessions_to_five_rows_and_keeps_revoke_compact():
     assert ".console-session-list,#console-auth-audit{max-height:30.25rem;overflow:auto}" in page
     assert ".console-session-list button{box-sizing:border-box;min-height:1.7rem!important;height:1.7rem!important" in page
     assert ".console-session-tabs" in page
+    assert "#console-session-pagination{margin-left:auto}" in page
     assert "console-session-tab-controls" in script
     assert 'id="console-session-pagination"' in script
     assert 'query("#console-session-pagination").classList.toggle("hidden", sessionTab !== "history")' in script
