@@ -824,4 +824,21 @@
   "Geral": "General",
   "OCI": "OCI",
   "Queue": "Queue"
+  ,"O bootstrap da autenticação administrativa requer intervenção no host.": "Administrative authentication bootstrap requires host intervention."
+  ,"{{count}} origem(ns) está(ão) temporariamente bloqueada(s) por tentativas de login.": "{{count}} origin(s) are temporarily rate-limited after login attempts."
+  ,"{{count}} tentativa(s) de login negada(s) nos últimos {{minutes}} minutos.": "{{count}} denied login attempt(s) in the last {{minutes}} minutes."
+  ,"{{count}} tentativa(s) de acesso à console negada(s) nos últimos {{minutes}} minutos.": "{{count}} denied console access attempt(s) in the last {{minutes}} minutes."
+  ,"{{count}} sessão(ões) autenticada(s)": "{{count}} authenticated session(s)"
+  ,"Gerenciar": "Manage"
+  ,"Sessões autenticadas são visíveis somente para administradores. A contagem de heartbeat da console continua anônima.": "Authenticated sessions are visible only to administrators. The console heartbeat count remains anonymous."
+  ,"Logs da aplicação": "Application logs"
+  ,"1 hora": "1 hour"
+  ,"6 horas": "6 hours"
+  ,"12 horas": "12 hours"
+  ,"1 dia": "1 day"
+  ,"Customizado": "Custom"
+  ,"Download": "Download"
+  ,"Coletando logs no host...": "Collecting logs on the host..."
+  ,"Nenhum log coletado ainda.": "No logs have been collected yet."
+  ,"Informe início e fim do período.": "Provide the start and end of the period."
 }

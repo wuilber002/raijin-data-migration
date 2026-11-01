@@ -824,4 +824,21 @@
   "Geral": "Geral",
   "OCI": "OCI",
   "Queue": "Queue"
+  ,"O bootstrap da autenticação administrativa requer intervenção no host.": "O bootstrap da autenticação administrativa requer intervenção no host."
+  ,"{{count}} origem(ns) está(ão) temporariamente bloqueada(s) por tentativas de login.": "{{count}} origem(ns) está(ão) temporariamente bloqueada(s) por tentativas de login."
+  ,"{{count}} tentativa(s) de login negada(s) nos últimos {{minutes}} minutos.": "{{count}} tentativa(s) de login negada(s) nos últimos {{minutes}} minutos."
+  ,"{{count}} tentativa(s) de acesso à console negada(s) nos últimos {{minutes}} minutos.": "{{count}} tentativa(s) de acesso à console negada(s) nos últimos {{minutes}} minutos."
+  ,"{{count}} sessão(ões) autenticada(s)": "{{count}} sessão(ões) autenticada(s)"
+  ,"Gerenciar": "Gerenciar"
+  ,"Sessões autenticadas são visíveis somente para administradores. A contagem de heartbeat da console continua anônima.": "Sessões autenticadas são visíveis somente para administradores. A contagem de heartbeat da console continua anônima."
+  ,"Logs da aplicação": "Logs da aplicação"
+  ,"1 hora": "1 hora"
+  ,"6 horas": "6 horas"
+  ,"12 horas": "12 horas"
+  ,"1 dia": "1 dia"
+  ,"Customizado": "Customizado"
+  ,"Download": "Download"
+  ,"Coletando logs no host...": "Coletando logs no host..."
+  ,"Nenhum log coletado ainda.": "Nenhum log coletado ainda."
+  ,"Informe início e fim do período.": "Informe início e fim do período."
 }

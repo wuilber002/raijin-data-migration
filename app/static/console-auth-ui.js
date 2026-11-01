@@ -63,20 +63,11 @@
       baseRenderTopAlerts([...operationalAlerts, ...securityAlerts]);
     };
     const message = (data, key) => {
-      const en = window.raijinLocale?.() === "en-US";
       const minutes = Math.max(1, Math.round(Number(data.window_seconds || 0) / 60));
-      if (key === "bootstrap") return en
-        ? "Administrative authentication bootstrap requires host intervention."
-        : "O bootstrap da autenticação administrativa requer intervenção no host.";
-      if (key === "lockout") return en
-        ? `${data.active_lockouts} origin(s) are temporarily rate-limited after login attempts.`
-        : `${data.active_lockouts} origem(ns) está(ão) temporariamente bloqueada(s) por tentativas de login.`;
-      if (key === "login") return en
-        ? `${data.failed_logins} denied login attempt(s) in the last ${minutes} minutes.`
-        : `${data.failed_logins} tentativa(s) de login negada(s) nos últimos ${minutes} minutos.`;
-      return en
-        ? `${data.authorization_denied} denied console access attempt(s) in the last ${minutes} minutes.`
-        : `${data.authorization_denied} tentativa(s) de acesso à console negada(s) nos últimos ${minutes} minutos.`;
+      if (key === "bootstrap") return uiText("O bootstrap da autenticação administrativa requer intervenção no host.");
+      if (key === "lockout") return uiText("{{count}} origem(ns) está(ão) temporariamente bloqueada(s) por tentativas de login.", {count:data.active_lockouts});
+      if (key === "login") return uiText("{{count}} tentativa(s) de login negada(s) nos últimos {{minutes}} minutos.", {count:data.failed_logins, minutes});
+      return uiText("{{count}} tentativa(s) de acesso à console negada(s) nos últimos {{minutes}} minutos.", {count:data.authorization_denied, minutes});
     };
     const refreshSecurityAlerts = async () => {
       try {
@@ -156,13 +147,12 @@
       const card = document.querySelector("#health .platform-health-metric:nth-child(2)");
       const detail = card?.querySelector(".platform-health-secondary");
       if (!detail) return;
-      const en = window.raijinLocale?.() === "en-US";
-      const label = en ? `${sessions.length} authenticated session(s)` : `${sessions.length} sessão(ões) autenticada(s)`;
+      const label = uiText("{{count}} sessão(ões) autenticada(s)", {count:sessions.length});
       detail.replaceChildren(document.createTextNode(`${label} · `));
       const link = document.createElement("button");
       link.type = "button";
       link.className = "console-active-sessions-link";
-      link.textContent = en ? "Manage" : "Gerenciar";
+      link.textContent = uiText("Gerenciar");
       link.addEventListener("click", async () => {
         await refreshActiveSessions();
         renderModal();
@@ -170,9 +160,7 @@
         else modal.classList.remove("hidden");
       });
       detail.append(link);
-      detail.title = en
-        ? "Authenticated sessions are visible only to administrators. The console heartbeat count remains anonymous."
-        : "Sessões autenticadas são visíveis somente para administradores. A contagem de heartbeat da console continua anônima.";
+      detail.title = uiText("Sessões autenticadas são visíveis somente para administradores. A contagem de heartbeat da console continua anônima.");
     };
     const refreshActiveSessions = async () => {
       try { sessions = await apiCall("/api/admin/active-sessions"); decorateHealthCard(); }
@@ -474,7 +462,7 @@
         <div id="console-update-impact-slot"></div>
       </div>
       </section>
-      <section class="card" id="console-application-logs-section"><h2>Logs da aplicação</h2><p class="hint">Coleta logs da aplicação e dos workers no host para visualização ou download. O conteúdo é limitado a 4 MiB por solicitação.</p><div class="row"><label class="field"><span>Período</span><select id="console-log-period"><option value="1">1 hora</option><option value="6">6 horas</option><option value="12">12 horas</option><option value="24">1 dia</option><option value="custom">Customizado</option></select></label><label class="field console-log-custom hidden"><span>Início</span><input id="console-log-start" type="datetime-local"></label><label class="field console-log-custom hidden"><span>Fim</span><input id="console-log-end" type="datetime-local"></label><button type="button" id="console-log-collect">Visualizar logs</button><button type="button" class="secondary" id="console-log-download" disabled>Download</button></div><p id="console-log-status" class="hint"></p><pre id="console-log-content" class="console-log-content">Selecione um período e visualize os logs.</pre></section>
+      <section class="card" id="console-application-logs-section"><h2 data-console-i18n="Logs da aplicação"></h2><p class="hint" data-console-i18n="Coleta logs da aplicação e dos workers no host para visualização ou download. O conteúdo é limitado a 4 MiB por solicitação."></p><div class="row"><label class="field"><span data-console-i18n="Período"></span><select id="console-log-period"><option value="1" data-console-i18n="1 hora"></option><option value="6" data-console-i18n="6 horas"></option><option value="12" data-console-i18n="12 horas"></option><option value="24" data-console-i18n="1 dia"></option><option value="custom" data-console-i18n="Customizado"></option></select></label><label class="field console-log-custom hidden"><span data-console-i18n="Início"></span><input id="console-log-start" type="datetime-local"></label><label class="field console-log-custom hidden"><span data-console-i18n="Fim"></span><input id="console-log-end" type="datetime-local"></label><button type="button" id="console-log-collect" data-console-i18n="Visualizar logs"></button><button type="button" class="secondary" id="console-log-download" disabled data-console-i18n="Download"></button></div><p id="console-log-status" class="hint"></p><pre id="console-log-content" class="console-log-content" data-console-i18n="Selecione um período e visualize os logs."></pre></section>
       <section class="card" id="console-users-section"><h2 data-console-i18n="Gerenciamento de usuários"></h2>
       <p><button type="button" id="console-open-create-user" data-console-i18n="Adicionar usuário"></button></p>
       <div id="console-users" class="report-content" data-console-i18n="Carregando usuários…"></div>
@@ -498,7 +486,8 @@
     };
     const logMenuItem = document.createElement("button");
     logMenuItem.type = "button"; logMenuItem.setAttribute("role", "menuitem");
-    logMenuItem.innerHTML = '<span class="settings-menu-icon">▤</span><strong>Logs</strong><small>Visualizar e baixar logs</small>';
+    logMenuItem.innerHTML = '<span class="settings-menu-icon">▤</span><strong data-console-i18n="Logs"></strong><small data-console-i18n="Visualizar e baixar logs"></small>';
+    applyAuthTranslations(logMenuItem);
     logMenuItem.addEventListener("click", () => window.openSettingsSection?.("console-application-logs-section"));
     document.querySelector("#settings-menu-options button[onclick*=\"settings-oci\"]")?.after(logMenuItem);
     const updateModal = document.createElement("section");
@@ -903,8 +892,8 @@
     };
     const loadApplicationLogs = async () => {
       const state = await apiCall("/api/admin/application-logs");
-      query("#console-log-status").textContent = state.pending ? "Coletando logs no host..." : (state.message || "");
-      query("#console-log-content").textContent = state.content || "Nenhum log coletado ainda.";
+      query("#console-log-status").textContent = state.pending ? uiText("Coletando logs no host...") : (state.message || "");
+      query("#console-log-content").textContent = state.content || uiText("Nenhum log coletado ainda.");
       query("#console-log-download").disabled = !state.available || state.pending;
       return state;
     };
@@ -914,7 +903,7 @@
       const period = query("#console-log-period").value;
       const end = period === "custom" ? new Date(query("#console-log-end").value) : new Date();
       const start = period === "custom" ? new Date(query("#console-log-start").value) : new Date(end.getTime() - Number(period) * 3600_000);
-      if (Number.isNaN(start.valueOf()) || Number.isNaN(end.valueOf())) { query("#console-log-status").textContent = "Informe início e fim do período."; return; }
+      if (Number.isNaN(start.valueOf()) || Number.isNaN(end.valueOf())) { query("#console-log-status").textContent = uiText("Informe início e fim do período."); return; }
       query("#console-log-collect").disabled = true;
       try { await apiCall("/api/admin/application-logs", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({start_at:start.toISOString(), end_at:end.toISOString()})}); for (let attempt = 0; attempt < 30; attempt += 1) { await new Promise(resolve => window.setTimeout(resolve, 1000)); const state = await loadApplicationLogs(); if (!state.pending) break; } }
       catch (error) { query("#console-log-status").textContent = error.message; }

@@ -137,6 +137,24 @@ def test_console_dynamic_texts_have_catalog_entries():
     assert not {phrase for phrase in phrases if phrase not in catalog}
 
 
+def test_console_security_and_log_messages_use_catalog_entries():
+    import json
+
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    catalog = json.loads((ROOT / "app/static/locales/en-US.json").read_text(encoding="utf-8"))
+    for phrase in (
+        "O bootstrap da autenticação administrativa requer intervenção no host.",
+        "{{count}} origem(ns) está(ão) temporariamente bloqueada(s) por tentativas de login.",
+        "{{count}} tentativa(s) de login negada(s) nos últimos {{minutes}} minutos.",
+        "{{count}} tentativa(s) de acesso à console negada(s) nos últimos {{minutes}} minutos.",
+        "{{count}} sessão(ões) autenticada(s)",
+        "Sessões autenticadas são visíveis somente para administradores. A contagem de heartbeat da console continua anônima.",
+        "Coletando logs no host...", "Nenhum log coletado ainda.", "Informe início e fim do período.",
+    ):
+        assert phrase in script
+        assert phrase in catalog
+
+
 def test_settings_menu_texts_have_catalog_entries():
     import json
 
@@ -566,7 +584,8 @@ def test_auth_alerts_open_filtered_audit_and_admins_can_see_authenticated_sessio
     assert "Você não pode revogar a sessão atual." in script
     assert "data-current-session" not in script
     assert "console-active-sessions-link" in script
-    assert "authenticated sessions are visible only to administrators" in script.lower()
+    catalog = (ROOT / "app/static/locales/en-US.json").read_text(encoding="utf-8")
+    assert "Authenticated sessions are visible only to administrators" in catalog
     assert "LOGIN_RATE_LIMITED" in script
     assert "observe(health, {childList:true});" in script
     assert "observe(health, {childList:true, subtree:true})" not in script
