@@ -524,6 +524,7 @@ def test_console_user_actions_use_a_password_confirmation_modal():
     assert 'console-user-actions' in script
     assert 'data-close-reset-password' not in script
     assert 'console-password-reset-panel' in script
+    assert '.console-password-reset-panel{width:min(312px,calc(100vw - 2rem))}' in page
     assert '.console-password-reset-panel form{grid-template-columns:1fr}' in page
 
 
