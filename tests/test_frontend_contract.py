@@ -1294,6 +1294,12 @@ def test_cost_estimation_is_configured_with_aws_settings():
     assert "costEstimationEnabled" in page
     assert "estimativa de custo está desabilitada" in page
     assert "wave-cost-action" in page
+
+
+def test_aws_settings_put_public_pricing_after_cost_estimation():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "sectionId==='settings-aws'" in page
+    assert "left.id==='global-pricing-settings'?1" in page
     assert "source-cost-action" in page
     assert page.count("button.textContent='💰 Custo'") == 2
     assert "button.textContent='💲'" not in page
