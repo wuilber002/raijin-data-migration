@@ -1995,6 +1995,8 @@ class ConsoleUserUpdate(BaseModel):
     enabled: bool | None = None
     password: str | None = Field(default=None, min_length=14, max_length=1024)
     must_change_password: bool | None = None
+    first_name: str | None = Field(default=None, min_length=1, max_length=64)
+    last_name: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class ConsoleApplicationLogRequest(BaseModel):
@@ -4170,6 +4172,7 @@ def set_console_cookies(response: Response, token: str, csrf: str) -> None:
 def console_user_view(user: ConsoleUser) -> dict:
     return {"id": user.id, "username": user.username, "role": user.role,
             "enabled": user.enabled, "must_change_password": user.must_change_password, "mfa_enabled": user.mfa_enabled,
+            "display_name": user.display_name, "email": user.email,
             "last_login_at": user.last_login_at, "created_at": user.created_at}
 
 
@@ -5015,6 +5018,16 @@ def console_update_user(user_id: int, payload: ConsoleUserUpdate, request: FastA
         user.enabled = payload.enabled; changed.append("enabled")
     if payload.must_change_password is not None:
         user.must_change_password = payload.must_change_password; changed.append("must_change_password")
+    if payload.first_name is not None or payload.last_name is not None:
+        if payload.first_name is None or payload.last_name is None:
+            raise HTTPException(status_code=422, detail="First and last name must be provided together")
+        try:
+            display_name, _ = normalize_console_profile(
+                f"{payload.first_name.strip()} {payload.last_name.strip()}", None)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        user.display_name = display_name
+        changed.append("display_name")
     if payload.password is not None:
         settings = session.get(ConsoleAuthSettings, 1)
         history_count = int(settings.password_history_count if settings else 3)
@@ -5029,8 +5042,9 @@ def console_update_user(user_id: int, payload: ConsoleUserUpdate, request: FastA
         user.must_change_password = True
         changed.append("password")
     if changed:
-        session.execute(update(ConsoleSession).where(ConsoleSession.user_id == user.id,
-            ConsoleSession.revoked_at.is_(None)).values(revoked_at=utcnow(), revoke_reason="admin_update"))
+        if any(field in changed for field in ("role", "enabled", "password", "must_change_password")):
+            session.execute(update(ConsoleSession).where(ConsoleSession.user_id == user.id,
+                ConsoleSession.revoked_at.is_(None)).values(revoked_at=utcnow(), revoke_reason="admin_update"))
         auth_audit(session, "USER_UPDATED", actor_user_id=actor["id"], target=user.username,
                    request=request, detail={"changed": sorted(changed)})
     session.commit()

@@ -71,6 +71,24 @@ def test_admin_user_creation_records_identity_and_returns_one_time_password(tmp_
         assert PasswordHasher().verify(user.password_hash, created["temporary_password"])
 
 
+def test_admin_can_edit_user_name_without_changing_login(tmp_path, monkeypatch):
+    database = create_engine(f"sqlite+pysqlite:///{tmp_path / 'user-edit.db'}")
+    monkeypatch.setattr(main, "SessionLocal", sessionmaker(bind=database, expire_on_commit=False))
+    main.Base.metadata.create_all(database)
+    with main.SessionLocal() as session:
+        admin = main.ConsoleUser(username="admin", password_hash=PasswordHasher().hash("a secure test password"),
+                                 role=ConsoleRole.ADMIN)
+        user = main.ConsoleUser(username="ana.silva@example.com", email="ana.silva@example.com",
+                                display_name="Ana Silva", password_hash=PasswordHasher().hash("another secure password"),
+                                role=ConsoleRole.VIEWER)
+        session.add_all((admin, user)); session.flush()
+        request = SimpleNamespace(state=SimpleNamespace(console_principal={"id": admin.id}), client=None, headers={})
+        changed = main.console_update_user(user.id, main.ConsoleUserUpdate(first_name="Ana", last_name="Souza"), request, session)
+        assert changed["username"] == "ana.silva@example.com"
+        assert changed["email"] == "ana.silva@example.com"
+        assert changed["display_name"] == "Ana Souza"
+
+
 def test_roles_and_route_policy_are_server_side_and_deny_unknown_paths():
     assert main.auth_route_requirement("/api/sources", "GET") is ConsoleRole.VIEWER
     assert main.auth_route_requirement("/api/sources", "POST") is ConsoleRole.OPERATOR

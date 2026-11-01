@@ -469,6 +469,14 @@ def test_console_user_actions_use_a_password_confirmation_modal():
     assert 'console-password-reset-panel' in script
 
 
+def test_console_user_edit_modal_keeps_login_read_only():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert 'id = "console-edit-user-modal"' in script
+    assert 'data-edit-user="${user.id}"' in script
+    assert 'name="username" autocomplete="username" readonly' in script
+    assert 'body:JSON.stringify({first_name:form.first_name.value, last_name:form.last_name.value})' in script
+
+
 def test_console_uses_an_on_off_switch_for_user_activation():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")

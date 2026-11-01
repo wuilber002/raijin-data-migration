@@ -563,6 +563,25 @@
       else resetPasswordModal.classList.add("hidden");
     };
     resetPasswordModal.querySelector("[data-cancel-reset-password]").addEventListener("click", closeResetPasswordModal);
+    const editUserModal = document.createElement("section");
+    editUserModal.id = "console-edit-user-modal";
+    editUserModal.className = "modal hidden";
+    editUserModal.setAttribute("role", "dialog");
+    editUserModal.setAttribute("aria-modal", "true");
+    editUserModal.setAttribute("aria-labelledby", "console-edit-user-title");
+    editUserModal.innerHTML = `<div class="modal-panel console-profile-panel console-edit-user-panel"><div class="modal-header"><h2 id="console-edit-user-title" data-console-i18n="Editar usuário"></h2><button type="button" class="secondary" data-close-edit-user data-console-i18n="Fechar"></button></div><form id="console-edit-user" class="grid settings-grid"><label class="field"><span data-console-i18n="Nome"></span><input name="first_name" autocomplete="given-name" maxlength="64" required></label><label class="field"><span data-console-i18n="Sobrenome"></span><input name="last_name" autocomplete="family-name" maxlength="64" required></label><label class="field console-edit-user-login"><span data-console-i18n="E-mail ou usuário"></span><input name="username" autocomplete="username" readonly></label><div class="modal-actions console-edit-user-actions"><button type="button" class="secondary" data-cancel-edit-user data-console-i18n="Cancelar"></button><button type="submit" data-console-i18n="Salvar"></button></div></form><p id="console-edit-user-status" class="status" role="status"></p></div>`;
+    document.body.append(editUserModal);
+    applyAuthTranslations(editUserModal);
+    let editedUser = null;
+    const closeEditUserModal = () => {
+      editedUser = null;
+      editUserModal.querySelector("#console-edit-user").reset();
+      editUserModal.querySelector("#console-edit-user-status").textContent = "";
+      if (window.closeModal) window.closeModal("#console-edit-user-modal");
+      else editUserModal.classList.add("hidden");
+    };
+    editUserModal.querySelector("[data-close-edit-user]").addEventListener("click", closeEditUserModal);
+    editUserModal.querySelector("[data-cancel-edit-user]").addEventListener("click", closeEditUserModal);
 
     const auditQuery = () => {
       const form = query("#console-audit-filter");
@@ -818,7 +837,7 @@
       if (updatePending || ["BACKING_UP", "DEPLOYING", "VERIFYING", "ROLLING_BACK"].includes(updateState.state)) {
         updateRefreshTimer = window.setTimeout(() => render().catch(() => {}), 3000);
       }
-      query("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Ativa")}</th><th>${uiText("Usuário")}</th><th>MFA</th><th>${uiText("Papel")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => { const isCurrentUser = user.id === identity.user.id; const deleteControl = isCurrentUser ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode excluir sua própria conta."))}">${uiText("Excluir")}</button>` : `<button type="button" class="danger" data-delete-user="${user.id}">${uiText("Excluir")}</button>`; const enabledLabel = user.enabled ? uiText("Conta ativa") : uiText("Conta desativada"); return `<tr data-user="${user.id}"><td><label class="console-user-enabled-switch" title="${escapeHtml(enabledLabel)}"><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(enabledLabel)}"><span aria-hidden="true"></span></label></td><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td>${user.mfa_enabled ? `<button type="button" class="secondary" data-reset-mfa="${user.id}">${uiText("Redefinir MFA")}</button>` : uiText("Não configurado")}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><div class="console-user-actions"><button type="button" class="secondary" data-reset-user-password="${user.id}" data-reset-user-username="${escapeHtml(user.username)}">${uiText("Trocar senha")}</button>${deleteControl}<button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button></div></td></tr>`; }).join("")}</tbody></table>`;
+      query("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Ativa")}</th><th>${uiText("Usuário")}</th><th>MFA</th><th>${uiText("Papel")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => { const isCurrentUser = user.id === identity.user.id; const deleteControl = isCurrentUser ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode excluir sua própria conta."))}">${uiText("Excluir")}</button>` : `<button type="button" class="danger" data-delete-user="${user.id}">${uiText("Excluir")}</button>`; const enabledLabel = user.enabled ? uiText("Conta ativa") : uiText("Conta desativada"); return `<tr data-user="${user.id}"><td><label class="console-user-enabled-switch" title="${escapeHtml(enabledLabel)}"><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(enabledLabel)}"><span aria-hidden="true"></span></label></td><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td>${user.mfa_enabled ? `<button type="button" class="secondary" data-reset-mfa="${user.id}">${uiText("Redefinir MFA")}</button>` : uiText("Não configurado")}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><div class="console-user-actions"><button type="button" class="secondary" data-edit-user="${user.id}">${uiText("Editar")}</button><button type="button" class="secondary" data-reset-user-password="${user.id}" data-reset-user-username="${escapeHtml(user.username)}">${uiText("Trocar senha")}</button>${deleteControl}<button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button></div></td></tr>`; }).join("")}</tbody></table>`;
       const sessionTable = rows => `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${rows.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:row.is_current?`<button type="button" disabled title="${escapeHtml(uiText("Você não pode revogar a sessão atual."))}">${uiText("Revogar")}</button>`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
       query("#console-active-sessions").innerHTML = activeSessions.length ? sessionTable(activeSessions.slice(0, 5)) : `<p class="hint">${uiText("Nenhuma sessão ativa.")}</p>`;
       const historyItems = Array.isArray(sessionHistory.items) ? sessionHistory.items : [];
@@ -857,6 +876,19 @@
         if (window.openModal) window.openModal("#console-reset-user-password-modal");
         else resetPasswordModal.classList.remove("hidden");
         resetPasswordModal.querySelector('[name="password"]').focus();
+      }));
+      queryAll("[data-edit-user]").forEach(button => button.addEventListener("click", () => {
+        editedUser = users.find(user => Number(user.id) === Number(button.dataset.editUser));
+        if (!editedUser) return;
+        const name = String(editedUser.display_name || "").trim().split(/\s+/).filter(Boolean);
+        const form = editUserModal.querySelector("#console-edit-user");
+        form.first_name.value = name.shift() || "";
+        form.last_name.value = name.join(" ");
+        form.username.value = editedUser.email || editedUser.username;
+        editUserModal.querySelector("#console-edit-user-status").textContent = "";
+        if (window.openModal) window.openModal("#console-edit-user-modal");
+        else editUserModal.classList.remove("hidden");
+        form.first_name.focus();
       }));
       queryAll("[data-delete-user]").forEach(button => button.addEventListener("click", async () => {
         const row = button.closest("tr");
@@ -917,6 +949,22 @@
       try {
         await apiCall(`/api/admin/users/${resetPasswordUser.id}`, {method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify({password:form.password.value})});
         closeResetPasswordModal();
+        await render();
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = error.message;
+      } finally { submit.disabled = false; }
+    });
+    editUserModal.querySelector("#console-edit-user").addEventListener("submit", async event => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const status = editUserModal.querySelector("#console-edit-user-status");
+      if (!editedUser) return;
+      const submit = form.querySelector('[type="submit"]');
+      submit.disabled = true;
+      try {
+        await apiCall(`/api/admin/users/${editedUser.id}`, {method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify({first_name:form.first_name.value, last_name:form.last_name.value})});
+        closeEditUserModal();
         await render();
       } catch (error) {
         status.className = "status error";
