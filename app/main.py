@@ -1977,8 +1977,8 @@ class ConsolePasswordChange(BaseModel):
 
 
 class ConsoleProfileUpdate(BaseModel):
-    display_name: str | None = Field(default=None, max_length=128)
-    email: str | None = Field(default=None, max_length=320)
+    first_name: str | None = Field(default=None, min_length=1, max_length=64)
+    last_name: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class ConsoleUserCreate(BaseModel):
@@ -4196,8 +4196,11 @@ def normalize_console_profile(display_name: str | None, email: str | None) -> tu
 
 def console_profile_view(user: ConsoleUser, session: Session | None = None) -> dict:
     authenticators = console_mfa_authenticators(session, user.id) if session else []
+    name_parts = str(user.display_name or "").split(maxsplit=1)
     return {"username": user.username, "role": user.role, "display_name": user.display_name,
-            "email": user.email, "last_login_at": user.last_login_at, "mfa_enabled": user.mfa_enabled,
+            "email": user.email, "first_name": name_parts[0] if name_parts else "",
+            "last_name": name_parts[1] if len(name_parts) > 1 else "",
+            "last_login_at": user.last_login_at, "mfa_enabled": user.mfa_enabled,
             "mfa_authenticators": [{"id": item.id, "label": item.label, "created_at": item.created_at,
                                     "last_used_at": item.last_used_at} for item in authenticators]}
 
@@ -4529,13 +4532,16 @@ def console_update_profile(payload: ConsoleProfileUpdate, request: FastAPIReques
     user = session.get(ConsoleUser, console_principal(request)["id"])
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
+    if payload.first_name is None or payload.last_name is None:
+        raise HTTPException(status_code=422, detail="First name and last name are required")
     try:
-        display_name, email = normalize_console_profile(payload.display_name, payload.email)
+        display_name, _ = normalize_console_profile(
+            f"{payload.first_name.strip()} {payload.last_name.strip()}", None)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    user.display_name, user.email = display_name, email
+    user.display_name = display_name
     auth_audit(session, "PROFILE_UPDATED", actor_user_id=user.id, target=user.username,
-               request=request, detail={"fields": ["display_name", "email"]})
+               request=request, detail={"fields": ["display_name"]})
     session.commit()
     return console_profile_view(user, session)
 

@@ -350,6 +350,15 @@ def test_console_profile_normalization_is_safe_and_does_not_change_username():
         main.normalize_console_profile("Ana", "not-an-email")
 
 
+def test_profile_view_exposes_editable_name_parts_but_preserves_identity_fields():
+    user = main.ConsoleUser(username="ana@example.com", email="ana@example.com", display_name="Ana Silva")
+    profile = main.console_profile_view(user)
+    assert profile["first_name"] == "Ana"
+    assert profile["last_name"] == "Silva"
+    assert profile["username"] == "ana@example.com"
+    assert profile["email"] == "ana@example.com"
+
+
 def test_console_username_accepts_existing_aliases_and_corporate_email_logins():
     assert main.normalize_username("operator-hml") == "operator-hml"
     assert main.normalize_username("Igor.Nicoli@Oracle.Com") == "igor.nicoli@oracle.com"

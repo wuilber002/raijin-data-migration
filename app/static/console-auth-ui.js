@@ -268,9 +268,9 @@
         <div class="modal-header"><h2 id="console-profile-title" data-console-i18n="Meu perfil"></h2><button type="button" class="secondary" data-close-profile data-console-i18n="Fechar"></button></div>
         <p class="hint" data-console-i18n="Atualize somente seus próprios dados. O usuário é gerenciado pelo administrador."></p>
         <form id="console-profile-form" class="grid">
-          <label class="field"><span data-console-i18n="Usuário"></span><input name="username" disabled aria-describedby="console-profile-username-help"><small id="console-profile-username-help" class="hint" data-console-i18n="Este dado não pode ser alterado."></small></label>
-          <label class="field"><span data-console-i18n="Nome"></span><input name="display_name" maxlength="128" autocomplete="name"></label>
-          <label class="field"><span data-console-i18n="E-mail"></span><input name="email" type="email" maxlength="320" autocomplete="email"></label>
+          <label class="field"><span data-console-i18n="Nome"></span><input name="first_name" maxlength="64" autocomplete="given-name" required></label>
+          <label class="field"><span data-console-i18n="Sobrenome"></span><input name="last_name" maxlength="64" autocomplete="family-name" required></label>
+          <label class="field console-profile-login"><span data-console-i18n="E-mail ou usuário"></span><input name="username" disabled aria-disabled="true"></label>
           <div class="field action"><span class="field-label" data-console-i18n="Dados pessoais"></span><button data-console-i18n="Salvar perfil"></button></div>
         </form>
         <hr>
@@ -305,7 +305,8 @@
       profileMessage("");
       const data = await apiCall("/api/auth/profile");
       const form = profileModal.querySelector("#console-profile-form");
-      ["username", "display_name", "email"].forEach(field => { form.elements[field].value = data[field] || ""; });
+      ["username", "first_name", "last_name"].forEach(field => { form.elements[field].value = data[field] || ""; });
+      form.elements.username.value = data.email || data.username || "";
       profileModal.querySelector("#console-mfa-state").textContent = data.mfa_enabled ? uiText("Autenticador configurado.") : uiText("Nenhum autenticador configurado.");
       const authenticators = Array.isArray(data.mfa_authenticators) ? data.mfa_authenticators : [];
       const list = profileModal.querySelector("#console-mfa-authenticators");
@@ -350,7 +351,7 @@
     profileModal.querySelector("#console-profile-form").addEventListener("submit", async event => {
       event.preventDefault(); const form = event.currentTarget;
       try {
-        await apiCall("/api/auth/profile", {method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify({display_name:form.display_name.value, email:form.email.value})});
+        await apiCall("/api/auth/profile", {method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify({first_name:form.first_name.value, last_name:form.last_name.value})});
         profileMessage("Perfil atualizado.");
       } catch (error) { profileMessage(error.message); }
     });

@@ -134,6 +134,9 @@ def test_console_auth_menu_and_profile_use_the_shared_translation_catalog():
     assert "await window.raijinI18nReady" in script
     assert "applyAuthTranslations(profileModal)" in script
     assert 'data-console-i18n="Meu perfil"' in script
+    assert 'name="first_name"' in script
+    assert 'name="last_name"' in script
+    assert 'name="username" disabled aria-disabled="true"' in script
 
 
 def test_console_dynamic_texts_have_catalog_entries():
