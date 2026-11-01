@@ -5018,17 +5018,46 @@ def console_reset_user_mfa(user_id: int, request: FastAPIRequest,
 
 @app.get("/api/admin/sessions")
 def console_list_sessions(request: FastAPIRequest,
-                          session: Session = Depends(get_session)) -> list[dict]:
+                          session: Session = Depends(get_session),
+                          active_only: bool = Query(default=False)) -> list[dict]:
     current_user_id = console_principal(request)["id"]
     current_session_id = request.state.console_session_id
-    rows = session.execute(select(ConsoleSession, ConsoleUser.username).join(ConsoleUser).order_by(
-        ConsoleSession.issued_at.desc())).all()
+    statement = select(ConsoleSession, ConsoleUser.username).join(ConsoleUser)
+    if active_only:
+        now = utcnow()
+        statement = statement.where(ConsoleSession.revoked_at.is_(None),
+                                    ConsoleSession.idle_expires_at > now,
+                                    ConsoleSession.expires_at > now)
+    rows = session.execute(statement.order_by(ConsoleSession.issued_at.desc())).all()
     return [{"id": item.id, "user_id": item.user_id, "is_current_user": item.user_id == current_user_id,
              "is_current": item.id == current_session_id,
              "username": username, "issued_at": item.issued_at,
              "last_seen_at": item.last_seen_at, "expires_at": item.expires_at,
              "revoked_at": item.revoked_at, "revoke_reason": item.revoke_reason}
             for item, username in rows]
+
+
+@app.get("/api/admin/sessions/history")
+def console_session_history(request: FastAPIRequest,
+                            page: int = Query(default=1, ge=1, le=10),
+                            page_size: int = Query(default=10, ge=1, le=10),
+                            session: Session = Depends(get_session)) -> dict:
+    console_principal(request)
+    now = utcnow()
+    historical = or_(ConsoleSession.revoked_at.is_not(None),
+                     ConsoleSession.idle_expires_at <= now,
+                     ConsoleSession.expires_at <= now)
+    total = session.scalar(select(func.count(ConsoleSession.id)).where(historical)) or 0
+    total_pages = min(10, max(1, math.ceil(total / page_size)))
+    page = min(page, total_pages)
+    rows = session.execute(select(ConsoleSession, ConsoleUser.username).join(ConsoleUser).where(
+        historical).order_by(ConsoleSession.issued_at.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [{"id": item.id, "username": username, "issued_at": item.issued_at,
+                       "last_seen_at": item.last_seen_at, "expires_at": item.expires_at,
+                       "revoked_at": item.revoked_at, "revoke_reason": item.revoke_reason}
+                      for item, username in rows],
+            "page": page, "page_size": page_size, "total": total,
+            "total_pages": total_pages, "truncated": total > page_size * 10}
 
 
 @app.post("/api/admin/sessions/{session_id}/revoke")

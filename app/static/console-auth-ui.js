@@ -483,7 +483,7 @@
       </form>
       <div id="console-users" class="report-content" data-console-i18n="Carregando usuários…"></div>
       <hr class="console-section-divider">
-      <h3 data-console-i18n="Sessões"></h3><div id="console-sessions" class="report-content" data-console-i18n="Carregando sessões…"></div>
+      <h3 data-console-i18n="Sessões"></h3><div class="console-session-tabs" role="tablist" aria-label="Sessões"><button type="button" class="secondary active" data-session-tab="active" role="tab" aria-selected="true">Ativas</button><button type="button" class="secondary" data-session-tab="history" role="tab" aria-selected="false">Histórico</button></div><div id="console-active-sessions" class="console-session-list report-content" data-console-i18n="Carregando sessões…"></div><div id="console-session-history" class="console-session-list report-content hidden"></div>
       </section>
       <section class="card" id="console-audit-section"><h2 data-console-i18n="Auditoria recente de autenticação"></h2>
       <form id="console-audit-filter" class="row">
@@ -534,6 +534,8 @@
     let updateWorkflowLocked = false;
     let updateWorkflowSelective = false;
     let updateWorkflowPollTimer = null;
+    let sessionTab = "active";
+    let sessionHistoryPage = 1;
     const updateWorkflowContent = updateModal.querySelector("#console-update-workflow-content");
     const showUpdateCommits = () => {
       const impact = latestUpdateState?.impact || {};
@@ -710,8 +712,9 @@
       applyAuthTranslations(button);
     };
     const render = async () => {
-      const [users, sessions, audit, authSettings, webBind, bindAddresses, updateState] = await Promise.all([
-        apiCall("/api/admin/users"), apiCall("/api/admin/sessions"),
+      const [users, activeSessions, sessionHistory, audit, authSettings, webBind, bindAddresses, updateState] = await Promise.all([
+        apiCall("/api/admin/users"), apiCall("/api/admin/sessions?active_only=true"),
+        apiCall(`/api/admin/sessions/history?page=${sessionHistoryPage}&page_size=10`),
         apiCall(`/api/admin/auth-audit${auditQuery()}`),
         apiCall("/api/admin/auth-settings"), apiCall("/api/admin/web-bind"), apiCall("/api/admin/web-bind/addresses"), apiCall("/api/admin/updates"),
       ]);
@@ -771,10 +774,27 @@
         updateRefreshTimer = window.setTimeout(() => render().catch(() => {}), 3000);
       }
       query("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Ativo")}</th><th>MFA</th><th>${uiText("Redefinir senha")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => { const isCurrentUser = user.id === identity.user.id; const deleteControl = isCurrentUser ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode excluir sua própria conta."))}">${uiText("Excluir")}</button>` : `<button type="button" class="danger" data-delete-user="${user.id}">${uiText("Excluir")}</button>`; return `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(uiText("Ativar {{username}}", {username:user.username}))}"></td><td>${user.mfa_enabled ? `<button type="button" class="secondary" data-reset-mfa="${user.id}">${uiText("Redefinir MFA")}</button>` : uiText("Não configurado")}</td><td><input data-field="password" type="password" minlength="14" placeholder="${escapeHtml(uiText("Opcional"))}"></td><td><div class="row"><button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button>${deleteControl}</div></td></tr>`; }).join("")}</tbody></table>`;
-      query("#console-sessions").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.slice(0, 5).map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:row.is_current?`<button type="button" disabled title="${escapeHtml(uiText("Você não pode revogar a sessão atual."))}">${uiText("Revogar")}</button>`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
+      const sessionTable = rows => `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${rows.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:row.is_current?`<button type="button" disabled title="${escapeHtml(uiText("Você não pode revogar a sessão atual."))}">${uiText("Revogar")}</button>`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
+      query("#console-active-sessions").innerHTML = activeSessions.length ? sessionTable(activeSessions.slice(0, 5)) : `<p class="hint">${uiText("Nenhuma sessão ativa.")}</p>`;
+      const historyItems = Array.isArray(sessionHistory.items) ? sessionHistory.items : [];
+      const historyPages = Math.min(10, Number(sessionHistory.total_pages || 1));
+      const pagination = historyPages > 1 ? `<nav class="console-session-pagination" aria-label="Paginação do histórico">${Array.from({length:historyPages}, (_, index) => `<button type="button" class="secondary${index + 1 === Number(sessionHistory.page) ? " active" : ""}" data-session-history-page="${index + 1}" aria-current="${index + 1 === Number(sessionHistory.page) ? "page" : "false"}">${index + 1}</button>`).join("")}</nav>` : "";
+      query("#console-session-history").innerHTML = `${historyItems.length ? sessionTable(historyItems) : `<p class="hint">${uiText("Nenhuma sessão no histórico.")}</p>`}${pagination}${sessionHistory.truncated ? `<p class="hint">${uiText("Exibindo as 10 páginas mais recentes.")}</p>` : ""}`;
+      queryAll("[data-session-tab]").forEach(button => { const selected = button.dataset.sessionTab === sessionTab; button.classList.toggle("active", selected); button.setAttribute("aria-selected", String(selected)); });
+      query("#console-active-sessions").classList.toggle("hidden", sessionTab !== "active");
+      query("#console-session-history").classList.toggle("hidden", sessionTab !== "history");
       query("#console-auth-audit").innerHTML = `<table><thead><tr><th>${uiText("Data e hora")}</th><th>${uiText("Responsável")}</th><th>${uiText("Evento")}</th><th>${uiText("Resultado")}</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||uiText("sistema"))}</td><td>${escapeHtml(auditEventLabel(row))}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;
       queryAll("[data-session]").forEach(button => button.addEventListener("click", async () => {
         await apiCall(`/api/admin/sessions/${button.dataset.session}/revoke`, {method:"POST"}); await render();
+      }));
+      queryAll("[data-session-tab]").forEach(button => button.addEventListener("click", () => {
+        sessionTab = button.dataset.sessionTab === "history" ? "history" : "active";
+        queryAll("[data-session-tab]").forEach(item => { const selected = item === button; item.classList.toggle("active", selected); item.setAttribute("aria-selected", String(selected)); });
+        query("#console-active-sessions").classList.toggle("hidden", sessionTab !== "active");
+        query("#console-session-history").classList.toggle("hidden", sessionTab !== "history");
+      }));
+      queryAll("[data-session-history-page]").forEach(button => button.addEventListener("click", async () => {
+        sessionHistoryPage = Number(button.dataset.sessionHistoryPage) || 1; await render();
       }));
       queryAll("[data-save-user]").forEach(button => button.addEventListener("click", async () => {
         const row = button.closest("tr");

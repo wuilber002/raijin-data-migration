@@ -426,10 +426,13 @@ def test_console_navigation_visibility_matches_viewer_operator_and_admin_roles()
 def test_console_limits_sessions_to_five_rows_and_keeps_revoke_compact():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
-    assert "#console-sessions,#console-auth-audit{max-height:30.25rem;overflow:auto}" in page
-    assert "#console-sessions button{box-sizing:border-box;min-height:1.7rem!important;height:1.7rem!important" in page
-    assert "#console-sessions td:last-child{width:1%;white-space:nowrap}" in page
-    assert 'sessions.slice(0, 5).map(row =>' in script
+    assert ".console-session-list,#console-auth-audit{max-height:30.25rem;overflow:auto}" in page
+    assert ".console-session-list button{box-sizing:border-box;min-height:1.7rem!important;height:1.7rem!important" in page
+    assert ".console-session-tabs" in page
+    assert 'apiCall("/api/admin/sessions?active_only=true")' in script
+    assert 'apiCall(`/api/admin/sessions/history?page=${sessionHistoryPage}&page_size=10`)' in script
+    assert "sessions.slice(0, 5)" not in script
+    assert "historyPages = Math.min(10" in script
 
 
 def test_console_disables_dynamic_migration_mutations_for_viewers():
