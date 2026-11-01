@@ -363,6 +363,8 @@ def test_update_revisions_use_aligned_monospace_hashes():
     assert "font-variant-ligatures:none" in page
     assert ".settings-update-topic-modal .settings-topic-modal-panel{width:min(1220px,calc(100vw - 2rem))}" in page
     assert ".settings-update-topic-modal .console-update-layout{grid-template-columns:minmax(340px,1.08fr) minmax(340px,.92fr)}" in page
+    assert ".settings-topic-modal-panel{display:flex;flex-direction:column" in page
+    assert ".settings-topic-modal-content{display:grid;flex:1 1 auto;min-height:0;gap:1rem;overflow-x:hidden;overflow-y:auto" in page
     assert "modal.classList.toggle('settings-update-topic-modal',sectionId==='console-update-section')" in page
 
 
