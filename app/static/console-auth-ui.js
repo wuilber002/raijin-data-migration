@@ -545,6 +545,25 @@
       else createUserModal.classList.remove("hidden");
     });
     createUserModal.querySelector("[data-close-create-user]").addEventListener("click", closeCreateUserModal);
+    const resetPasswordModal = document.createElement("section");
+    resetPasswordModal.id = "console-reset-user-password-modal";
+    resetPasswordModal.className = "modal hidden";
+    resetPasswordModal.setAttribute("role", "dialog");
+    resetPasswordModal.setAttribute("aria-modal", "true");
+    resetPasswordModal.setAttribute("aria-labelledby", "console-reset-user-password-title");
+    resetPasswordModal.innerHTML = `<div class="modal-panel console-profile-panel"><div class="modal-header"><h2 id="console-reset-user-password-title" data-console-i18n="Trocar senha"></h2><button type="button" class="secondary" data-close-reset-password data-console-i18n="Fechar"></button></div><p id="console-reset-user-password-user" class="hint"></p><form id="console-reset-user-password" class="grid settings-grid"><label class="field"><span data-console-i18n="Nova senha"></span><input name="password" type="password" autocomplete="new-password" minlength="14" maxlength="1024" required></label><label class="field"><span data-console-i18n="Confirme a nova senha"></span><input name="confirmation" type="password" autocomplete="new-password" minlength="14" maxlength="1024" required></label><div class="modal-actions console-password-reset-actions"><button type="button" class="secondary" data-cancel-reset-password data-console-i18n="Cancelar"></button><button type="submit" data-console-i18n="Confirmar"></button></div></form><p id="console-reset-user-password-status" class="status" role="status"></p></div>`;
+    document.body.append(resetPasswordModal);
+    applyAuthTranslations(resetPasswordModal);
+    let resetPasswordUser = null;
+    const closeResetPasswordModal = () => {
+      resetPasswordUser = null;
+      resetPasswordModal.querySelector("#console-reset-user-password").reset();
+      resetPasswordModal.querySelector("#console-reset-user-password-status").textContent = "";
+      if (window.closeModal) window.closeModal("#console-reset-user-password-modal");
+      else resetPasswordModal.classList.add("hidden");
+    };
+    resetPasswordModal.querySelector("[data-close-reset-password]").addEventListener("click", closeResetPasswordModal);
+    resetPasswordModal.querySelector("[data-cancel-reset-password]").addEventListener("click", closeResetPasswordModal);
 
     const auditQuery = () => {
       const form = query("#console-audit-filter");
@@ -800,7 +819,7 @@
       if (updatePending || ["BACKING_UP", "DEPLOYING", "VERIFYING", "ROLLING_BACK"].includes(updateState.state)) {
         updateRefreshTimer = window.setTimeout(() => render().catch(() => {}), 3000);
       }
-      query("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Ativo")}</th><th>MFA</th><th>${uiText("Redefinir senha")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => { const isCurrentUser = user.id === identity.user.id; const deleteControl = isCurrentUser ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode excluir sua própria conta."))}">${uiText("Excluir")}</button>` : `<button type="button" class="danger" data-delete-user="${user.id}">${uiText("Excluir")}</button>`; const enabledLabel = user.enabled ? uiText("Conta ativa") : uiText("Conta desativada"); return `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><label class="console-user-enabled-switch" title="${escapeHtml(enabledLabel)}"><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(enabledLabel)}"><span aria-hidden="true"></span></label></td><td>${user.mfa_enabled ? `<button type="button" class="secondary" data-reset-mfa="${user.id}">${uiText("Redefinir MFA")}</button>` : uiText("Não configurado")}</td><td><input data-field="password" type="password" minlength="14" placeholder="${escapeHtml(uiText("Opcional"))}"></td><td><div class="row"><button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button>${deleteControl}</div></td></tr>`; }).join("")}</tbody></table>`;
+      query("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Ativa")}</th><th>${uiText("Usuário")}</th><th>MFA</th><th>${uiText("Papel")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => { const isCurrentUser = user.id === identity.user.id; const deleteControl = isCurrentUser ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode excluir sua própria conta."))}">${uiText("Excluir")}</button>` : `<button type="button" class="danger" data-delete-user="${user.id}">${uiText("Excluir")}</button>`; const enabledLabel = user.enabled ? uiText("Conta ativa") : uiText("Conta desativada"); return `<tr data-user="${user.id}"><td><label class="console-user-enabled-switch" title="${escapeHtml(enabledLabel)}"><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(enabledLabel)}"><span aria-hidden="true"></span></label></td><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td>${user.mfa_enabled ? `<button type="button" class="secondary" data-reset-mfa="${user.id}">${uiText("Redefinir MFA")}</button>` : uiText("Não configurado")}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><div class="console-user-actions"><button type="button" class="secondary" data-reset-user-password="${user.id}" data-reset-user-username="${escapeHtml(user.username)}">${uiText("Trocar senha")}</button>${deleteControl}<button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button></div></td></tr>`; }).join("")}</tbody></table>`;
       const sessionTable = rows => `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${rows.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:row.is_current?`<button type="button" disabled title="${escapeHtml(uiText("Você não pode revogar a sessão atual."))}">${uiText("Revogar")}</button>`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
       query("#console-active-sessions").innerHTML = activeSessions.length ? sessionTable(activeSessions.slice(0, 5)) : `<p class="hint">${uiText("Nenhuma sessão ativa.")}</p>`;
       const historyItems = Array.isArray(sessionHistory.items) ? sessionHistory.items : [];
@@ -828,11 +847,17 @@
       }));
       queryAll("[data-save-user]").forEach(button => button.addEventListener("click", async () => {
         const row = button.closest("tr");
-        const password = row.querySelector('[data-field="password"]').value;
         const payload = {role:row.querySelector('[data-field="role"]').value, enabled:row.querySelector('[data-field="enabled"]').checked};
-        if (password) payload.password = password;
         await apiCall(`/api/admin/users/${button.dataset.saveUser}`, {method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify(payload)});
         await render();
+      }));
+      queryAll("[data-reset-user-password]").forEach(button => button.addEventListener("click", () => {
+        resetPasswordUser = {id: button.dataset.resetUserPassword, username: button.dataset.resetUserUsername};
+        resetPasswordModal.querySelector("#console-reset-user-password-user").textContent = `${uiText("Usuário")}: ${resetPasswordUser.username}`;
+        resetPasswordModal.querySelector("#console-reset-user-password-status").textContent = "";
+        if (window.openModal) window.openModal("#console-reset-user-password-modal");
+        else resetPasswordModal.classList.remove("hidden");
+        resetPasswordModal.querySelector('[name="password"]').focus();
       }));
       queryAll("[data-delete-user]").forEach(button => button.addEventListener("click", async () => {
         const row = button.closest("tr");
@@ -876,6 +901,28 @@
       result.classList.remove("hidden");
       result.querySelector("[data-close-created-user]").addEventListener("click", closeCreateUserModal);
       await render();
+    });
+    resetPasswordModal.querySelector("#console-reset-user-password").addEventListener("submit", async event => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const status = resetPasswordModal.querySelector("#console-reset-user-password-status");
+      if (!resetPasswordUser) return;
+      if (form.password.value !== form.confirmation.value) {
+        status.className = "status error";
+        status.textContent = uiText("As senhas não coincidem.");
+        form.confirmation.focus();
+        return;
+      }
+      const submit = form.querySelector('[type="submit"]');
+      submit.disabled = true;
+      try {
+        await apiCall(`/api/admin/users/${resetPasswordUser.id}`, {method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify({password:form.password.value})});
+        closeResetPasswordModal();
+        await render();
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = error.message;
+      } finally { submit.disabled = false; }
     });
     query("#console-auth-policy").addEventListener("submit", async event => {
       event.preventDefault(); const form = event.currentTarget;

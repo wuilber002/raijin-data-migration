@@ -454,6 +454,17 @@ def test_console_creates_users_in_a_dedicated_modal_with_identity_fields():
     assert ".console-create-user-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))" in page
 
 
+def test_console_user_actions_use_a_password_confirmation_modal():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert 'id = "console-reset-user-password-modal"' in script
+    assert 'data-reset-user-password="${user.id}"' in script
+    assert 'name="confirmation"' in script
+    assert 'form.password.value !== form.confirmation.value' in script
+    assert 'body:JSON.stringify({password:form.password.value})' in script
+    assert '<th>${uiText("Ativa")}</th><th>${uiText("Usuário")}</th><th>MFA</th><th>${uiText("Papel")}</th><th>${uiText("Ação")}</th>' in script
+    assert 'console-user-actions' in script
+
+
 def test_console_uses_an_on_off_switch_for_user_activation():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
