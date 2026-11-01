@@ -34,8 +34,8 @@
     });
     const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
     nodes.forEach(node => { if (!textSources.has(node)) textSources.set(node, node.nodeValue); node.nodeValue = translate(textSources.get(node)); });
-    element.querySelectorAll?.('[placeholder],[title],[aria-label],[data-help]').forEach(node => {
-      ['placeholder', 'title', 'aria-label', 'data-help'].forEach(attribute => {
+    element.querySelectorAll?.('[placeholder],[title],[aria-label],[data-help],[alt]').forEach(node => {
+      ['placeholder', 'title', 'aria-label', 'data-help', 'alt'].forEach(attribute => {
         if (!node.hasAttribute(attribute)) return;
         if (!attributeSources.has(node)) attributeSources.set(node, {});
         const sources = attributeSources.get(node);
