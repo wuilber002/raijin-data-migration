@@ -521,11 +521,11 @@
 
     const auditQuery = () => {
       const form = query("#console-audit-filter");
-      const query = new URLSearchParams();
+      const params = new URLSearchParams();
       ["actor", "event_type", "result"].forEach(name => {
-        const value = form.elements[name].value.trim(); if (value) query.set(name, value);
+        const value = form.elements[name].value.trim(); if (value) params.set(name, value);
       });
-      return query.toString() ? `?${query}` : "";
+      return params.toString() ? `?${params}` : "";
     };
     let latestUpdateState = null;
     let updateRefreshTimer = null;

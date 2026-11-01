@@ -400,6 +400,14 @@ def test_admin_settings_menu_opens_each_existing_settings_section_in_a_modal():
     assert "window.raijinRefreshAdminSettings?.().catch(()=>{})" in page
 
 
+def test_admin_modal_refresh_does_not_shadow_its_control_query_helper():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    audit_query = script.split("const auditQuery = () => {", 1)[1].split("let latestUpdateState", 1)[0]
+    assert 'const form = query("#console-audit-filter");' in audit_query
+    assert "const params = new URLSearchParams();" in audit_query
+    assert "const query = new URLSearchParams();" not in audit_query
+
+
 def test_console_navigation_visibility_matches_viewer_operator_and_admin_roles():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert "applyNavigationRoleVisibility" in script
