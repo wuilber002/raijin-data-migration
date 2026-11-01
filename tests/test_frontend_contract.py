@@ -262,14 +262,14 @@ def test_discovery_rollout_probe_is_isolated_to_its_worker_entrypoint():
 def test_audit_rollout_probe_is_isolated_to_its_worker_entrypoint():
     execution = (ROOT / "app/audit_execution.py").read_text(encoding="utf-8")
     update_agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
-    assert 'ROLLOUT_PROBE = "phase2-audit-1"' in execution
+    assert 'ROLLOUT_PROBE = "phase2-audit-rollback-recovered-1"' in execution
     assert 'app/audit_execution.py' in update_agent
 
 
-def test_controlled_selective_rollback_probe_keeps_audit_worker_out_of_ready_state():
+def test_selective_rollback_probe_is_removed_after_recovery():
     execution = (ROOT / "app/audit_execution.py").read_text(encoding="utf-8")
-    assert "SELECTIVE_ROLLBACK_PROBE = True" in execution
-    assert "Controlled selective rollback probe" in execution
+    assert 'ROLLOUT_PROBE = "phase2-audit-rollback-recovered-1"' in execution
+    assert "SELECTIVE_ROLLBACK_PROBE" not in execution
 
 
 def test_transfer_rollout_probe_is_isolated_to_its_worker_entrypoint():
