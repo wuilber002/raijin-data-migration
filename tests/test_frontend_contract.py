@@ -1269,9 +1269,12 @@ def test_raiju_lane_cards_and_tables_expose_contextual_help():
     assert ".lane-table-heading{display:inline-flex" in page
 
 
-def test_cost_estimation_has_a_global_operational_toggle():
+def test_cost_estimation_is_configured_with_aws_settings():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="set-cost-estimation"' in page
+    cost_section = page.split('id="settings-cost-estimation"', 1)[1].split('</section>', 1)[0]
+    assert 'data-settings-anchor="settings-aws"' in cost_section
+    assert 'onclick="saveSettings()"' in cost_section
     assert "costEstimationEnabled" in page
     assert "estimativa de custo está desabilitada" in page
     assert "wave-cost-action" in page
