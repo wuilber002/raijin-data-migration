@@ -442,11 +442,14 @@ def test_console_limits_sessions_to_five_rows_and_keeps_revoke_compact():
 
 def test_console_creates_users_in_a_dedicated_modal_with_identity_fields():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="console-open-create-user"' in script
     assert 'createUserModal.id = "console-create-user-modal"' in script
     for field in ("first_name", "last_name", "username", "role"):
         assert f'name="{field}"' in script
     assert "temporary_password" in script
+    assert 'class="console-create-user-form"' in script
+    assert ".console-create-user-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))" in page
 
 
 def test_console_uses_an_on_off_switch_for_user_activation():
