@@ -841,4 +841,9 @@
   ,"Coletando logs no host...": "Coletando logs no host..."
   ,"Nenhum log coletado ainda.": "Nenhum log coletado ainda."
   ,"Informe início e fim do período.": "Informe início e fim do período."
+  ,"Container": "Container"
+  ,"Todos os containers": "Todos os containers"
+  ,"Aplicação/API": "Aplicação/API"
+  ,"Controller": "Controller"
+  ,"Runtime da VM": "Runtime da VM"
 }

@@ -841,4 +841,9 @@
   ,"Coletando logs no host...": "Collecting logs on the host..."
   ,"Nenhum log coletado ainda.": "No logs have been collected yet."
   ,"Informe início e fim do período.": "Provide the start and end of the period."
+  ,"Container": "Container"
+  ,"Todos os containers": "All containers"
+  ,"Aplicação/API": "Application/API"
+  ,"Controller": "Controller"
+  ,"Runtime da VM": "VM runtime"
 }

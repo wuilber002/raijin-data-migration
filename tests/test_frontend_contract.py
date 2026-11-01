@@ -556,6 +556,9 @@ def test_console_application_logs_support_periods_and_download():
     assert "console-application-logs-section" in script
     for label in ("1 hora", "6 horas", "12 horas", "1 dia", "Customizado"):
         assert label in script
+    for component in ("console-log-component", "Todos os containers", "Worker de restore", "Worker de transferência", "Runtime da VM"):
+        assert component in script
+    assert 'component:query("#console-log-component").value' in script
     assert "/api/admin/application-logs/download" in script
     assert "raijinLoadApplicationLogs" in page
     assert 'application_log_control_root=/var/lib/s3-oci-migration/application-log-control' in bootstrap

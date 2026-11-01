@@ -2002,6 +2002,7 @@ class ConsoleUserUpdate(BaseModel):
 class ConsoleApplicationLogRequest(BaseModel):
     start_at: datetime
     end_at: datetime
+    component: str = Field(default="all", max_length=48)
 
 
 class ConsoleAuthSettingsUpdate(BaseModel):
@@ -4821,6 +4822,9 @@ def request_console_update(action: str, *, revision: str | None = None) -> dict:
     return {"accepted": True, **console_update_control_state()}
 
 
+APPLICATION_LOG_COMPONENTS = {"all", "app", "controller", "restore", "discovery", "audit", "transfer", "runtime"}
+
+
 def console_application_log_state(*, include_content: bool = False) -> dict:
     request_file = Path(os.environ.get("RAIJIN_APPLICATION_LOG_REQUEST_FILE", "/run/application-log-control/request.json"))
     result_file = Path(os.environ.get("RAIJIN_APPLICATION_LOG_RESULT_FILE", "/run/application-log-control/result.json"))
@@ -4833,7 +4837,8 @@ def console_application_log_state(*, include_content: bool = False) -> dict:
     processing = request_file.with_name(f"{request_file.name}.processing")
     state = {"pending": request_file.exists() or processing.exists(), "status": str(result.get("status") or "IDLE"),
              "message": str(result.get("message") or "No log collection has been requested."),
-             "from": result.get("from"), "until": result.get("until"), "available": log_file.is_file()}
+             "from": result.get("from"), "until": result.get("until"), "component": str(result.get("component") or "all"),
+             "available": log_file.is_file()}
     if include_content and log_file.is_file():
         try: state["content"] = log_file.read_text(encoding="utf-8", errors="replace")[:4 * 1024 * 1024]
         except OSError: state["content"] = ""
@@ -4849,6 +4854,9 @@ def console_get_application_logs() -> dict:
 def console_collect_application_logs(payload: ConsoleApplicationLogRequest, request: FastAPIRequest,
                                      session: Session = Depends(get_session)) -> dict:
     start_at, end_at = payload.start_at, payload.end_at
+    component = payload.component.strip().lower()
+    if component not in APPLICATION_LOG_COMPONENTS:
+        raise HTTPException(status_code=422, detail="Unknown log component")
     if start_at.tzinfo is None or end_at.tzinfo is None:
         raise HTTPException(status_code=422, detail="Log interval must include a time zone")
     start_at, end_at = start_at.astimezone(timezone.utc), end_at.astimezone(timezone.utc)
@@ -4858,13 +4866,13 @@ def console_collect_application_logs(payload: ConsoleApplicationLogRequest, requ
     try:
         request_file.parent.mkdir(parents=True, exist_ok=True)
         with request_file.open("x", encoding="utf-8") as destination:
-            json.dump({"from": start_at.isoformat(), "until": end_at.isoformat()}, destination, separators=(",", ":"))
+            json.dump({"from": start_at.isoformat(), "until": end_at.isoformat(), "component": component}, destination, separators=(",", ":"))
     except FileExistsError as error:
         raise HTTPException(status_code=409, detail="A log collection is already being processed") from error
     except OSError as error:
         raise HTTPException(status_code=503, detail="Host log collection channel is unavailable") from error
     auth_audit(session, "APPLICATION_LOGS_REQUESTED", actor_user_id=console_principal(request)["id"],
-               target=f"{start_at.isoformat()}..{end_at.isoformat()}", request=request)
+               target=f"{component}:{start_at.isoformat()}..{end_at.isoformat()}", request=request)
     session.commit()
     return {"accepted": True, **console_application_log_state()}
 
@@ -4876,7 +4884,8 @@ def console_download_application_logs() -> Response:
     if not log_file.is_file(): raise HTTPException(status_code=404, detail="No application log export is available")
     try: content = log_file.read_bytes()
     except OSError as error: raise HTTPException(status_code=503, detail="Application log export is unavailable") from error
-    return Response(content=content, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": "attachment; filename=raijin-application-logs.txt"})
+    component = str(console_application_log_state().get("component") or "all")
+    return Response(content=content, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": f"attachment; filename=raijin-{component}-logs.txt"})
 
 
 @app.get("/api/admin/web-bind/addresses")
