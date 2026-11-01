@@ -449,6 +449,13 @@ def test_console_creates_users_in_a_dedicated_modal_with_identity_fields():
     assert "temporary_password" in script
 
 
+def test_console_uses_an_on_off_switch_for_user_activation():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert 'class="console-user-enabled-switch"' in script
+    assert ".console-user-enabled-switch input:checked+span" in page
+
+
 def test_console_disables_dynamic_migration_mutations_for_viewers():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert "migrationMutationIds" in script
