@@ -463,6 +463,8 @@ def test_console_user_actions_use_a_password_confirmation_modal():
     assert 'body:JSON.stringify({password:form.password.value})' in script
     assert '<th>${uiText("Ativa")}</th><th>${uiText("Usuário")}</th><th>MFA</th><th>${uiText("Papel")}</th><th>${uiText("Ação")}</th>' in script
     assert 'console-user-actions' in script
+    assert 'data-close-reset-password' not in script
+    assert 'console-password-reset-panel' in script
 
 
 def test_console_uses_an_on_off_switch_for_user_activation():

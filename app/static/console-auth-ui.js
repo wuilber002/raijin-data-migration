@@ -551,7 +551,7 @@
     resetPasswordModal.setAttribute("role", "dialog");
     resetPasswordModal.setAttribute("aria-modal", "true");
     resetPasswordModal.setAttribute("aria-labelledby", "console-reset-user-password-title");
-    resetPasswordModal.innerHTML = `<div class="modal-panel console-profile-panel"><div class="modal-header"><h2 id="console-reset-user-password-title" data-console-i18n="Trocar senha"></h2><button type="button" class="secondary" data-close-reset-password data-console-i18n="Fechar"></button></div><p id="console-reset-user-password-user" class="hint"></p><form id="console-reset-user-password" class="grid settings-grid"><label class="field"><span data-console-i18n="Nova senha"></span><input name="password" type="password" autocomplete="new-password" minlength="14" maxlength="1024" required></label><label class="field"><span data-console-i18n="Confirme a nova senha"></span><input name="confirmation" type="password" autocomplete="new-password" minlength="14" maxlength="1024" required></label><div class="modal-actions console-password-reset-actions"><button type="button" class="secondary" data-cancel-reset-password data-console-i18n="Cancelar"></button><button type="submit" data-console-i18n="Confirmar"></button></div></form><p id="console-reset-user-password-status" class="status" role="status"></p></div>`;
+    resetPasswordModal.innerHTML = `<div class="modal-panel console-profile-panel console-password-reset-panel"><h2 id="console-reset-user-password-title" data-console-i18n="Trocar senha"></h2><p id="console-reset-user-password-user" class="hint"></p><form id="console-reset-user-password" class="grid settings-grid"><label class="field"><span data-console-i18n="Nova senha"></span><input name="password" type="password" autocomplete="new-password" minlength="14" maxlength="1024" required></label><label class="field"><span data-console-i18n="Confirme a nova senha"></span><input name="confirmation" type="password" autocomplete="new-password" minlength="14" maxlength="1024" required></label><div class="modal-actions console-password-reset-actions"><button type="button" class="secondary" data-cancel-reset-password data-console-i18n="Cancelar"></button><button type="submit" data-console-i18n="Confirmar"></button></div></form><p id="console-reset-user-password-status" class="status" role="status"></p></div>`;
     document.body.append(resetPasswordModal);
     applyAuthTranslations(resetPasswordModal);
     let resetPasswordUser = null;
@@ -562,7 +562,6 @@
       if (window.closeModal) window.closeModal("#console-reset-user-password-modal");
       else resetPasswordModal.classList.add("hidden");
     };
-    resetPasswordModal.querySelector("[data-close-reset-password]").addEventListener("click", closeResetPasswordModal);
     resetPasswordModal.querySelector("[data-cancel-reset-password]").addEventListener("click", closeResetPasswordModal);
 
     const auditQuery = () => {
