@@ -205,6 +205,13 @@ def test_worker_components_have_isolated_entrypoint_and_heartbeats():
         assert f"app.{module}" in runtime
 
 
+def test_selective_worker_rollout_requires_a_ready_heartbeat_not_only_a_file():
+    launcher = (ROOT / "scripts/start-runtime.sh").read_text(encoding="utf-8")
+    assert "worker_heartbeat_ready()" in launcher
+    assert 'heartbeat.get("state") == "READY"' in launcher
+    assert 'worker_heartbeat_ready "$runtime_root/${worker_role}.json" "$worker_role"' in launcher
+
+
 def test_restore_execution_isolated_from_generic_worker_loop():
     execution = (ROOT / "app/restore_execution.py").read_text(encoding="utf-8")
     entrypoint = (ROOT / "app/restore_worker.py").read_text(encoding="utf-8")

@@ -96,6 +96,22 @@ web_probe() {
   fi
 }
 
+worker_heartbeat_ready() {
+  local heartbeat_file="$1" expected_role="$2"
+  [[ -s "$heartbeat_file" ]] || return 1
+  python3 - "$heartbeat_file" "$expected_role" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        heartbeat = json.load(source)
+except (OSError, ValueError, TypeError):
+    raise SystemExit(1)
+raise SystemExit(0 if heartbeat.get("component") == sys.argv[2] and heartbeat.get("state") == "READY" else 1)
+PY
+}
+
 web_auth_secret_mounts=()
 if [[ "$RAIJIN_WEB_AUTH_MODE" == local && "$console_auth_lifecycle" == BOOTSTRAP_REQUIRED ]]; then
   [[ -s "$secret_root/console_bootstrap_password" ]] || {
@@ -188,8 +204,8 @@ case "$mode" in
     done
     for worker_role in "${worker_roles[@]}"; do
       for attempt in $(seq 1 30); do
-        [[ -s "$runtime_root/${worker_role}.json" ]] && break
-        [[ "$attempt" -lt 30 ]] || { echo "${worker_role} did not publish a heartbeat" >&2; exit 1; }
+        worker_heartbeat_ready "$runtime_root/${worker_role}.json" "$worker_role" && break
+        [[ "$attempt" -lt 30 ]] || { echo "${worker_role} did not become ready" >&2; exit 1; }
         sleep 1
       done
     done
