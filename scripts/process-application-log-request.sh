@@ -12,10 +12,10 @@ chmod 0750 "$control_root"
 mv "$request" "$request.processing"
 
 finish() {
-  local status="$1" message="$2" from="${3:-}" until="${4:-}" component="${5:-all}"
-  python3 - "$status" "$message" "$from" "$until" "$component" >"$result.tmp" <<'PY'
+  local status="$1" message="$2" from="${3:-}" until="${4:-}" component="${5:-all}" level="${6:-all}"
+  python3 - "$status" "$message" "$from" "$until" "$component" "$level" >"$result.tmp" <<'PY'
 import json, sys
-print(json.dumps({"status":sys.argv[1],"message":sys.argv[2],"from":sys.argv[3],"until":sys.argv[4],"component":sys.argv[5]}))
+print(json.dumps({"status":sys.argv[1],"message":sys.argv[2],"from":sys.argv[3],"until":sys.argv[4],"component":sys.argv[5],"level":sys.argv[6]}))
 PY
   chmod 0640 "$result.tmp"; mv "$result.tmp" "$result"; rm -f "$request.processing"
 }
@@ -34,14 +34,27 @@ try:
     component=str(value.get("component", "all")).strip().lower()
     if component not in {"all", "app", "controller", "restore", "discovery", "audit", "transfer", "runtime"}: raise ValueError()
     print(component)
+    level=str(value.get("level", "all")).strip().lower()
+    if level not in {"all", "debug", "info", "warning", "error", "critical"}: raise ValueError()
+    print(level)
 except Exception: raise SystemExit(2)
 PY
 )
-[[ ${#range[@]} -eq 3 ]] || { finish REJECTED "Invalid log interval."; exit 0; }
-from="${range[0]}"; until="${range[1]}"; component="${range[2]}"
+[[ ${#range[@]} -eq 4 ]] || { finish REJECTED "Invalid log interval."; exit 0; }
+from="${range[0]}"; until="${range[1]}"; component="${range[2]}"; level="${range[3]}"
 temporary="$(mktemp "$control_root/application.log.XXXXXX")"
+filter_by_level() {
+  case "$level" in
+    all) cat ;;
+    debug) grep -Ei '(^|[^[:alpha:]])DEBUG([^[:alpha:]]|$)' || true ;;
+    info) grep -Ei '(^|[^[:alpha:]])INFO([^[:alpha:]]|$)' || true ;;
+    warning) grep -Ei '(^|[^[:alpha:]])WARN(ING)?([^[:alpha:]]|$)' || true ;;
+    error) grep -Ei '(^|[^[:alpha:]])(ERROR|ERR)([^[:alpha:]]|$)|exception|traceback' || true ;;
+    critical) grep -Ei '(^|[^[:alpha:]])(CRITICAL|FATAL)([^[:alpha:]]|$)' || true ;;
+  esac
+}
 {
-  printf 'RAIJIN %s logs: %s to %s\n\n' "$component" "$from" "$until"
+  printf 'RAIJIN %s %s logs: %s to %s\n\n' "$component" "$level" "$from" "$until"
   declare -A containers=([app]=s3-oci-app [controller]=s3-oci-raikou-shin [restore]=s3-oci-raikou-sei [discovery]=s3-oci-raikou-ko [audit]=s3-oci-raikou-kai [transfer]=s3-oci-transfer-worker)
   selected=()
   if [[ "$component" == all ]]; then selected=("${containers[@]}"); elif [[ "$component" != runtime ]]; then selected=("${containers[$component]}"); fi
@@ -57,7 +70,7 @@ temporary="$(mktemp "$control_root/application.log.XXXXXX")"
 # ``head`` intentionally closes the pipe at the export limit; do not treat
 # that expected SIGPIPE from the redactor as a failed host collection.
 set +o pipefail
-} | sed -E 's/((password|secret|token|authorization)[=:][[:space:]]*)[^[:space:],}]+/\1[REDACTED]/Ig' | head -c 4194304 >"$temporary"
+} | sed -E 's/((password|secret|token|authorization)[=:][[:space:]]*)[^[:space:],}]+/\1[REDACTED]/Ig' | filter_by_level | head -c 4194304 >"$temporary"
 set -o pipefail
 chmod 0640 "$temporary"; mv "$temporary" "$output"
-finish SUCCEEDED "Application logs collected." "$from" "$until" "$component"
+finish SUCCEEDED "Application logs collected." "$from" "$until" "$component" "$level"

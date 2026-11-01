@@ -486,6 +486,11 @@
       const scoped = card.querySelectorAll(selector);
       return scoped.length ? scoped : document.querySelectorAll(selector);
     };
+    const logLevelField = document.createElement("label");
+    logLevelField.className = "field";
+    logLevelField.innerHTML = '<span data-console-i18n="Tipo"></span><select id="console-log-level"><option value="all" data-console-i18n="Todos os tipos"></option><option value="debug">DEBUG</option><option value="info">INFO</option><option value="warning">WARNING</option><option value="error">ERROR</option><option value="critical">CRITICAL</option></select>';
+    query("#console-log-component")?.closest("label")?.after(logLevelField);
+    applyAuthTranslations(logLevelField);
     const logMenuItem = document.createElement("button");
     logMenuItem.type = "button"; logMenuItem.setAttribute("role", "menuitem");
     logMenuItem.innerHTML = '<span class="settings-menu-icon">▤</span><strong data-console-i18n="Logs"></strong><small data-console-i18n="Visualizar e baixar logs"></small>';
@@ -907,7 +912,7 @@
       const start = period === "custom" ? new Date(query("#console-log-start").value) : new Date(end.getTime() - Number(period) * 3600_000);
       if (Number.isNaN(start.valueOf()) || Number.isNaN(end.valueOf())) { query("#console-log-status").textContent = uiText("Informe início e fim do período."); return; }
       query("#console-log-collect").disabled = true;
-      try { await apiCall("/api/admin/application-logs", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({start_at:start.toISOString(), end_at:end.toISOString(), component:query("#console-log-component").value})}); for (let attempt = 0; attempt < 30; attempt += 1) { await new Promise(resolve => window.setTimeout(resolve, 1000)); const state = await loadApplicationLogs(); if (!state.pending) break; } }
+      try { await apiCall("/api/admin/application-logs", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({start_at:start.toISOString(), end_at:end.toISOString(), component:query("#console-log-component").value, level:query("#console-log-level").value})}); for (let attempt = 0; attempt < 30; attempt += 1) { await new Promise(resolve => window.setTimeout(resolve, 1000)); const state = await loadApplicationLogs(); if (!state.pending) break; } }
       catch (error) { query("#console-log-status").textContent = error.message; }
       finally { query("#console-log-collect").disabled = false; }
     });
