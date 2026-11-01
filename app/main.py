@@ -1997,6 +1997,11 @@ class ConsoleUserUpdate(BaseModel):
     must_change_password: bool | None = None
 
 
+class ConsoleApplicationLogRequest(BaseModel):
+    start_at: datetime
+    end_at: datetime
+
+
 class ConsoleAuthSettingsUpdate(BaseModel):
     password_history_count: int = Field(ge=0, le=12)
 
@@ -4805,6 +4810,64 @@ def request_console_update(action: str, *, revision: str | None = None) -> dict:
     except OSError as error:
         raise HTTPException(status_code=503, detail="Host update control channel is unavailable") from error
     return {"accepted": True, **console_update_control_state()}
+
+
+def console_application_log_state(*, include_content: bool = False) -> dict:
+    request_file = Path(os.environ.get("RAIJIN_APPLICATION_LOG_REQUEST_FILE", "/run/application-log-control/request.json"))
+    result_file = Path(os.environ.get("RAIJIN_APPLICATION_LOG_RESULT_FILE", "/run/application-log-control/result.json"))
+    log_file = result_file.parent / "application.log"
+    try:
+        result = json.loads(result_file.read_text(encoding="utf-8")) if result_file.is_file() else {}
+        if not isinstance(result, dict): raise ValueError("Invalid host log result")
+    except (OSError, ValueError, json.JSONDecodeError):
+        result = {"status": "UNKNOWN", "message": "The host log result is unreadable."}
+    processing = request_file.with_name(f"{request_file.name}.processing")
+    state = {"pending": request_file.exists() or processing.exists(), "status": str(result.get("status") or "IDLE"),
+             "message": str(result.get("message") or "No log collection has been requested."),
+             "from": result.get("from"), "until": result.get("until"), "available": log_file.is_file()}
+    if include_content and log_file.is_file():
+        try: state["content"] = log_file.read_text(encoding="utf-8", errors="replace")[:4 * 1024 * 1024]
+        except OSError: state["content"] = ""
+    return state
+
+
+@app.get("/api/admin/application-logs")
+def console_get_application_logs() -> dict:
+    return console_application_log_state(include_content=True)
+
+
+@app.post("/api/admin/application-logs", status_code=202)
+def console_collect_application_logs(payload: ConsoleApplicationLogRequest, request: FastAPIRequest,
+                                     session: Session = Depends(get_session)) -> dict:
+    start_at, end_at = payload.start_at, payload.end_at
+    if start_at.tzinfo is None or end_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="Log interval must include a time zone")
+    start_at, end_at = start_at.astimezone(timezone.utc), end_at.astimezone(timezone.utc)
+    if start_at >= end_at or end_at > utcnow() + timedelta(minutes=1) or end_at - start_at > timedelta(days=7):
+        raise HTTPException(status_code=422, detail="Log interval must be ordered and no longer than seven days")
+    request_file = Path(os.environ.get("RAIJIN_APPLICATION_LOG_REQUEST_FILE", "/run/application-log-control/request.json"))
+    try:
+        request_file.parent.mkdir(parents=True, exist_ok=True)
+        with request_file.open("x", encoding="utf-8") as destination:
+            json.dump({"from": start_at.isoformat(), "until": end_at.isoformat()}, destination, separators=(",", ":"))
+    except FileExistsError as error:
+        raise HTTPException(status_code=409, detail="A log collection is already being processed") from error
+    except OSError as error:
+        raise HTTPException(status_code=503, detail="Host log collection channel is unavailable") from error
+    auth_audit(session, "APPLICATION_LOGS_REQUESTED", actor_user_id=console_principal(request)["id"],
+               target=f"{start_at.isoformat()}..{end_at.isoformat()}", request=request)
+    session.commit()
+    return {"accepted": True, **console_application_log_state()}
+
+
+@app.get("/api/admin/application-logs/download")
+def console_download_application_logs() -> Response:
+    result_file = Path(os.environ.get("RAIJIN_APPLICATION_LOG_RESULT_FILE", "/run/application-log-control/result.json"))
+    log_file = result_file.parent / "application.log"
+    if not log_file.is_file(): raise HTTPException(status_code=404, detail="No application log export is available")
+    try: content = log_file.read_bytes()
+    except OSError as error: raise HTTPException(status_code=503, detail="Application log export is unavailable") from error
+    return Response(content=content, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": "attachment; filename=raijin-application-logs.txt"})
 
 
 @app.get("/api/admin/web-bind/addresses")

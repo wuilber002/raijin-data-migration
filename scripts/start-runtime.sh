@@ -8,6 +8,7 @@ runtime_root=/run/s3-oci-migration
 mode_control_root=/var/lib/s3-oci-migration/mode-control
 web_bind_control_root=/var/lib/s3-oci-migration/web-bind-control
 update_control_root=/var/lib/s3-oci-migration/update-control
+application_log_control_root=/var/lib/s3-oci-migration/application-log-control
 oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
 image="${RAIJIN_IMAGE:-localhost/s3-oci-migration:latest}"
 network=s3-oci-migration
@@ -144,11 +145,14 @@ case "$mode" in
       -e RAIJIN_WEB_BIND_RESULT_FILE=/run/web-bind-control/result.json \
       -e RAIJIN_UPDATE_REQUEST_FILE=/run/update-control/request.json \
       -e RAIJIN_UPDATE_RESULT_FILE=/run/update-control/result.json \
+      -e RAIJIN_APPLICATION_LOG_REQUEST_FILE=/run/application-log-control/request.json \
+      -e RAIJIN_APPLICATION_LOG_RESULT_FILE=/run/application-log-control/result.json \
       -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
       -v "$runtime_root:/run/platform-status:ro,z" \
       -v "$mode_control_root:/run/mode-control:rw,z" \
       -v "$web_bind_control_root:/run/web-bind-control:rw,z" \
       -v "$update_control_root:/run/update-control:rw,z" \
+      -v "$application_log_control_root:/run/application-log-control:rw,z" \
       -v "$oci_runtime_config:/run/oci-runtime/oci-runtime.json:ro,z" \
       "${web_tls_mounts[@]}" \
         "$image" "${web_server_command[@]}"
@@ -242,8 +246,11 @@ case "$mode" in
       "${web_auth_environment[@]}" \
       "${web_auth_secret_mounts[@]}" \
       -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
+      -e RAIJIN_APPLICATION_LOG_REQUEST_FILE=/run/application-log-control/request.json \
+      -e RAIJIN_APPLICATION_LOG_RESULT_FILE=/run/application-log-control/result.json \
       -v "$runtime_root:/run/platform-status:ro,z" \
       -v "$mode_control_root:/run/mode-control:rw,z" \
+      -v "$application_log_control_root:/run/application-log-control:rw,z" \
       -v "$secret_root/simulation_postgres_password:/run/secrets/simulation_postgres_password:ro,z" "$image"
     for attempt in $(seq 1 30); do
       curl --fail --silent "$RAIJIN_WEB_BIND_PROBE_URL/healthz" >/dev/null && break

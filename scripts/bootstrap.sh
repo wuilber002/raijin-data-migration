@@ -341,6 +341,7 @@ install -m 0750 "$install_root/scripts/console-auth-preflight.sh" /usr/local/sbi
 install -m 0750 "$install_root/scripts/process-mode-request.sh" /usr/local/sbin/s3-oci-process-mode-request
 install -m 0750 "$install_root/scripts/process-web-bind-request.sh" /usr/local/sbin/s3-oci-process-web-bind-request
 install -m 0750 "$install_root/scripts/process-update-request.sh" /usr/local/sbin/s3-oci-process-update-request
+install -m 0750 "$install_root/scripts/process-application-log-request.sh" /usr/local/sbin/s3-oci-process-application-log-request
 if [[ "$deployment_profile" == LOCAL ]]; then
   # LOCAL is a durable deployment topology, not a Raijin operation mode.
   # Raijin remains in REAL and sees Fujin only through ordinary private
@@ -420,6 +421,31 @@ WantedBy=timers.target
 EOF
 systemctl daemon-reload
 systemctl enable --now s3-oci-web-bind-request.timer
+
+cat >/etc/systemd/system/s3-oci-application-log-request.service <<'EOF'
+[Unit]
+Description=Collect bounded RAIJIN application logs
+After=s3-oci-migration.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/s3-oci-process-application-log-request
+EOF
+cat >/etc/systemd/system/s3-oci-application-log-request.timer <<'EOF'
+[Unit]
+Description=Watch for RAIJIN application log requests
+
+[Timer]
+OnBootSec=15
+OnUnitActiveSec=3
+AccuracySec=1
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now s3-oci-application-log-request.timer
 
 cat >/etc/systemd/system/s3-oci-update-request.service <<'EOF'
 [Unit]

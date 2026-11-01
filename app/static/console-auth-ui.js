@@ -474,6 +474,7 @@
         <div id="console-update-impact-slot"></div>
       </div>
       </section>
+      <section class="card" id="console-application-logs-section"><h2>Logs da aplicação</h2><p class="hint">Coleta logs da aplicação e dos workers no host para visualização ou download. O conteúdo é limitado a 4 MiB por solicitação.</p><div class="row"><label class="field"><span>Período</span><select id="console-log-period"><option value="1">1 hora</option><option value="6">6 horas</option><option value="12">12 horas</option><option value="24">1 dia</option><option value="custom">Customizado</option></select></label><label class="field console-log-custom hidden"><span>Início</span><input id="console-log-start" type="datetime-local"></label><label class="field console-log-custom hidden"><span>Fim</span><input id="console-log-end" type="datetime-local"></label><button type="button" id="console-log-collect">Visualizar logs</button><button type="button" class="secondary" id="console-log-download" disabled>Download</button></div><p id="console-log-status" class="hint"></p><pre id="console-log-content" class="console-log-content">Selecione um período e visualize os logs.</pre></section>
       <section class="card" id="console-users-section"><h2 data-console-i18n="Gerenciamento de usuários"></h2>
       <p><button type="button" id="console-open-create-user" data-console-i18n="Adicionar usuário"></button></p>
       <div id="console-users" class="report-content" data-console-i18n="Carregando usuários…"></div>
@@ -495,6 +496,11 @@
       const scoped = card.querySelectorAll(selector);
       return scoped.length ? scoped : document.querySelectorAll(selector);
     };
+    const logMenuItem = document.createElement("button");
+    logMenuItem.type = "button"; logMenuItem.setAttribute("role", "menuitem");
+    logMenuItem.innerHTML = '<span class="settings-menu-icon">▤</span><strong>Logs</strong><small>Visualizar e baixar logs</small>';
+    logMenuItem.addEventListener("click", () => window.openSettingsSection?.("console-application-logs-section"));
+    document.querySelector("#settings-menu-options button[onclick*=\"settings-oci\"]")?.after(logMenuItem);
     const updateModal = document.createElement("section");
     updateModal.id = "console-update-workflow-modal";
     updateModal.className = "modal hidden";
@@ -840,6 +846,27 @@
         await apiCall(`/api/admin/users/${button.dataset.resetMfa}/mfa/reset`, {method:"POST"}); await render();
       }));
     };
+    const loadApplicationLogs = async () => {
+      const state = await apiCall("/api/admin/application-logs");
+      query("#console-log-status").textContent = state.pending ? "Coletando logs no host..." : (state.message || "");
+      query("#console-log-content").textContent = state.content || "Nenhum log coletado ainda.";
+      query("#console-log-download").disabled = !state.available || state.pending;
+      return state;
+    };
+    const logPeriodChanged = () => queryAll(".console-log-custom").forEach(node => node.classList.toggle("hidden", query("#console-log-period").value !== "custom"));
+    query("#console-log-period").addEventListener("change", logPeriodChanged);
+    query("#console-log-collect").addEventListener("click", async () => {
+      const period = query("#console-log-period").value;
+      const end = period === "custom" ? new Date(query("#console-log-end").value) : new Date();
+      const start = period === "custom" ? new Date(query("#console-log-start").value) : new Date(end.getTime() - Number(period) * 3600_000);
+      if (Number.isNaN(start.valueOf()) || Number.isNaN(end.valueOf())) { query("#console-log-status").textContent = "Informe início e fim do período."; return; }
+      query("#console-log-collect").disabled = true;
+      try { await apiCall("/api/admin/application-logs", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({start_at:start.toISOString(), end_at:end.toISOString()})}); for (let attempt = 0; attempt < 30; attempt += 1) { await new Promise(resolve => window.setTimeout(resolve, 1000)); const state = await loadApplicationLogs(); if (!state.pending) break; } }
+      catch (error) { query("#console-log-status").textContent = error.message; }
+      finally { query("#console-log-collect").disabled = false; }
+    });
+    query("#console-log-download").addEventListener("click", () => { window.location.assign("/api/admin/application-logs/download"); });
+    window.raijinLoadApplicationLogs = () => loadApplicationLogs().catch(error => { query("#console-log-status").textContent = error.message; });
     createUserModal.querySelector("#console-create-user").addEventListener("submit", async event => {
       event.preventDefault(); const form = event.currentTarget;
       const result = createUserModal.querySelector("#console-create-user-result");
