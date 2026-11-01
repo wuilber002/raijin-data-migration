@@ -377,7 +377,7 @@ def test_console_hides_admin_settings_navigation_for_non_admin_roles():
     assert "settings-menu[data-required-role=\"ADMIN\"]" in script
 
 
-def test_admin_settings_menu_navigates_to_each_existing_settings_section():
+def test_admin_settings_menu_opens_each_existing_settings_section_in_a_modal():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     for section in (
@@ -387,11 +387,15 @@ def test_admin_settings_menu_navigates_to_each_existing_settings_section():
         assert f"openSettingsSection('{section}')" in page
     assert "function toggleSettingsMenu" in page
     assert "function openSettingsSection(sectionId)" in page
-    assert "scrollIntoView({top:0,behavior:'smooth',block:'start'})" in page
+    assert 'id="settings-topic-modal"' in page
+    assert "content.replaceChildren(...nodes)" in page
+    assert "function closeSettingsTopicModal" in page
+    assert "#view-settings{display:none!important}" in page
     assert 'id="console-users-section"' in script
     assert 'id="console-audit-section"' in script
     assert 'id="console-general-section"' in script
     assert 'id="console-update-section"' in script
+    assert 'const query = selector => card.querySelector(selector) || document.querySelector(selector);' in script
 
 
 def test_console_navigation_visibility_matches_viewer_operator_and_admin_roles():

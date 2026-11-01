@@ -443,9 +443,9 @@
     const settings = document.getElementById("view-settings");
     if (!settings) return;
     const card = document.createElement("section");
-    card.className = "card"; card.id = "console-access-management";
+    card.className = "console-settings-staging"; card.id = "console-access-management";
     card.innerHTML = `
-      <h2 id="console-general-section" data-console-i18n="Acesso ao console"></h2>
+      <section class="card" id="console-general-section"><h2 data-console-i18n="Acesso ao console"></h2>
       <p class="hint" data-console-i18n="Usuários locais, sessões ativas no navegador e evidências de auditoria de autenticação."></p>
       <form id="console-auth-policy" class="row">
         <label class="field"><span data-console-i18n="Histórico de reutilização de senha"></span><input name="password_history_count" type="number" min="0" max="12" required></label>
@@ -463,8 +463,8 @@
         <button data-console-i18n="Aplicar endpoint"></button>
       </form>
       <p class="hint" id="console-web-bind-status"></p>
-      <hr class="console-section-divider">
-      <h3 id="console-update-section" data-console-i18n="Atualizações da plataforma"></h3>
+      </section>
+      <section class="card" id="console-update-section"><h2 data-console-i18n="Atualizações da plataforma"></h2>
       <p class="hint" data-console-i18n="Consulta uma revisão aprovada no GitHub. A instalação exige fila completamente drenada, backup e validação local de saúde."></p>
       <div class="console-update-layout">
         <div class="console-update-summary">
@@ -473,8 +473,8 @@
         </div>
         <div id="console-update-impact-slot"></div>
       </div>
-      <hr class="console-section-divider">
-      <h3 id="console-users-section" data-console-i18n="Gerenciamento de usuários"></h3>
+      </section>
+      <section class="card" id="console-users-section"><h2 data-console-i18n="Gerenciamento de usuários"></h2>
       <form id="console-create-user" class="row">
         <label class="field"><span data-console-i18n="Usuário"></span><input name="username" pattern="(?:[a-z][a-z0-9_.-]{2,63}|[a-z0-9][a-z0-9._+-]{0,63}@[a-z0-9-]+(?:\.[a-z0-9-]+)+)" required></label>
         <label class="field"><span data-console-i18n="Senha temporária"></span><input name="password" type="password" minlength="14" required></label>
@@ -484,16 +484,22 @@
       <div id="console-users" class="report-content" data-console-i18n="Carregando usuários…"></div>
       <hr class="console-section-divider">
       <h3 data-console-i18n="Sessões"></h3><div id="console-sessions" class="report-content" data-console-i18n="Carregando sessões…"></div>
-      <h3 id="console-audit-section" data-console-i18n="Auditoria recente de autenticação"></h3>
+      </section>
+      <section class="card" id="console-audit-section"><h2 data-console-i18n="Auditoria recente de autenticação"></h2>
       <form id="console-audit-filter" class="row">
         <label class="field"><span data-console-i18n="Responsável"></span><input name="actor" pattern="[a-z][a-z0-9_.-]{2,63}"></label>
         <label class="field"><span data-console-i18n="Evento"></span><input name="event_type" placeholder="LOGIN_SUCCEEDED"></label>
         <label class="field"><span data-console-i18n="Resultado"></span><select name="result"><option value="" data-console-i18n="Todos"></option><option>SUCCEEDED</option><option>DENIED</option></select></label>
         <button class="secondary" data-console-i18n="Filtrar"></button>
       </form>
-      <div id="console-auth-audit" class="report-content" data-console-i18n="Carregando auditoria…"></div>`;
+      <div id="console-auth-audit" class="report-content" data-console-i18n="Carregando auditoria…"></div></section>`;
     settings.append(card);
     applyAuthTranslations(card);
+    const query = selector => card.querySelector(selector) || document.querySelector(selector);
+    const queryAll = selector => {
+      const scoped = card.querySelectorAll(selector);
+      return scoped.length ? scoped : document.querySelectorAll(selector);
+    };
     const updateModal = document.createElement("section");
     updateModal.id = "console-update-workflow-modal";
     updateModal.className = "modal hidden";
@@ -514,7 +520,7 @@
     applyAuthTranslations(updateCommitsModal);
 
     const auditQuery = () => {
-      const form = card.querySelector("#console-audit-filter");
+      const form = query("#console-audit-filter");
       const query = new URLSearchParams();
       ["actor", "event_type", "result"].forEach(name => {
         const value = form.elements[name].value.trim(); if (value) query.set(name, value);
@@ -694,7 +700,7 @@
       }
     }, true);
     const renderUpdateCheckButton = (busy, disabled) => {
-      const button = card.querySelector("#console-update-check");
+      const button = query("#console-update-check");
       if (!button) return;
       button.classList.toggle("is-busy", busy);
       button.disabled = Boolean(disabled);
@@ -711,15 +717,15 @@
       ]);
       const auditEventLabel = row => row.event_type === "USER_CREATED" && row.target
         ? `${row.event_type} (${row.target})` : row.event_type;
-      card.querySelector("#console-auth-policy").elements.password_history_count.value = authSettings.password_history_count;
-      const bindForm = card.querySelector("#console-web-bind");
+      query("#console-auth-policy").elements.password_history_count.value = authSettings.password_history_count;
+      const bindForm = query("#console-web-bind");
       const addresses = Array.isArray(bindAddresses.addresses) ? bindAddresses.addresses : [];
       if (!addresses.some(item => item.value === webBind.host)) addresses.push({value:webBind.host, label:webBind.host});
       bindForm.host.innerHTML = addresses.map(item => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label || item.value)}</option>`).join("");
       bindForm.host.value = webBind.host; bindForm.port.value = webBind.port; bindForm.transport.value = webBind.transport;
       bindForm.trusted_upstream_ips.value = (webBind.trusted_upstream_ips || []).join(",");
       bindForm.querySelectorAll("input, select, button").forEach(control => { control.disabled = Boolean(webBind.locked || webBind.pending); });
-      card.querySelector("#console-web-bind-status").textContent = webBind.locked ? uiText(webBind.lock_reason) : (webBind.pending ? uiText("Solicitação de endpoint aguardando aplicação no host.") : (webBind.result?.message || ""));
+      query("#console-web-bind-status").textContent = webBind.locked ? uiText(webBind.lock_reason) : (webBind.pending ? uiText("Solicitação de endpoint aguardando aplicação no host.") : (webBind.result?.message || ""));
       const updatePending = Boolean(updateState.pending);
       const updateAvailable = updateState.state === "AVAILABLE" && /^[0-9a-f]{40}$/.test(updateState.available_revision || "");
       const updateMessage = {
@@ -742,8 +748,8 @@
       const availableRevisionMarkup = updateAvailable && commitCount > 0
         ? `<span class="console-update-revision" id="console-update-commits-button" role="button" tabindex="0" title="${escapeHtml(uiText("Ver commits desta atualização"))}" aria-label="${escapeHtml(uiText("Ver commits desta atualização"))}"><code>${availableRevision}</code><span>(${commitCount})</span></span>`
         : `<code>${availableRevision}</code>`;
-      card.querySelector("#console-update-status").innerHTML = `<p class="console-update-revision-line"><strong>${uiText("Revisão instalada")}:</strong><code>${escapeHtml(updateState.current_revision || "—")}</code></p><p class="console-update-revision-line"><strong>${uiText("Revisão disponível")}:</strong>${availableRevisionMarkup}</p><p><strong>${uiText("Schema do banco")}:</strong> <code>${escapeHtml(schemaRevision)}</code></p><p class="${failedUpdate ? "console-update-status-error" : "hint"}"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
-      const commitTrigger = card.querySelector("#console-update-commits-button");
+      query("#console-update-status").innerHTML = `<p class="console-update-revision-line"><strong>${uiText("Revisão instalada")}:</strong><code>${escapeHtml(updateState.current_revision || "—")}</code></p><p class="console-update-revision-line"><strong>${uiText("Revisão disponível")}:</strong>${availableRevisionMarkup}</p><p><strong>${uiText("Schema do banco")}:</strong> <code>${escapeHtml(schemaRevision)}</code></p><p class="${failedUpdate ? "console-update-status-error" : "hint"}"><strong>${uiText("Estado")}:</strong> ${escapeHtml(updateState.state || "UNKNOWN")} — ${escapeHtml(updateMessage)}</p>`;
+      const commitTrigger = query("#console-update-commits-button");
       commitTrigger?.addEventListener("click", showUpdateCommits);
       commitTrigger?.addEventListener("keydown", event => {
         if (event.key !== "Enter" && event.key !== " ") return;
@@ -754,23 +760,23 @@
         if (!failureBanner) { failureBanner = document.createElement("div"); failureBanner.id = "console-update-failure-banner"; failureBanner.className = "console-update-failure-banner"; document.querySelector(".topbar")?.after(failureBanner); }
         failureBanner.textContent = `${uiText("Atualização da plataforma não foi concluída")}: ${updateMessage}`;
       } else failureBanner?.remove();
-      card.querySelector("#console-update-impact-slot").innerHTML = impactPreview;
+      query("#console-update-impact-slot").innerHTML = impactPreview;
       // A request is processed by the host agent asynchronously. Keep the
       // progress indication visible through its pending state, not only while
       // the short API request that creates it is in flight.
       renderUpdateCheckButton(updateCheckInProgress, updatePending || updateCheckInProgress);
-      card.querySelector("#console-update-apply").disabled = updatePending || !updateAvailable;
+      query("#console-update-apply").disabled = updatePending || !updateAvailable;
       clearTimeout(updateRefreshTimer);
       if (updatePending || ["BACKING_UP", "DEPLOYING", "VERIFYING", "ROLLING_BACK"].includes(updateState.state)) {
         updateRefreshTimer = window.setTimeout(() => render().catch(() => {}), 3000);
       }
-      card.querySelector("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Ativo")}</th><th>MFA</th><th>${uiText("Redefinir senha")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => { const isCurrentUser = user.id === identity.user.id; const deleteControl = isCurrentUser ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode excluir sua própria conta."))}">${uiText("Excluir")}</button>` : `<button type="button" class="danger" data-delete-user="${user.id}">${uiText("Excluir")}</button>`; return `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(uiText("Ativar {{username}}", {username:user.username}))}"></td><td>${user.mfa_enabled ? `<button type="button" class="secondary" data-reset-mfa="${user.id}">${uiText("Redefinir MFA")}</button>` : uiText("Não configurado")}</td><td><input data-field="password" type="password" minlength="14" placeholder="${escapeHtml(uiText("Opcional"))}"></td><td><div class="row"><button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button>${deleteControl}</div></td></tr>`; }).join("")}</tbody></table>`;
-      card.querySelector("#console-sessions").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:row.is_current?`<button type="button" disabled title="${escapeHtml(uiText("Você não pode revogar a sessão atual."))}">${uiText("Revogar")}</button>`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
-      card.querySelector("#console-auth-audit").innerHTML = `<table><thead><tr><th>${uiText("Data e hora")}</th><th>${uiText("Responsável")}</th><th>${uiText("Evento")}</th><th>${uiText("Resultado")}</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||uiText("sistema"))}</td><td>${escapeHtml(auditEventLabel(row))}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;
-      card.querySelectorAll("[data-session]").forEach(button => button.addEventListener("click", async () => {
+      query("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Papel")}</th><th>${uiText("Ativo")}</th><th>MFA</th><th>${uiText("Redefinir senha")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => { const isCurrentUser = user.id === identity.user.id; const deleteControl = isCurrentUser ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode excluir sua própria conta."))}">${uiText("Excluir")}</button>` : `<button type="button" class="danger" data-delete-user="${user.id}">${uiText("Excluir")}</button>`; return `<tr data-user="${user.id}"><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(uiText("Ativar {{username}}", {username:user.username}))}"></td><td>${user.mfa_enabled ? `<button type="button" class="secondary" data-reset-mfa="${user.id}">${uiText("Redefinir MFA")}</button>` : uiText("Não configurado")}</td><td><input data-field="password" type="password" minlength="14" placeholder="${escapeHtml(uiText("Opcional"))}"></td><td><div class="row"><button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button>${deleteControl}</div></td></tr>`; }).join("")}</tbody></table>`;
+      query("#console-sessions").innerHTML = `<table><thead><tr><th>${uiText("Usuário")}</th><th>${uiText("Última atividade")}</th><th>${uiText("Expira em")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${sessions.map(row => `<tr><td>${escapeHtml(row.username)}</td><td>${localTime(row.last_seen_at)}</td><td>${localTime(row.expires_at)}</td><td>${row.revoked_at?`${uiText("Revogada")} (${escapeHtml(row.revoke_reason||"")})`:row.is_current?`<button type="button" disabled title="${escapeHtml(uiText("Você não pode revogar a sessão atual."))}">${uiText("Revogar")}</button>`:`<button type="button" data-session="${row.id}">${uiText("Revogar")}</button>`}</td></tr>`).join("")}</tbody></table>`;
+      query("#console-auth-audit").innerHTML = `<table><thead><tr><th>${uiText("Data e hora")}</th><th>${uiText("Responsável")}</th><th>${uiText("Evento")}</th><th>${uiText("Resultado")}</th></tr></thead><tbody>${audit.map(row => `<tr><td>${localTime(row.created_at)}</td><td>${escapeHtml(row.actor||uiText("sistema"))}</td><td>${escapeHtml(auditEventLabel(row))}</td><td>${escapeHtml(row.result)}</td></tr>`).join("")}</tbody></table>`;
+      queryAll("[data-session]").forEach(button => button.addEventListener("click", async () => {
         await apiCall(`/api/admin/sessions/${button.dataset.session}/revoke`, {method:"POST"}); await render();
       }));
-      card.querySelectorAll("[data-save-user]").forEach(button => button.addEventListener("click", async () => {
+      queryAll("[data-save-user]").forEach(button => button.addEventListener("click", async () => {
         const row = button.closest("tr");
         const password = row.querySelector('[data-field="password"]').value;
         const payload = {role:row.querySelector('[data-field="role"]').value, enabled:row.querySelector('[data-field="enabled"]').checked};
@@ -778,35 +784,35 @@
         await apiCall(`/api/admin/users/${button.dataset.saveUser}`, {method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify(payload)});
         await render();
       }));
-      card.querySelectorAll("[data-delete-user]").forEach(button => button.addEventListener("click", async () => {
+      queryAll("[data-delete-user]").forEach(button => button.addEventListener("click", async () => {
         const row = button.closest("tr");
         const username = row.querySelector("td").textContent.split(" · ")[0];
         if (!window.confirm(uiText("Excluir {{username}} permanentemente? Todas as sessões, configurações de MFA e histórico de senhas deste usuário serão removidos. A auditoria será preservada.", {username}))) return;
         await apiCall(`/api/admin/users/${button.dataset.deleteUser}`, {method:"DELETE"});
         await render();
       }));
-      card.querySelectorAll("[data-reset-mfa]").forEach(button => button.addEventListener("click", async () => {
+      queryAll("[data-reset-mfa]").forEach(button => button.addEventListener("click", async () => {
         if (!window.confirm(uiText("Redefinir MFA deste usuário encerrará suas sessões. Continuar?"))) return;
         await apiCall(`/api/admin/users/${button.dataset.resetMfa}/mfa/reset`, {method:"POST"}); await render();
       }));
     };
-    card.querySelector("#console-create-user").addEventListener("submit", async event => {
+    query("#console-create-user").addEventListener("submit", async event => {
       event.preventDefault(); const form = event.currentTarget;
       await apiCall("/api/admin/users", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({username:form.username.value, password:form.password.value, role:form.role.value})});
       form.reset(); await render();
     });
-    card.querySelector("#console-auth-policy").addEventListener("submit", async event => {
+    query("#console-auth-policy").addEventListener("submit", async event => {
       event.preventDefault(); const form = event.currentTarget;
       await apiCall("/api/admin/auth-settings", {method:"PUT", headers:{"content-type":"application/json"}, body:JSON.stringify({password_history_count:Number(form.password_history_count.value)})});
       await render();
     });
-    card.querySelector("#console-web-bind").addEventListener("submit", async event => {
+    query("#console-web-bind").addEventListener("submit", async event => {
       event.preventDefault(); const form = event.currentTarget;
       const trusted_upstream_ips = form.trusted_upstream_ips.value.split(",").map(value => value.trim()).filter(Boolean);
       await apiCall("/api/admin/web-bind", {method:"PUT", headers:{"content-type":"application/json"}, body:JSON.stringify({host:form.host.value, port:Number(form.port.value), transport:form.transport.value, trusted_upstream_ips})});
       await render();
     });
-    card.querySelector("#console-update-check").addEventListener("click", async () => {
+    query("#console-update-check").addEventListener("click", async () => {
       if (updateCheckInProgress) return;
       updateCheckInProgress = true;
       renderUpdateCheckButton(true, true);
@@ -826,18 +832,18 @@
         throw error;
       }
     });
-    card.querySelector("#console-update-apply").addEventListener("click", async () => {
+    query("#console-update-apply").addEventListener("click", async () => {
       if (!latestUpdateState?.available_revision) return;
       openUpdateConfirmation();
     });
-    card.querySelector("#console-audit-filter").addEventListener("submit", async event => { event.preventDefault(); await render(); });
+    query("#console-audit-filter").addEventListener("submit", async event => { event.preventDefault(); await render(); });
     document.addEventListener("raijin:language-changed", () => {
       applyAuthTranslations(card);
       if (!updateModal.classList.contains("hidden") && updateModal.querySelector(".console-update-workflow-steps")) showUpdateWorkflow(latestUpdateState || {state:"VALIDATING", progress:10});
       render().catch(() => {});
     });
     document.addEventListener("raijin:open-auth-audit", event => {
-      const form = card.querySelector("#console-audit-filter");
+      const form = query("#console-audit-filter");
       if (!form) return;
       const key = event.detail?.alertKey || "";
       form.elements.actor.value = "";
