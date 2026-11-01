@@ -15,12 +15,18 @@ ROLE = "raikou-kai"
 # Controlled Phase 2 rollout probe. This inert marker proves that the audit
 # worker can be replaced independently of the other runtime components.
 ROLLOUT_PROBE = "phase2-audit-1"
+# This marker is published only for the controlled Phase 2 rollback exercise.
+# The component runtime will report RETRYING instead of READY, which must make
+# the root rollout agent restore the prior Raikou::Kai image.
+SELECTIVE_ROLLBACK_PROBE = True
 
 
 def run_once(role: str = ROLE) -> None:
     """Claim and verify one wave while maintaining its durable lease."""
     if role != ROLE:
         raise RuntimeError(f"Audit execution does not support role {role!r}")
+    if SELECTIVE_ROLLBACK_PROBE:
+        raise RuntimeError("Controlled selective rollback probe: audit worker must not become ready")
     if mode_switch_requested():
         return
     if runtime_context.is_simulation:

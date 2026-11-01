@@ -266,6 +266,12 @@ def test_audit_rollout_probe_is_isolated_to_its_worker_entrypoint():
     assert 'app/audit_execution.py' in update_agent
 
 
+def test_controlled_selective_rollback_probe_keeps_audit_worker_out_of_ready_state():
+    execution = (ROOT / "app/audit_execution.py").read_text(encoding="utf-8")
+    assert "SELECTIVE_ROLLBACK_PROBE = True" in execution
+    assert "Controlled selective rollback probe" in execution
+
+
 def test_transfer_rollout_probe_is_isolated_to_its_worker_entrypoint():
     execution = (ROOT / "app/transfer_execution.py").read_text(encoding="utf-8")
     update_agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
