@@ -139,7 +139,8 @@ def test_bootstrap_prepares_the_isolated_database_only_for_explicit_simulation_m
     assert "E' \\n\\r\\t'" in bootstrap
     assert "createdb -U migration -O migration_simulation migration_simulation" in bootstrap
     assert "printf 'REAL\\n'" in bootstrap
-    assert runtime.count("RAIJIN_OPERATION_MODE=REAL") == 2
+    # The independently rollable controller is a third REAL runtime process.
+    assert runtime.count("RAIJIN_OPERATION_MODE=REAL") == 3
     assert runtime.count("RAIJIN_OPERATION_MODE=SIMULATION") == 4
     assert "OCI_RUNTIME_CONFIG_FILE" in runtime
     simulation_branch = runtime.split("SIMULATION)", 1)[1]
@@ -195,6 +196,8 @@ def test_simulation_guard_exposes_operational_apis_but_blocks_real_cloud_configu
     assert 'path.startswith("/api/oci/")' in main
     assert 'path.startswith("/api/aws-secrets")' in main
     assert 'path.startswith("/api/aws-connections")' in main
-    assert 'path.startswith("/api/global-aws-pricing")' not in main
+    # Public price-list reads do not use a configured cloud connection and
+    # remain available to the simulated operational console.
+    assert 'path.startswith("/api/global-aws-pricing") and method in {"GET", "HEAD", "OPTIONS"}' in main
     assert 'path == "/api/sources" and request.method == "POST"' in main
     assert "This real-cloud configuration endpoint is unavailable in Simulation mode" in main
