@@ -6,13 +6,13 @@
 # remote, execute shell, access the deploy key, Podman or systemd directly.
 set -euo pipefail
 
-install_root=/opt/s3-oci-migration/release
-control_root=/var/lib/s3-oci-migration/update-control
+install_root=/opt/raijin-data-migration/release
+control_root=/var/lib/raijin-data-migration/update-control
 request="$control_root/request.json"
 result="$control_root/result.json"
-config=/etc/s3-oci-migration/update.env
-service=s3-oci-migration.service
-backup=/usr/local/sbin/s3-oci-backup-postgres
+config=/etc/raijin-data-migration/update.env
+service=raijin-data-migration.service
+backup=/usr/local/sbin/raijin-backup-postgres
 
 mkdir -p "$control_root"
 chmod 0750 "$control_root"
@@ -225,7 +225,7 @@ PY
 write_result() {
   local state="$1" message="$2" current="${3:-}" available="${4:-}" previous="${5:-}"
   local progress="${6:-0}" database_revision
-  database_revision="$(podman exec s3-oci-postgres psql -U migration -d migration -Atc 'SELECT coalesce(max(version), 0) FROM raijin_schema_revisions' 2>/dev/null || true)"
+  database_revision="$(podman exec raijin-postgres psql -U migration -d migration -Atc 'SELECT coalesce(max(version), 0) FROM raijin_schema_revisions' 2>/dev/null || true)"
   [[ "$database_revision" =~ ^[0-9]+$ ]] || database_revision=""
   local impact
   impact="$(update_impact "$current" "$available")" || impact='{}'
@@ -279,7 +279,7 @@ check_update() {
 
 runtime_is_drained() {
   local counts
-  counts="$(podman exec s3-oci-postgres psql -U migration -d migration -Atc \
+  counts="$(podman exec raijin-postgres psql -U migration -d migration -Atc \
     "select count(*) from tasks where state in ('READY','RUNNING'); select count(*) from discovery_jobs where state in ('READY','RUNNING'); select count(*) from waves where status in ('RESTORE_REQUESTED','RESTORE_REQUEST_ACCEPTED','RESTORING','RESTORE_DRAINING','TRANSFERRING','TRANSFER_DRAINING');" 2>/dev/null || true)"
   local task_count discovery_count wave_count
   task_count="$(sed -n '1p' <<<"$counts")"; discovery_count="$(sed -n '2p' <<<"$counts")"; wave_count="$(sed -n '3p' <<<"$counts")"
@@ -299,7 +299,7 @@ except Exception:
 
 release_image_for_revision() {
   local revision="$1"
-  printf 'localhost/s3-oci-migration:%s\n' "$revision"
+  printf 'localhost/raijin-data-migration:%s\n' "$revision"
 }
 
 build_release_image() {
@@ -337,19 +337,19 @@ apply_database_migration() {
     write_result FAILED "Approved release has no valid expand-only database migration declaration." "$(revision HEAD)" "$revision"
     return 1
   }
-  current="$(podman exec s3-oci-postgres psql -U migration -d migration -Atc 'SELECT coalesce(max(version), 0) FROM raijin_schema_revisions' 2>/dev/null || true)"
+  current="$(podman exec raijin-postgres psql -U migration -d migration -Atc 'SELECT coalesce(max(version), 0) FROM raijin_schema_revisions' 2>/dev/null || true)"
   if [[ "$current" =~ ^[0-9]+$ && "$current" -gt "$required" ]]; then
     write_result FAILED "Database schema is newer than the approved release requires." "$(revision HEAD)" "$revision"
     return 1
   fi
   write_result DEPLOYING "Applying approved expand-only database migrations." "$(revision HEAD)" "$revision" "" 60
-  podman run --rm --network s3-oci-migration \
+  podman run --rm --network raijin-data-migration \
     -e RAIJIN_OPERATION_MODE=REAL \
     -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
     -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
-    -v /etc/s3-oci-migration/secrets/postgres_password:/run/secrets/postgres_password:ro,z \
+    -v /etc/raijin-data-migration/secrets/postgres_password:/run/secrets/postgres_password:ro,z \
     "$(release_image_for_revision "$revision")" env PYTHONPATH=/app python3 scripts/migrate-production.py
-  current="$(podman exec s3-oci-postgres psql -U migration -d migration -Atc 'SELECT coalesce(max(version), 0) FROM raijin_schema_revisions' 2>/dev/null || true)"
+  current="$(podman exec raijin-postgres psql -U migration -d migration -Atc 'SELECT coalesce(max(version), 0) FROM raijin_schema_revisions' 2>/dev/null || true)"
   [[ "$current" =~ ^[0-9]+$ && "$current" -ge "$required" ]] || {
     write_result FAILED "Database migration did not reach the revision declared by the approved release." "$(revision HEAD)" "$revision"
     return 1
@@ -358,7 +358,7 @@ apply_database_migration() {
 
 apply_web_only_update() {
   local current="$1" available="$2" previous_image candidate_image
-  previous_image="$(podman inspect --format '{{.ImageName}}' s3-oci-app 2>/dev/null || true)"
+  previous_image="$(podman inspect --format '{{.ImageName}}' raijin-app 2>/dev/null || true)"
   [[ -n "$previous_image" ]] || {
     write_result FAILED "Could not identify the running web container image." "$current" "$available" "$current"
     return 1
@@ -387,7 +387,7 @@ apply_web_only_update() {
 
 apply_controller_only_update() {
   local current="$1" available="$2" previous_image candidate_image
-  previous_image="$(podman inspect --format '{{.ImageName}}' s3-oci-raikou-shin 2>/dev/null || true)"
+  previous_image="$(podman inspect --format '{{.ImageName}}' raijin-raikou-shin 2>/dev/null || true)"
   [[ -n "$previous_image" ]] || {
     write_result FAILED "Could not identify the running controller image." "$current" "$available" "$current"
     return 1
@@ -473,19 +473,19 @@ apply_update() {
   fi
   case "$strategy" in
     RESTORE_WORKER_ROLLING)
-      apply_isolated_worker_update "$current" "$available" restore s3-oci-raikou-sei "restore"
+      apply_isolated_worker_update "$current" "$available" restore raijin-raikou-sei "restore"
       return $?
       ;;
     DISCOVERY_WORKER_ROLLING)
-      apply_isolated_worker_update "$current" "$available" discovery s3-oci-raikou-ko "discovery"
+      apply_isolated_worker_update "$current" "$available" discovery raijin-raikou-ko "discovery"
       return $?
       ;;
     AUDIT_WORKER_ROLLING)
-      apply_isolated_worker_update "$current" "$available" audit s3-oci-raikou-kai "audit"
+      apply_isolated_worker_update "$current" "$available" audit raijin-raikou-kai "audit"
       return $?
       ;;
     TRANSFER_WORKER_ROLLING)
-      apply_isolated_worker_update "$current" "$available" transfer s3-oci-transfer-worker "transfer"
+      apply_isolated_worker_update "$current" "$available" transfer raijin-transfer-worker "transfer"
       return $?
       ;;
   esac

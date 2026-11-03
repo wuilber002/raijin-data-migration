@@ -10,8 +10,8 @@ Em uma topologia Fujin LOCAL já saudável, prefira a atualização mínima do
 plano de controle. Depois do backup lógico e build da imagem alvo, execute:
 
 ```bash
-sudo /opt/s3-oci-migration/release/scripts/update-fujin-local-raijin-runtime.sh \
-  localhost/s3-oci-migration:<nova-release>
+sudo /opt/raijin-data-migration/release/scripts/update-fujin-local-raijin-runtime.sh \
+  localhost/raijin-data-migration:<nova-release>
 ```
 
 O atualizador recusa a troca se houver dispatcher de transferência em execução
@@ -109,7 +109,7 @@ publicada somente em `127.0.0.1:1604` e será acessada pelo túnel SSH.
 
 ### Bind da console web
 
-O bootstrap cria `/etc/s3-oci-migration/web-bind.env` com o padrão seguro:
+O bootstrap cria `/etc/raijin-data-migration/web-bind.env` com o padrão seguro:
 
 ```ini
 WEB_BIND_HOST=127.0.0.1
@@ -118,14 +118,14 @@ WEB_BIND_PORT=1604
 
 O host aceita `127.0.0.1`, `0.0.0.0`, `::` ou um IP específico da VM; a porta
 deve estar entre 1 e 65535. Após alterar o arquivo, aplique com
-`sudo systemctl restart s3-oci-migration.service`. O processo no container
+`sudo systemctl restart raijin-data-migration.service`. O processo no container
 continua na porta interna `8080`; não a exponha diretamente. Um bind diferente
 de loopback exige controles externos equivalentes, como NSG, firewall e proxy
 reverso com autenticação.
 
 ### Autenticação local da console
 
-O bootstrap também cria `/etc/s3-oci-migration/web-auth.env`. Nesta release o
+O bootstrap também cria `/etc/raijin-data-migration/web-auth.env`. Nesta release o
 valor padrão é compatível com instalações existentes e **não ativa** login:
 
 ```ini
@@ -144,7 +144,7 @@ valide antes do restart:
 
 ```bash
 sudo /usr/local/sbin/raijin-console-auth-preflight
-sudo systemctl restart s3-oci-migration.service
+sudo systemctl restart raijin-data-migration.service
 ```
 
 O primeiro início cria somente o usuário bootstrap como `ADMIN`, com senha
@@ -181,8 +181,8 @@ O arquivo contém referências de Secret (OCIDs ou caminhos locais protegidos) e
 metadados; nunca valores de senha, access key ou outro conteúdo de Secret:
 
 ```bash
-sudo install -d -m 0755 /etc/s3-oci-migration
-sudo vi /etc/s3-oci-migration/oci-runtime.json
+sudo install -d -m 0755 /etc/raijin-data-migration
+sudo vi /etc/raijin-data-migration/oci-runtime.json
 ```
 
 Substitua todos os valores entre `<...>` e proteja o arquivo:
@@ -197,7 +197,7 @@ Substitua todos os valores entre `<...>` e proteja o arquivo:
   },
   "secret_ocids": {"postgres_password": "<POSTGRES_SECRET_OCID>"},
   "secret_file_paths": {
-    "console_bootstrap_password": "/etc/s3-oci-migration/bootstrap-console-password"
+    "console_bootstrap_password": "/etc/raijin-data-migration/bootstrap-console-password"
   },
   "secrets_compartment_ocid": "<SECRETS_COMPARTMENT_OCID>",
   "secret_compartment_ocids": ["<SECRETS_COMPARTMENT_OCID>"]
@@ -212,7 +212,7 @@ inicial da console sempre usa um caminho absoluto root-owned `0600` em
 {
   "secret_ocids": {"postgres_password": "<POSTGRES_SECRET_OCID>"},
   "secret_file_paths": {
-    "console_bootstrap_password": "/etc/s3-oci-migration/bootstrap-console-password"
+    "console_bootstrap_password": "/etc/raijin-data-migration/bootstrap-console-password"
   }
 }
 ```
@@ -220,11 +220,11 @@ inicial da console sempre usa um caminho absoluto root-owned `0600` em
 Após a primeira troca de senha do administrador, remova o arquivo local de
 bootstrap e a referência `console_bootstrap_password`; ele não deve ser movido
 para Vault nem reutilizado. O arquivo materializado correspondente em
-`/etc/s3-oci-migration/secrets/` também deve ser removido antes de expor um
+`/etc/raijin-data-migration/secrets/` também deve ser removido antes de expor um
 bind não-loopback.
 
 ```bash
-sudo chmod 0600 /etc/s3-oci-migration/oci-runtime.json
+sudo chmod 0600 /etc/raijin-data-migration/oci-runtime.json
 ```
 
 Deixe endpoint e CA vazios para OCI público. Em OCI privado, informe a URL
@@ -239,7 +239,7 @@ host, pertencente a `root`, com modo `0600` ou mais restritivo. Exemplo:
 ```json
 "secret_ocids": {},
 "secret_file_paths": {
-  "postgres_password": "/etc/s3-oci-migration/bootstrap/postgres_password"
+  "postgres_password": "/etc/raijin-data-migration/bootstrap/postgres_password"
 }
 ```
 
@@ -249,15 +249,15 @@ adoção de Secrets abaixo.
 
 ### 3. Materializar uma release imutável
 
-O bootstrap exige `/opt/s3-oci-migration/release`. A primeira construção usa
+O bootstrap exige `/opt/raijin-data-migration/release`. A primeira construção usa
 Podman no host; por isso exige acesso ao repositório, registries e PyPI. Um
 artefato offline completo ainda não é um caminho de instalação suportado.
 
 ```bash
-sudo install -d -m 0755 /opt/s3-oci-migration
-sudo git clone '<REPOSITORY_URL>' /opt/s3-oci-migration/release
-sudo git -C /opt/s3-oci-migration/release checkout --detach '<RELEASE_REF>'
-sudo git -C /opt/s3-oci-migration/release rev-parse HEAD
+sudo install -d -m 0755 /opt/raijin-data-migration
+sudo git clone '<REPOSITORY_URL>' /opt/raijin-data-migration/release
+sudo git -C /opt/raijin-data-migration/release checkout --detach '<RELEASE_REF>'
+sudo git -C /opt/raijin-data-migration/release rev-parse HEAD
 ```
 
 Registre o hash retornado como evidência da instalação.
@@ -265,14 +265,14 @@ Registre o hash retornado como evidência da instalação.
 ### 4. Bootstrap e validação técnica
 
 ```bash
-sudo /opt/s3-oci-migration/release/scripts/bootstrap.sh
-sudo systemctl enable --now s3-oci-migration.service
+sudo /opt/raijin-data-migration/release/scripts/bootstrap.sh
+sudo systemctl enable --now raijin-data-migration.service
 
-sudo systemctl is-active s3-oci-migration.service
+sudo systemctl is-active raijin-data-migration.service
 curl --fail --silent http://127.0.0.1:1604/healthz
 curl --fail --silent http://127.0.0.1:1604/api/runtime
 sudo podman ps --format '{{.Names}} | {{.Status}}'
-sudo systemctl list-timers 's3-oci-*' --all
+sudo systemctl list-timers 'raijin-*' --all
 ```
 
 O bootstrap lê os Secrets pelo Instance Principal, prepara PostgreSQL
@@ -281,7 +281,7 @@ timers. Em falha,
 registre logs sem expor Secrets:
 
 ```bash
-sudo journalctl -u s3-oci-migration.service -n 200 --no-pager
+sudo journalctl -u raijin-data-migration.service -n 200 --no-pager
 ```
 
 ### Bootstrap temporário sem OCI Vault
@@ -294,14 +294,14 @@ conexões AWS nem tente operações com buckets: estas continuam indisponíveis
 até a configuração OCI definitiva.
 
 O host deve conter o marcador
-`/etc/s3-oci-migration/temporary-local-secrets`. Quando o Vault estiver
+`/etc/raijin-data-migration/temporary-local-secrets`. Quando o Vault estiver
 disponível, substitua apenas a referência de `postgres_password` no
 `oci-runtime.json`: remova o respectivo `secret_file_paths` e informe o OCID
 em `secret_ocids`. Mantenha o PostgreSQL em execução e reinicie o serviço:
 
 ```bash
-sudo systemctl restart s3-oci-migration.service
-sudo systemctl is-active s3-oci-migration.service
+sudo systemctl restart raijin-data-migration.service
+sudo systemctl is-active raijin-data-migration.service
 ```
 
 O bootstrap detecta o marcador e a mudança para Vault, troca a senha da role
@@ -337,7 +337,7 @@ arquivo `oci-runtime.json`.
 Fujin LOCAL mantém o Raijin em `REAL` e fornece endpoints privados compatíveis
 com AWS/OCI. Ele é uma instalação separada e não é provisionado pela stack
 `terraform/orm`. Antes de ativá-lo, provisione e monte externamente o volume em
-`/var/lib/s3-oci-migration/fujin-payloads`, gere `oci-runtime-local.json` e
+`/var/lib/raijin-data-migration/fujin-payloads`, gere `oci-runtime-local.json` e
 execute o [runbook de aceite Fujin LOCAL](../operacional/runbook-fujin-local-acceptance.md).
 
 Na topologia LOCAL, `fujin-local-materializer` é o único serviço com escrita
@@ -353,7 +353,7 @@ retardar temporariamente as APIs Fujin; execute a atualização sem Deep Audit
 ativo e aguarde o health check concluir. Os payloads e eventos não são
 reescritos, e as inicializações seguintes apenas confirmam os índices.
 
-`s3-oci-start-fujin-local-runtime` é uma transição de topologia: faça drain e
+`raijin-start-fujin-local-runtime` é uma transição de topologia: faça drain e
 parada controlada do runtime normal antes de executá-lo. Nunca faça essa troca
 durante transferência ativa.
 
@@ -362,7 +362,7 @@ independente de `operation-mode`: `LOCAL` seleciona a topologia privada e o
 Raijin continua sendo iniciado em `REAL` dentro dela.
 
 ```bash
-printf 'LOCAL\n' | sudo tee /etc/s3-oci-migration/deployment-profile
+printf 'LOCAL\n' | sudo tee /etc/raijin-data-migration/deployment-profile
 ```
 
 O bootstrap usa esse perfil para reconstruir Fujin, DNS, materializador,
@@ -376,9 +376,9 @@ bootstrap converge o conjunto inteiro para a revisão aprovada.
 ### 7. Atualizar uma instalação existente
 
 Atualização não é instalação nova. Em janela operacional, preserve PostgreSQL
-e `/var/lib/s3-oci-migration`, prepare a release em diretório separado, valide
+e `/var/lib/raijin-data-migration`, prepare a release em diretório separado, valide
 a imagem e faça drain antes da ativação. Esta instalação única não mantém
-rollback automático. Não use `s3-oci-stop-runtime` durante cópias: ele remove
+rollback automático. Não use `raijin-stop-runtime` durante cópias: ele remove
 a topologia ativa. Em caso de falha ou restauração de backup, siga o
 [runbook de recuperação](recovery-runbook.md).
 
@@ -463,14 +463,14 @@ Raijin.
 Na VM Oracle Linux, o bootstrap também instala o launcher equivalente ao
 perfil Compose. Depois de drenar a execução corrente, faça uma parada
 controlada, gere o perfil OCI LOCAL e execute
-`sudo /usr/local/sbin/s3-oci-start-fujin-local-runtime`. O launcher recusa
+`sudo /usr/local/sbin/raijin-start-fujin-local-runtime`. O launcher recusa
 substituir containers ativos e recria o PostgreSQL durável somente quando ele
 foi removido pela parada controlada.
 Ele sobe Raijin em `REAL`, os workers, Fujin, DNS privado e o gateway em
 loopback; não existe modo LOCAL no Raijin.
 Antes do primeiro reboot, persista `LOCAL` em
-`/etc/s3-oci-migration/deployment-profile`; o arquivo
-`/etc/s3-oci-migration/operation-mode` não representa essa escolha.
+`/etc/raijin-data-migration/deployment-profile`; o arquivo
+`/etc/raijin-data-migration/operation-mode` não representa essa escolha.
 
 A console Fujin fornece o pacote de Secret sintético no formato normal de uma
 conexão AWS. Cadastre-o no Vault sem alterar o schema e crie uma conexão AWS
@@ -532,12 +532,12 @@ Não execute a troca por navegador, por máquina remota ou durante uma
 migração. Quando a API retornar `409`, conclua, pause ou recupere as tarefas
 informadas antes de repetir a chamada.
 
-O painel de saúde também mostra o estado do serviço systemd da plataforma, dos containers PostgreSQL e aplicação, do timer de backup lógico e do timer que atualiza esse estado. O host gera um pequeno JSON em `/run/s3-oci-migration` a cada minuto; o container web apenas o lê, sem acesso ao socket Podman, systemd ou privilégios de host. O JSON deixa de ser aceito depois de três minutos, para que CPU, memória, serviços e backup congelados não pareçam atuais. O atualizador controlado reinstala o helper, reinicia o timer e exige um snapshot novo antes de declarar sucesso.
+O painel de saúde também mostra o estado do serviço systemd da plataforma, dos containers PostgreSQL e aplicação, do timer de backup lógico e do timer que atualiza esse estado. O host gera um pequeno JSON em `/run/raijin-data-migration` a cada minuto; o container web apenas o lê, sem acesso ao socket Podman, systemd ou privilégios de host. O JSON deixa de ser aceito depois de três minutos, para que CPU, memória, serviços e backup congelados não pareçam atuais. O atualizador controlado reinstala o helper, reinicia o timer e exige um snapshot novo antes de declarar sucesso.
 
 Depois de qualquer atualização na VM, valide explicitamente o agendamento e a atualidade do snapshot:
 
 ```bash
-sudo systemctl show s3-oci-platform-status.timer \
+sudo systemctl show raijin-platform-status.timer \
   -p ActiveState -p NextElapseUSecRealtime -p NextElapseUSecMonotonic
 curl -fsS http://127.0.0.1:1604/raijin/api/platform/status
 ```
@@ -567,11 +567,11 @@ Como o valor gerado pelo provider `random` fica no state do Terraform, o state d
 
 O botão **Discovery** permite escolher entre duas modalidades. O discovery remoto produtivo usa somente `ListObjectsV2` paginado: registra chave, tamanho, ETag, classe de armazenamento e última modificação sem restaurar, baixar, fazer `HeadObject` ou listar tags. Metadados e tags são lidos somente no momento da cópia de cada objeto já restaurado. Para mais de **1 milhão de objetos**, prefira o [S3 Inventory](https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-inventory.html) para reduzir chamadas à API, custo e carga operacional desnecessária. Esse é um limite operacional conservador do Raijin, não uma limitação formal da AWS; `ListObjectsV2` retorna no máximo 1.000 chaves por chamada. Consulte também a [referência ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html). A alternativa **Usar arquivo de inventário** importa um CSV UTF-8 (ou `.csv.gz`) diretamente para a origem, em lotes no servidor e sem chamar a AWS. O arquivo deve conter cabeçalho e as colunas `object_key`/`Key` e `size_bytes`/`Size`; também aceita `ETag`, `StorageClass`, `LastModifiedDate`, `VersionId`, `metadata_json` e `tags_json`. Após a primeira carga, use **Executar re-discovery** (vermelho): informe uma justificativa com mais de 10 caracteres e escolha novamente API remota, arquivo ou `manifest.json`. A operação adiciona chaves novas e atualiza somente registros ainda sem wave; qualquer alteração em objeto já associado a wave é registrada como evidência separada, sem reescrever o histórico de restore ou transferência. Quando a origem anterior foi arquivo e o re-discovery usa API, a console mostra um aviso de possíveis diferenças de momento entre as fontes. A tag na origem identifica o último método aplicado. O S3 Inventory pode emitir CSV compactado diariamente ou semanalmente, mas a primeira entrega pode levar até 48 horas. As ações da console apenas registram ou enfileiram trabalho durável; não causam chamadas AWS pelo navegador.
 
-O discovery remoto é um **job durável** próprio, visível em **Queue → Fila de discovery** com estado, lease, tentativa, erro, páginas e objetos do último checkpoint. Ele persiste no máximo dez páginas por transação e limita a listagem a dez chamadas de API por segundo; se a AWS responder `SlowDown` após a tentativa interna do SDK, aplica espera exponencial e repete o mesmo cursor, sem pular chaves. Para uma base existente com milhões de objetos, execute uma vez, em janela operacional, `sudo /opt/s3-oci-migration/release/scripts/create-discovery-indexes.sh`. O script usa `CREATE INDEX CONCURRENTLY`, portanto não bloqueia leituras/escritas normais, mas consome I/O enquanto estiver em execução.
+O discovery remoto é um **job durável** próprio, visível em **Queue → Fila de discovery** com estado, lease, tentativa, erro, páginas e objetos do último checkpoint. Ele persiste no máximo dez páginas por transação e limita a listagem a dez chamadas de API por segundo; se a AWS responder `SlowDown` após a tentativa interna do SDK, aplica espera exponencial e repete o mesmo cursor, sem pular chaves. Para uma base existente com milhões de objetos, execute uma vez, em janela operacional, `sudo /opt/raijin-data-migration/release/scripts/create-discovery-indexes.sh`. O script usa `CREATE INDEX CONCURRENTLY`, portanto não bloqueia leituras/escritas normais, mas consome I/O enquanto estiver em execução.
 
 Para S3 Inventory grande, escolha **Usar arquivo de inventário** e informe o URI `s3://.../manifest.json`. O Raijin enfileira a importação e lê o manifesto e todos os shards CSV/GZIP diretamente pelo worker, sem transferir dezenas de GB pelo navegador ou pelo túnel SSH. O checkpoint contém índice do shard e número de linhas confirmado; uma retomada relê somente o shard atual até o último lote confirmado. A migration role da conexão deve ter `s3:GetObject` no bucket/prefixo de entrega do S3 Inventory, além das permissões da source. O manifesto precisa declarar `sourceBucket` igual ao bucket da source e incluir o schema `Key, Size`.
 
-Em caso de desligamento, reinicie `s3-oci-migration.service`. PostgreSQL mantém inventário, fila, leases e evidências; tarefas com lease expirado são reassumidas pelo worker. Para uploads grandes, o `upload_id` multipart OCI e as partes já aceitas ficam no PostgreSQL: após reinício, o worker consulta essas partes e envia somente as faltantes. Discovery persiste, de forma atômica, o inventário e o checkpoint a cada até dez páginas S3; após uma interrupção, retoma sem relistar páginas confirmadas e pode repetir no máximo nove páginas ainda não confirmadas. O backup lógico diário é complementar ao backup de volume OCI; siga o [runbook de recuperação](recovery-runbook.md) para testar ou executar uma restauração controlada.
+Em caso de desligamento, reinicie `raijin-data-migration.service`. PostgreSQL mantém inventário, fila, leases e evidências; tarefas com lease expirado são reassumidas pelo worker. Para uploads grandes, o `upload_id` multipart OCI e as partes já aceitas ficam no PostgreSQL: após reinício, o worker consulta essas partes e envia somente as faltantes. Discovery persiste, de forma atômica, o inventário e o checkpoint a cada até dez páginas S3; após uma interrupção, retoma sem relistar páginas confirmadas e pode repetir no máximo nove páginas ainda não confirmadas. O backup lógico diário é complementar ao backup de volume OCI; siga o [runbook de recuperação](recovery-runbook.md) para testar ou executar uma restauração controlada.
 
 ## Componentes instalados e retenção de backup
 
@@ -580,6 +580,6 @@ O procedimento de instalação de release está na seção
 O bootstrap constrói a imagem com Podman no host; portanto, a primeira
 instalação exige acesso aos registries e dependências declarados acima.
 
-Na Oracle Linux, o bootstrap utiliza Podman nativo e registra `s3-oci-migration.service` no systemd. Os containers `s3-oci-postgres` e `s3-oci-app` usam volumes persistentes no boot volume. A API é publicada em `127.0.0.1:1604` por padrão e pode ser ajustada em `web-bind.env`.
+Na Oracle Linux, o bootstrap utiliza Podman nativo e registra `raijin-data-migration.service` no systemd. Os containers `raijin-postgres` e `raijin-app` usam volumes persistentes no boot volume. A API é publicada em `127.0.0.1:1604` por padrão e pode ser ajustada em `web-bind.env`.
 
-O timer `s3-oci-backup-postgres.timer` executa diariamente às 02:15 UTC um `pg_dump` dos bancos real e simulado e conserva 35 dias por padrão. Esse prazo cobre a quarentena padrão de 30 dias do simulador. Ele pode ser ampliado com `RAIJIN_LOGICAL_BACKUP_RETENTION_DAYS` no serviço systemd, mas nunca reduzido abaixo de 30 dias. Isso complementa, mas não substitui, a policy automática de backup do boot volume.
+O timer `raijin-backup-postgres.timer` executa diariamente às 02:15 UTC um `pg_dump` dos bancos real e simulado e conserva 35 dias por padrão. Esse prazo cobre a quarentena padrão de 30 dias do simulador. Ele pode ser ampliado com `RAIJIN_LOGICAL_BACKUP_RETENTION_DAYS` no serviço systemd, mas nunca reduzido abaixo de 30 dias. Isso complementa, mas não substitui, a policy automática de backup do boot volume.

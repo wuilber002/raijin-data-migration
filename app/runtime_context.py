@@ -1,8 +1,7 @@
-"""Process-wide execution context and isolation guardrails.
+"""Process-wide execution context and dependency guardrails.
 
-The operation mode is immutable for the lifetime of a process.  Keeping this
-small module independent from FastAPI and SQLAlchemy lets the API, workers,
-simulator and future Edge Agent enforce the same rules before doing work.
+The production launcher has one REAL runtime. The legacy simulation context
+remains temporarily importable while its code is extracted to Fujin.
 """
 
 from __future__ import annotations
@@ -140,7 +139,5 @@ def load_runtime_context(environ: dict[str, str] | None = None) -> RuntimeContex
 
 
 def mode_switch_requested(environ: dict[str, str] | None = None) -> bool:
-    """Whether the host requested a drain before changing operation mode."""
-    values = os.environ if environ is None else environ
-    request = Path(values.get("RAIJIN_MODE_REQUEST_FILE", "/run/mode-control/request"))
-    return request.is_file() or Path(f"{request}.processing").is_file()
+    """Compatibility shim while the Fujin extraction is completed."""
+    return False

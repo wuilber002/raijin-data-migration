@@ -4,7 +4,7 @@ set -euo pipefail
 # Online, additive indexes for inventories with millions of objects. Keep this
 # out of application startup: PostgreSQL's CONCURRENTLY form avoids blocking
 # normal reads/writes, but can still take significant time and I/O.
-container_name="${RAIJIN_POSTGRES_CONTAINER:-s3-oci-postgres}"
+container_name="${RAIJIN_POSTGRES_CONTAINER:-raijin-postgres}"
 
 if ! podman container exists "$container_name"; then
   echo "PostgreSQL container '$container_name' was not found. Set RAIJIN_POSTGRES_CONTAINER." >&2

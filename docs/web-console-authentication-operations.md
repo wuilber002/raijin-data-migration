@@ -8,19 +8,19 @@
 3. Em `oci-runtime.json`, configure `console_bootstrap_password` somente em
    `secret_file_paths`, usando arquivo local root-owned `0600`; Vault não é
    aceito nessa etapa.
-4. Em `/etc/s3-oci-migration/web-auth.env`, configure
+4. Em `/etc/raijin-data-migration/web-auth.env`, configure
    `RAIJIN_WEB_AUTH_MODE=local` e o usuário bootstrap em letras minúsculas.
 5. Valide sem escrever usuários:
 
    ```bash
-   sudo /opt/s3-oci-migration/release/scripts/fetch-oci-secret.py \
-     --runtime-config /etc/s3-oci-migration/oci-runtime.json \
+   sudo /opt/raijin-data-migration/release/scripts/fetch-oci-secret.py \
+     --runtime-config /etc/raijin-data-migration/oci-runtime.json \
      --secret-name console_bootstrap_password \
-     --output /etc/s3-oci-migration/secrets/console_bootstrap_password
+     --output /etc/raijin-data-migration/secrets/console_bootstrap_password
    sudo /usr/local/sbin/raijin-console-auth-preflight
    ```
 
-6. Reinicie `sudo systemctl restart s3-oci-migration.service`. Entre com o
+6. Reinicie `sudo systemctl restart raijin-data-migration.service`. Entre com o
    administrador bootstrap, troque a senha obrigatória e crie
    contas individuais `ADMIN`, `OPERATOR` e `VIEWER`.
    Em **Settings → Console access**, mantenha a política de reutilização em
@@ -29,7 +29,7 @@
    anteriores (0–12); somente hashes Argon2id dessas senhas anteriores são
    mantidos.
 7. Remova o arquivo local inicial, a referência dele em `oci-runtime.json` e
-   `/etc/s3-oci-migration/secrets/console_bootstrap_password`. Depois disso,
+   `/etc/raijin-data-migration/secrets/console_bootstrap_password`. Depois disso,
    configure o bind definitivo; bind externo ainda exige HTTPS e CIDRs exatos
    de proxy confiável em `web-auth.env`.
 8. Confirme que uma janela anônima recebe `401` da API e que um `VIEWER` não

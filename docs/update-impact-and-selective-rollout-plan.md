@@ -84,14 +84,14 @@ são verdadeiros:
 3. a política root-owned `RAIJIN_UPDATE_SELECTIVE_WEB_ONLY=true` está ativa.
 
 Nesse caso, o agente cria a imagem da revisão e substitui somente
-`s3-oci-app`, aguardando seu `/healthz`. Os containers de Raikou e Raiju não
+`raijin-app`, aguardando seu `/healthz`. Os containers de Raikou e Raiju não
 são parados, portanto transferências já em andamento continuam. A sessão web
 é encerrada como parte da reinicialização da aplicação, e o operador entra
 novamente após o health check.
 
 Também está implementado o recorte `CONTROLLER_ONLY`: somente mudanças no
 entrypoint isolado `app/controller_worker.py`, acompanhadas opcionalmente de
-testes, podem substituir `s3-oci-raikou-shin`. O novo controller precisa
+testes, podem substituir `raijin-raikou-shin`. O novo controller precisa
 publicar seu heartbeat após iniciar; ele recebe SIGTERM apenas entre ciclos
 transacionais de planejamento. Restores e transferências já despachadas não
 são interrompidos. Em falha, a imagem e a revisão anteriores do controller

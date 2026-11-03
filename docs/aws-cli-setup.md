@@ -18,10 +18,10 @@ export SOURCE_BUCKET='meu-bucket-origem'  # bucket que contém Glacier/Deep Arch
 export SOURCE_PREFIX='dados/'             # vazio para migrar o bucket inteiro
 
 export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-export BOOTSTRAP_USER='s3-oci-bootstrap-user'
-export MIGRATION_ROLE='s3-oci-migration-role'
-export BATCH_ROLE='s3-oci-batch-restore-role'
-export CONTROL_BUCKET="s3-oci-control-${AWS_ACCOUNT_ID}-${AWS_REGION}"
+export BOOTSTRAP_USER='raijin-bootstrap-user'
+export MIGRATION_ROLE='raijin-data-migration-role'
+export BATCH_ROLE='raijin-batch-restore-role'
+export CONTROL_BUCKET="raijin-control-${AWS_ACCOUNT_ID}-${AWS_REGION}"
 export WORKDIR="$(mktemp -d)"
 
 export BOOTSTRAP_USER_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:user/${BOOTSTRAP_USER}"
@@ -96,7 +96,7 @@ EOF
 
 aws iam put-user-policy \
   --user-name "$BOOTSTRAP_USER" \
-  --policy-name 's3-oci-assume-migration-role' \
+  --policy-name 'raijin-assume-migration-role' \
   --policy-document "file://$WORKDIR/bootstrap-policy.json"
 
 aws iam create-access-key \
@@ -174,7 +174,7 @@ EOF
 
 aws iam put-role-policy \
   --role-name "$MIGRATION_ROLE" \
-  --policy-name 's3-oci-migration' \
+  --policy-name 'raijin-data-migration' \
   --policy-document "file://$WORKDIR/migration-policy.json"
 ```
 
@@ -234,7 +234,7 @@ EOF
 
 aws iam put-role-policy \
   --role-name "$BATCH_ROLE" \
-  --policy-name 's3-oci-batch-restore' \
+  --policy-name 'raijin-batch-restore' \
   --policy-document "file://$WORKDIR/batch-policy.json"
 
 aws iam get-role --role-name "$BATCH_ROLE" --query 'Role.Arn' --output text
@@ -277,11 +277,11 @@ BOOTSTRAP_ACCESS_KEY_ID="$(aws iam list-access-keys \
 [[ "$BOOTSTRAP_ACCESS_KEY_ID" != 'None' ]] && \
   aws iam delete-access-key --user-name "$BOOTSTRAP_USER" --access-key-id "$BOOTSTRAP_ACCESS_KEY_ID"
 
-aws iam delete-user-policy --user-name "$BOOTSTRAP_USER" --policy-name 's3-oci-assume-migration-role'
+aws iam delete-user-policy --user-name "$BOOTSTRAP_USER" --policy-name 'raijin-assume-migration-role'
 aws iam delete-user --user-name "$BOOTSTRAP_USER"
-aws iam delete-role-policy --role-name "$MIGRATION_ROLE" --policy-name 's3-oci-migration'
+aws iam delete-role-policy --role-name "$MIGRATION_ROLE" --policy-name 'raijin-data-migration'
 aws iam delete-role --role-name "$MIGRATION_ROLE"
-aws iam delete-role-policy --role-name "$BATCH_ROLE" --policy-name 's3-oci-batch-restore'
+aws iam delete-role-policy --role-name "$BATCH_ROLE" --policy-name 'raijin-batch-restore'
 aws iam delete-role --role-name "$BATCH_ROLE"
 
 # Remove somente o bucket de controle criado por este procedimento e seu conteúdo.

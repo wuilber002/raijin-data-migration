@@ -113,7 +113,7 @@ variables:
   resource_name_prefix:
     title: Resource name prefix
     type: string
-    default: s3-oci-migration
+    default: raijin-data-migration
     required: true
   bootstrap_repository:
     title: Bootstrap GitHub repository

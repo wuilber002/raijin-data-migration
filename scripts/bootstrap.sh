@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-install_root=/opt/s3-oci-migration/release
-data_root=/var/lib/s3-oci-migration
-secret_root=/etc/s3-oci-migration/secrets
-runtime_root=/run/s3-oci-migration
-mode_control_root=/var/lib/s3-oci-migration/mode-control
-application_log_control_root=/var/lib/s3-oci-migration/application-log-control
-oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
-deployment_profile_file=/etc/s3-oci-migration/deployment-profile
-web_bind_config=/etc/s3-oci-migration/web-bind.env
-web_auth_config=/etc/s3-oci-migration/web-auth.env
-update_config=/etc/s3-oci-migration/update.env
-temporary_local_secrets_marker=/etc/s3-oci-migration/temporary-local-secrets
+install_root=/opt/raijin-data-migration/release
+data_root=/var/lib/raijin-data-migration
+secret_root=/etc/raijin-data-migration/secrets
+runtime_root=/run/raijin-data-migration
+application_log_control_root=/var/lib/raijin-data-migration/application-log-control
+oci_runtime_config=/etc/raijin-data-migration/oci-runtime.json
+web_bind_config=/etc/raijin-data-migration/web-bind.env
+web_auth_config=/etc/raijin-data-migration/web-auth.env
+update_config=/etc/raijin-data-migration/update.env
+temporary_local_secrets_marker=/etc/raijin-data-migration/temporary-local-secrets
 bootstrap_complete=false
 
 service_version="${RAIJIN_SERVICE_VERSION:-$(tr -d '[:space:]' <"$install_root/VERSION")}"
@@ -24,7 +22,7 @@ fi
   echo "Release version and revision must not be empty" >&2
   exit 1
 }
-release_image="localhost/s3-oci-migration:$build_revision"
+release_image="localhost/raijin-data-migration:$build_revision"
 
 cleanup_failed_bootstrap() {
   local exit_status=$?
@@ -36,19 +34,14 @@ cleanup_failed_bootstrap() {
   echo "RAIJIN bootstrap failed; stopping partially started containers" >&2
   if command -v podman >/dev/null 2>&1; then
     local containers=(
-      s3-oci-governance-worker
-      s3-oci-raikou-shin
-      s3-oci-raikou-sei
-      s3-oci-raikou-ko
-      s3-oci-raikou-kai
-      s3-oci-transfer-worker
-      s3-oci-app
-      s3-oci-simulator
-      s3-oci-local-ui-gateway
-      s3-oci-fujin-local-materializer
-      s3-oci-fujin-local-dns
-      s3-oci-fujin-local
-      s3-oci-postgres
+      raijin-governance-worker
+      raijin-raikou-shin
+      raijin-raikou-sei
+      raijin-raikou-ko
+      raijin-raikou-kai
+      raijin-transfer-worker
+      raijin-app
+      raijin-postgres
     )
     # Explicit stop overrides each container's restart policy and releases the
     # systemd service cgroup. Persistent PostgreSQL data remains on the host
@@ -61,12 +54,6 @@ cleanup_failed_bootstrap() {
 
 trap cleanup_failed_bootstrap EXIT
 
-# A LOCAL deployment owns the configured host web endpoint (loopback port 1604
-# by default) and keeps
-# Raijin in ordinary REAL mode behind it.  Re-running this bootstrap while the
-# complete LOCAL topology is already healthy must be idempotent: attempting to
-# publish a second process on that endpoint would incorrectly mark the platform service
-# failed even though every required container is running.
 if [[ ! -e "$web_bind_config" ]]; then
   install -d -m 0755 "$(dirname "$web_bind_config")"
   cat >"$web_bind_config" <<'EOF'
@@ -128,22 +115,22 @@ fi
 source "$install_root/scripts/web-auth.sh"
 source "$install_root/scripts/console-auth-lifecycle.sh"
 raijin_load_web_auth
-local_runtime_complete=true
-for container in s3-oci-postgres s3-oci-app s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer s3-oci-fujin-local-dns s3-oci-local-ui-gateway; do
+runtime_complete=true
+for container in raijin-postgres raijin-app raijin-raikou-shin raijin-raikou-sei raijin-raikou-ko raijin-raikou-kai raijin-transfer-worker; do
   if [[ "$(podman inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)" != true ]]; then
-    local_runtime_complete=false
+    runtime_complete=false
     break
   fi
 done
-if [[ "$local_runtime_complete" == true ]]; then
-  for container in s3-oci-app s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-fujin-local s3-oci-fujin-local-materializer; do
+if [[ "$runtime_complete" == true ]]; then
+  for container in raijin-app raijin-raikou-shin raijin-raikou-sei raijin-raikou-ko raijin-raikou-kai raijin-transfer-worker; do
     if [[ "$(podman inspect --format '{{.ImageName}}' "$container" 2>/dev/null || true)" != "$release_image" ]]; then
-      local_runtime_complete=false
+      runtime_complete=false
       break
     fi
   done
 fi
-if [[ "$local_runtime_complete" == true ]]; then
+if [[ "$runtime_complete" == true ]]; then
   bootstrap_complete=true
   trap - EXIT
   exit 0
@@ -151,7 +138,7 @@ fi
 
 web_bind_control_root="$data_root/web-bind-control"
 update_control_root="$data_root/update-control"
-mkdir -p "$data_root/postgres" "$secret_root" "$runtime_root" "$mode_control_root" "$web_bind_control_root" "$update_control_root" "$application_log_control_root"
+mkdir -p "$data_root/postgres" "$secret_root" "$runtime_root" "$web_bind_control_root" "$update_control_root" "$application_log_control_root"
 chmod 0750 "$web_bind_control_root"
 chmod 0750 "$update_control_root"
 chmod 0750 "$application_log_control_root"
@@ -195,16 +182,6 @@ print("vault" if ocid else "local")
 PY
 )"
 
-mode_file=/etc/s3-oci-migration/operation-mode
-if [[ ! -s "$mode_file" ]]; then
-  printf 'REAL\n' >"$mode_file"
-fi
-operation_mode="$(tr '[:lower:]' '[:upper:]' <"$mode_file")"
-[[ "$operation_mode" == REAL || "$operation_mode" == SIMULATION ]] || {
-  echo "Invalid operation mode in $mode_file" >&2
-  exit 1
-}
-
 # Vault is the source of truth. A first boot materializes the Terraform-created
 # password locally without writing its value to a command line or service log.
 if [[ ! -s "$secret_root/postgres_password" ]]; then
@@ -216,41 +193,22 @@ fi
 if [[ "$postgres_secret_source" == local ]]; then
   install -o root -g root -m 0600 /dev/null "$temporary_local_secrets_marker"
 fi
-postgres_secret_mounts=(
-  -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z"
-)
-if [[ "$operation_mode" == SIMULATION ]]; then
-  if [[ ! -s "$secret_root/simulation_postgres_password" ]]; then
-    python3 "$install_root/scripts/fetch-oci-secret.py" \
-      --runtime-config "$oci_runtime_config" \
-      --secret-name simulation_postgres_password \
-      --output "$secret_root/simulation_postgres_password"
-  fi
-  # postgres:16-alpine runs the database server as UID/GID 70. The server reads
-  # this file through pg_read_file() while creating/updating the isolated role.
-  chown 70:70 "$secret_root/simulation_postgres_password"
-  chmod 0400 "$secret_root/simulation_postgres_password"
-  postgres_secret_mounts+=(
-    -v "$secret_root/simulation_postgres_password:/run/secrets/simulation_postgres_password:ro,z"
-  )
-fi
+podman network exists raijin-data-migration 2>/dev/null || podman network create raijin-data-migration
+podman rm -f raijin-app raijin-postgres raijin-governance-worker raijin-raikou-shin raijin-raikou-sei raijin-raikou-ko raijin-raikou-kai raijin-transfer-worker 2>/dev/null || true
 
-podman network exists s3-oci-migration 2>/dev/null || podman network create s3-oci-migration
-podman rm -f s3-oci-app s3-oci-postgres s3-oci-governance-worker s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker s3-oci-real-worker s3-oci-simulator 2>/dev/null || true
-
-podman run -d --name s3-oci-postgres --replace --restart unless-stopped \
+podman run -d --name raijin-postgres --replace --restart unless-stopped \
   --shm-size=512m \
-  --network s3-oci-migration --network-alias postgres \
+  --network raijin-data-migration --network-alias postgres \
   -e POSTGRES_DB=migration \
   -e POSTGRES_USER=migration \
   -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
   -v "$data_root/postgres:/var/lib/postgresql/data:Z" \
-  "${postgres_secret_mounts[@]}" \
+  -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
   docker.io/library/postgres:16-alpine
 
 postgres_ready=false
 for attempt in $(seq 1 30); do
-  if podman exec s3-oci-postgres pg_isready -U migration -d migration >/dev/null 2>&1; then
+  if podman exec raijin-postgres pg_isready -U migration -d migration >/dev/null 2>&1; then
     postgres_ready=true
     break
   fi
@@ -289,32 +247,6 @@ if [[ "$postgres_secret_source" == vault && -f "$temporary_local_secrets_marker"
   "$install_root/scripts/adopt-vault-secrets.sh"
 fi
 
-if [[ "$operation_mode" == SIMULATION ]]; then
-  # A distinct role and database keep real and simulated control-plane state
-  # isolated while sharing the same durable PostgreSQL container. The password
-  # is read inside PostgreSQL from the mounted Secret and never enters argv/logs.
-  podman exec -i s3-oci-postgres psql -U migration -d migration -v ON_ERROR_STOP=1 <<'SQL'
-DO $block$
-DECLARE
-  simulation_password text := btrim(
-    pg_read_file('/run/secrets/simulation_postgres_password'),
-    E' \n\r\t'
-  );
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'migration_simulation') THEN
-    EXECUTE format('CREATE ROLE migration_simulation LOGIN PASSWORD %L', simulation_password);
-  ELSE
-    EXECUTE format('ALTER ROLE migration_simulation PASSWORD %L', simulation_password);
-  END IF;
-END
-$block$;
-SQL
-  if ! podman exec s3-oci-postgres psql -U migration -d migration -tAc \
-    "SELECT 1 FROM pg_database WHERE datname = 'migration_simulation'" | grep -q 1; then
-    podman exec s3-oci-postgres createdb -U migration -O migration_simulation migration_simulation
-  fi
-fi
-
 if ! podman image exists "$release_image"; then
   # Some Podman releases do not include changed ARG values in every cached
   # layer key. A release image is built only once, without cache, and then
@@ -324,91 +256,59 @@ if ! podman image exists "$release_image"; then
     --build-arg "RAIJIN_BUILD_REVISION=$build_revision" \
     -t "$release_image" "$install_root"
 fi
-if [[ ! -s "$deployment_profile_file" ]]; then
-  printf 'STANDARD\n' >"$deployment_profile_file"
-fi
-deployment_profile="$(tr '[:lower:]' '[:upper:]' <"$deployment_profile_file")"
-[[ "$deployment_profile" == STANDARD || "$deployment_profile" == LOCAL ]] || {
-  echo "Invalid deployment profile in $deployment_profile_file" >&2
-  exit 1
-}
-install -m 0750 "$install_root/scripts/start-runtime.sh" /usr/local/sbin/s3-oci-start-runtime
-install -m 0750 "$install_root/scripts/start-fujin-local-runtime.sh" /usr/local/sbin/s3-oci-start-fujin-local-runtime
-install -m 0750 "$install_root/scripts/configure-fujin-local-oci-runtime.py" /usr/local/sbin/configure-fujin-local-oci-runtime
-install -m 0750 "$install_root/scripts/mount-fujin-payload-volume.sh" /usr/local/sbin/s3-oci-mount-fujin-payload
-install -m 0750 "$install_root/scripts/stop-runtime.sh" /usr/local/sbin/s3-oci-stop-runtime
-install -m 0750 "$install_root/scripts/raijin-mode.sh" /usr/local/sbin/raijin-mode
+install -m 0750 "$install_root/scripts/start-runtime.sh" /usr/local/sbin/raijin-start-runtime
+install -m 0750 "$install_root/scripts/stop-runtime.sh" /usr/local/sbin/raijin-stop-runtime
 install -m 0750 "$install_root/scripts/console-admin.sh" /usr/local/sbin/raijin-console-admin
 install -m 0750 "$install_root/scripts/console-auth-preflight.sh" /usr/local/sbin/raijin-console-auth-preflight
-install -m 0750 "$install_root/scripts/process-mode-request.sh" /usr/local/sbin/s3-oci-process-mode-request
-install -m 0750 "$install_root/scripts/process-web-bind-request.sh" /usr/local/sbin/s3-oci-process-web-bind-request
-install -m 0750 "$install_root/scripts/process-update-request.sh" /usr/local/sbin/s3-oci-process-update-request
-install -m 0750 "$install_root/scripts/process-application-log-request.sh" /usr/local/sbin/s3-oci-process-application-log-request
-if [[ "$deployment_profile" == LOCAL ]]; then
-  # LOCAL is a durable deployment topology, not a Raijin operation mode.
-  # Raijin remains in REAL and sees Fujin only through ordinary private
-  # provider endpoints.  Keeping this choice separate from operation-mode
-  # makes a host reboot reconstruct the same eight-container topology.
-  /usr/local/sbin/s3-oci-mount-fujin-payload
-  RAIJIN_IMAGE="$release_image" /usr/local/sbin/s3-oci-start-fujin-local-runtime
-else
-  RAIJIN_IMAGE="$release_image" /usr/local/sbin/s3-oci-start-runtime "$operation_mode"
-fi
+install -m 0750 "$install_root/scripts/process-web-bind-request.sh" /usr/local/sbin/raijin-process-web-bind-request
+install -m 0750 "$install_root/scripts/process-update-request.sh" /usr/local/sbin/raijin-process-update-request
+install -m 0750 "$install_root/scripts/process-application-log-request.sh" /usr/local/sbin/raijin-process-application-log-request
+RAIJIN_IMAGE="$release_image" /usr/local/sbin/raijin-start-runtime
 
-cat >/etc/systemd/system/s3-oci-migration.service <<'EOF'
+# The single-runtime release retires the old mode switch and the temporary
+# Fujin co-location helpers. Remove them explicitly on upgrade so they cannot
+# be selected again after a reboot.
+systemctl disable --now raijin-mode-request.timer 2>/dev/null || true
+rm -f \
+  /etc/systemd/system/raijin-mode-request.service \
+  /etc/systemd/system/raijin-mode-request.timer \
+  /usr/local/sbin/raijin-mode \
+  /usr/local/sbin/raijin-process-mode-request \
+  /usr/local/sbin/raijin-start-fujin-local-runtime \
+  /usr/local/sbin/raijin-mount-fujin-payload \
+  /usr/local/sbin/configure-fujin-local-oci-runtime \
+  /etc/raijin-data-migration/operation-mode \
+  /etc/raijin-data-migration/deployment-profile
+
+cat >/etc/systemd/system/raijin-data-migration.service <<'EOF'
 [Unit]
-Description=S3 to OCI migration platform
+Description=Raijin Data Migration platform
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/opt/s3-oci-migration/release/scripts/bootstrap.sh
-ExecStop=/usr/local/sbin/s3-oci-stop-runtime
+ExecStart=/opt/raijin-data-migration/release/scripts/bootstrap.sh
+ExecStop=/usr/local/sbin/raijin-stop-runtime
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable s3-oci-migration.service
+systemctl enable raijin-data-migration.service
 
-cat >/etc/systemd/system/s3-oci-mode-request.service <<'EOF'
-[Unit]
-Description=Process a validated RAIJIN operation-mode request
-After=s3-oci-migration.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/s3-oci-process-mode-request
-EOF
-cat >/etc/systemd/system/s3-oci-mode-request.timer <<'EOF'
-[Unit]
-Description=Watch for RAIJIN operation-mode requests
-
-[Timer]
-OnBootSec=10
-OnUnitActiveSec=5
-AccuracySec=1
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-systemctl daemon-reload
-systemctl enable --now s3-oci-mode-request.timer
-
-cat >/etc/systemd/system/s3-oci-web-bind-request.service <<'EOF'
+cat >/etc/systemd/system/raijin-web-bind-request.service <<'EOF'
 [Unit]
 Description=Process a validated RAIJIN console endpoint request
-After=s3-oci-migration.service
+After=raijin-data-migration.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/s3-oci-process-web-bind-request
+ExecStart=/usr/local/sbin/raijin-process-web-bind-request
 EOF
-cat >/etc/systemd/system/s3-oci-web-bind-request.timer <<'EOF'
+cat >/etc/systemd/system/raijin-web-bind-request.timer <<'EOF'
 [Unit]
 Description=Watch for RAIJIN console endpoint requests
 
@@ -422,18 +322,18 @@ Persistent=true
 WantedBy=timers.target
 EOF
 systemctl daemon-reload
-systemctl enable --now s3-oci-web-bind-request.timer
+systemctl enable --now raijin-web-bind-request.timer
 
-cat >/etc/systemd/system/s3-oci-application-log-request.service <<'EOF'
+cat >/etc/systemd/system/raijin-application-log-request.service <<'EOF'
 [Unit]
 Description=Collect bounded RAIJIN application logs
-After=s3-oci-migration.service
+After=raijin-data-migration.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/s3-oci-process-application-log-request
+ExecStart=/usr/local/sbin/raijin-process-application-log-request
 EOF
-cat >/etc/systemd/system/s3-oci-application-log-request.timer <<'EOF'
+cat >/etc/systemd/system/raijin-application-log-request.timer <<'EOF'
 [Unit]
 Description=Watch for RAIJIN application log requests
 
@@ -447,19 +347,19 @@ Persistent=true
 WantedBy=timers.target
 EOF
 systemctl daemon-reload
-systemctl enable --now s3-oci-application-log-request.timer
+systemctl enable --now raijin-application-log-request.timer
 
-cat >/etc/systemd/system/s3-oci-update-request.service <<'EOF'
+cat >/etc/systemd/system/raijin-update-request.service <<'EOF'
 [Unit]
 Description=Process a validated RAIJIN source update request
-After=s3-oci-migration.service network-online.target
+After=raijin-data-migration.service network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/s3-oci-process-update-request
+ExecStart=/usr/local/sbin/raijin-process-update-request
 EOF
-cat >/etc/systemd/system/s3-oci-update-request.timer <<'EOF'
+cat >/etc/systemd/system/raijin-update-request.timer <<'EOF'
 [Unit]
 Description=Watch for RAIJIN source update requests
 
@@ -473,20 +373,20 @@ Persistent=true
 WantedBy=timers.target
 EOF
 systemctl daemon-reload
-systemctl enable --now s3-oci-update-request.timer
+systemctl enable --now raijin-update-request.timer
 
-install -m 0750 "$install_root/scripts/backup-postgres.sh" /usr/local/sbin/s3-oci-backup-postgres
-install -m 0750 "$install_root/scripts/restore-postgres.sh" /usr/local/sbin/s3-oci-restore-postgres
-cat >/etc/systemd/system/s3-oci-backup-postgres.service <<'EOF'
+install -m 0750 "$install_root/scripts/backup-postgres.sh" /usr/local/sbin/raijin-backup-postgres
+install -m 0750 "$install_root/scripts/restore-postgres.sh" /usr/local/sbin/raijin-restore-postgres
+cat >/etc/systemd/system/raijin-backup-postgres.service <<'EOF'
 [Unit]
 Description=Local PostgreSQL backup for S3 to OCI migration platform
-After=s3-oci-migration.service
+After=raijin-data-migration.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/s3-oci-backup-postgres
+ExecStart=/usr/local/sbin/raijin-backup-postgres
 EOF
-cat >/etc/systemd/system/s3-oci-backup-postgres.timer <<'EOF'
+cat >/etc/systemd/system/raijin-backup-postgres.timer <<'EOF'
 [Unit]
 Description=Daily local PostgreSQL backup for S3 to OCI migration platform
 
@@ -498,19 +398,19 @@ Persistent=true
 WantedBy=timers.target
 EOF
 systemctl daemon-reload
-systemctl enable --now s3-oci-backup-postgres.timer
+systemctl enable --now raijin-backup-postgres.timer
 
-install -m 0750 "$install_root/scripts/write-platform-status.sh" /usr/local/sbin/s3-oci-write-platform-status
-cat >/etc/systemd/system/s3-oci-platform-status.service <<'EOF'
+install -m 0750 "$install_root/scripts/write-platform-status.sh" /usr/local/sbin/raijin-write-platform-status
+cat >/etc/systemd/system/raijin-platform-status.service <<'EOF'
 [Unit]
 Description=Write S3 to OCI migration platform status
-After=s3-oci-migration.service
+After=raijin-data-migration.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/s3-oci-write-platform-status
+ExecStart=/usr/local/sbin/raijin-write-platform-status
 EOF
-cat >/etc/systemd/system/s3-oci-platform-status.timer <<'EOF'
+cat >/etc/systemd/system/raijin-platform-status.timer <<'EOF'
 [Unit]
 Description=Refresh S3 to OCI migration platform status
 
@@ -524,15 +424,15 @@ Persistent=true
 WantedBy=timers.target
 EOF
 systemctl daemon-reload
-systemctl enable s3-oci-platform-status.timer
-systemctl restart s3-oci-platform-status.timer
-/usr/local/sbin/s3-oci-write-platform-status
+systemctl enable raijin-platform-status.timer
+systemctl restart raijin-platform-status.timer
+/usr/local/sbin/raijin-write-platform-status
 
 # Remove the legacy task-advancing simulation worker. The replacement backend
 # simulator is intentionally not installed until the exclusive Simulation mode
 # and its isolated database are available.
-systemctl disable --now s3-oci-simulated-worker.service 2>/dev/null || true
-rm -f /etc/systemd/system/s3-oci-simulated-worker.service /usr/local/sbin/s3-oci-simulated-worker
+systemctl disable --now raijin-simulated-worker.service 2>/dev/null || true
+rm -f /etc/systemd/system/raijin-simulated-worker.service /usr/local/sbin/raijin-simulated-worker
 systemctl daemon-reload
 
 bootstrap_complete=true

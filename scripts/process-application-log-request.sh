@@ -2,7 +2,7 @@
 # Export bounded application logs through a constrained, root-owned channel.
 set -euo pipefail
 
-control_root=/var/lib/s3-oci-migration/application-log-control
+control_root=/var/lib/raijin-data-migration/application-log-control
 request="$control_root/request.json"
 result="$control_root/result.json"
 output="$control_root/application.log"
@@ -55,7 +55,7 @@ filter_by_level() {
 }
 {
   printf 'RAIJIN %s %s logs: %s to %s\n\n' "$component" "$level" "$from" "$until"
-  declare -A containers=([app]=s3-oci-app [controller]=s3-oci-raikou-shin [restore]=s3-oci-raikou-sei [discovery]=s3-oci-raikou-ko [audit]=s3-oci-raikou-kai [transfer]=s3-oci-transfer-worker)
+  declare -A containers=([app]=raijin-app [controller]=raijin-raikou-shin [restore]=raijin-raikou-sei [discovery]=raijin-raikou-ko [audit]=raijin-raikou-kai [transfer]=raijin-transfer-worker)
   selected=()
   if [[ "$component" == all ]]; then selected=("${containers[@]}"); elif [[ "$component" != runtime ]]; then selected=("${containers[$component]}"); fi
   for container in "${selected[@]}"; do
@@ -64,8 +64,8 @@ filter_by_level() {
     podman logs --timestamps --since "$from" --until "$until" "$container" 2>&1 || true
   done
   if [[ "$component" == all || "$component" == runtime ]]; then
-    printf '\n===== s3-oci-migration.service =====\n'
-    journalctl --no-pager --output=short-iso --since "$from" --until "$until" -u s3-oci-migration.service 2>&1 || true
+    printf '\n===== raijin-data-migration.service =====\n'
+    journalctl --no-pager --output=short-iso --since "$from" --until "$until" -u raijin-data-migration.service 2>&1 || true
   fi
 # ``head`` intentionally closes the pipe at the export limit; do not treat
 # that expected SIGPIPE from the redactor as a failed host collection.

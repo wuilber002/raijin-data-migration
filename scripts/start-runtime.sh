@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mode="${1:-REAL}"
-install_root=/opt/s3-oci-migration/release
-secret_root=/etc/s3-oci-migration/secrets
-runtime_root=/run/s3-oci-migration
-mode_control_root=/var/lib/s3-oci-migration/mode-control
-web_bind_control_root=/var/lib/s3-oci-migration/web-bind-control
-update_control_root=/var/lib/s3-oci-migration/update-control
-application_log_control_root=/var/lib/s3-oci-migration/application-log-control
-oci_runtime_config=/etc/s3-oci-migration/oci-runtime.json
-image="${RAIJIN_IMAGE:-localhost/s3-oci-migration:latest}"
-network=s3-oci-migration
+install_root=/opt/raijin-data-migration/release
+secret_root=/etc/raijin-data-migration/secrets
+runtime_root=/run/raijin-data-migration
+web_bind_control_root=/var/lib/raijin-data-migration/web-bind-control
+update_control_root=/var/lib/raijin-data-migration/update-control
+application_log_control_root=/var/lib/raijin-data-migration/application-log-control
+oci_runtime_config=/etc/raijin-data-migration/oci-runtime.json
+image="${RAIJIN_IMAGE:-localhost/raijin-data-migration:latest}"
+network=raijin-data-migration
 runtime_component="${RAIJIN_RUNTIME_COMPONENT:-full}"
 [[ "$runtime_component" == full || "$runtime_component" == web || "$runtime_component" == controller || "$runtime_component" == restore || "$runtime_component" == discovery || "$runtime_component" == audit || "$runtime_component" == transfer ]] || {
   echo "RAIJIN_RUNTIME_COMPONENT must be full, web, or controller" >&2
@@ -24,7 +22,7 @@ runtime_component="${RAIJIN_RUNTIME_COMPONENT:-full}"
 install -d -m 0750 "$application_log_control_root"
 
 # The web console is loopback-only by default. Operators can persist a
-# different host interface/port in /etc/s3-oci-migration/web-bind.env.
+# different host interface/port in /etc/raijin-data-migration/web-bind.env.
 # See scripts/web-bind.sh for validation and supported values.
 # shellcheck source=web-bind.sh
 source "$install_root/scripts/web-bind.sh"
@@ -86,7 +84,7 @@ fi
 web_server_command=()
 web_tls_mounts=()
 if [[ "$RAIJIN_WEB_TRANSPORT" == https ]]; then
-  web_tls_root=/etc/s3-oci-migration/web-tls
+  web_tls_root=/etc/raijin-data-migration/web-tls
   [[ -s "$web_tls_root/cert.pem" && -s "$web_tls_root/key.pem" ]] || {
     echo "HTTPS console publication requires host TLS certificate material" >&2; exit 2;
   }
@@ -128,8 +126,8 @@ if [[ "$RAIJIN_WEB_AUTH_MODE" == local && "$console_auth_lifecycle" == BOOTSTRAP
   web_auth_secret_mounts+=( -v "$secret_root/console_bootstrap_password:/run/secrets/console_bootstrap_password:ro,z" )
 fi
 
-case "$mode" in
-  REAL)
+# Raijin has one production runtime. Fujin is a separate provider project and
+# is never started by this launcher.
     podman run --rm --network "$network" \
       -e RAIJIN_OPERATION_MODE=REAL \
       -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
@@ -137,7 +135,7 @@ case "$mode" in
       -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
       "$image" env PYTHONPATH=/app python3 scripts/migrate-production.py
     if [[ "$runtime_component" == full || "$runtime_component" == web ]]; then
-      podman run -d --name s3-oci-app --replace --restart unless-stopped \
+      podman run -d --name raijin-app --replace --restart unless-stopped \
       --network "$network" -p "$RAIJIN_WEB_BIND_PUBLISH" \
       -e RAIJIN_OPERATION_MODE=REAL \
       -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
@@ -145,7 +143,6 @@ case "$mode" in
       "${web_auth_environment[@]}" \
       "${web_auth_secret_mounts[@]}" \
       -e OCI_RUNTIME_CONFIG_FILE=/run/oci-runtime/oci-runtime.json \
-      -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
       -e RAIJIN_WEB_BIND_REQUEST_FILE=/run/web-bind-control/request.json \
       -e RAIJIN_WEB_BIND_RESULT_FILE=/run/web-bind-control/result.json \
       -e RAIJIN_UPDATE_REQUEST_FILE=/run/update-control/request.json \
@@ -154,7 +151,6 @@ case "$mode" in
       -e RAIJIN_APPLICATION_LOG_RESULT_FILE=/run/application-log-control/result.json \
       -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
       -v "$runtime_root:/run/platform-status:ro,z" \
-      -v "$mode_control_root:/run/mode-control:rw,z" \
       -v "$web_bind_control_root:/run/web-bind-control:rw,z" \
       -v "$update_control_root:/run/update-control:rw,z" \
       -v "$application_log_control_root:/run/application-log-control:rw,z" \
@@ -180,8 +176,8 @@ case "$mode" in
       transfer) worker_roles=(raiju) ;;
     esac
     for worker_role in "${worker_roles[@]}"; do
-      container="s3-oci-${worker_role}"
-      [[ "$worker_role" == raiju ]] && container=s3-oci-transfer-worker
+      container="raijin-${worker_role}"
+      [[ "$worker_role" == raiju ]] && container=raijin-transfer-worker
       rm -f "$runtime_root/${worker_role}.json"
       worker_command=(python3 -m app.component_worker)
       worker_runtime=(-e "RAIJIN_COMPONENT_HEARTBEAT_FILE=/run/platform-status/${worker_role}.json" -v "$runtime_root:/run/platform-status:rw,z")
@@ -201,12 +197,10 @@ case "$mode" in
         --network "$network" \
         -e "RAIJIN_WORKER_ID=${worker_role}-vm" -e "RAIJIN_WORKER_ROLE=$worker_role" \
         -e RAIJIN_OPERATION_MODE=REAL \
-        -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
         -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
         -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
         -e OCI_RUNTIME_CONFIG_FILE=/run/oci-runtime/oci-runtime.json \
         -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
-        -v "$mode_control_root:/run/mode-control:ro,z" \
         -v "$oci_runtime_config:/run/oci-runtime/oci-runtime.json:ro,z" \
         "${worker_runtime[@]}" \
         "$image" "${worker_command[@]}"
@@ -218,65 +212,3 @@ case "$mode" in
         sleep 1
       done
     done
-    ;;
-  SIMULATION)
-    podman run --rm --network "$network" \
-      -e PYTHONPATH=/app \
-      -e RAIJIN_OPERATION_MODE=SIMULATION \
-      -e RAIJIN_SIMULATOR_BASE_URL=http://simulator:8090 \
-      -e DATABASE_URL=postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation \
-      -e RAIJIN_SIMULATOR_DATABASE_URL=postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation \
-      -e POSTGRES_PASSWORD_FILE=/run/secrets/simulation_postgres_password \
-      -e RAIJIN_SIMULATOR_POSTGRES_PASSWORD_FILE=/run/secrets/simulation_postgres_password \
-      -v "$secret_root/simulation_postgres_password:/run/secrets/simulation_postgres_password:ro,z" \
-      "$image" python3 scripts/migrate-simulation.py
-    podman run -d --name s3-oci-simulator --replace --restart unless-stopped \
-      --network "$network" --network-alias simulator \
-      -e RAIJIN_OPERATION_MODE=SIMULATION \
-      -e RAIJIN_SIMULATOR_DATABASE_URL=postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation \
-      -e RAIJIN_SIMULATOR_POSTGRES_PASSWORD_FILE=/run/secrets/simulation_postgres_password \
-      -v "$secret_root/simulation_postgres_password:/run/secrets/simulation_postgres_password:ro,z" \
-      "$image" uvicorn app.simulator:app --host 0.0.0.0 --port 8090
-    for attempt in $(seq 1 30); do
-      podman exec s3-oci-simulator python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=2)" >/dev/null 2>&1 && break
-      [[ "$attempt" -lt 30 ]] || { echo "Simulator did not become healthy" >&2; exit 1; }
-      sleep 2
-    done
-    podman run -d --name s3-oci-app --replace --restart unless-stopped \
-      --network "$network" -p "$RAIJIN_WEB_BIND_PUBLISH" \
-      -e RAIJIN_OPERATION_MODE=SIMULATION \
-      -e RAIJIN_SIMULATOR_BASE_URL=http://simulator:8090 \
-      -e DATABASE_URL=postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation \
-      -e POSTGRES_PASSWORD_FILE=/run/secrets/simulation_postgres_password \
-      "${web_auth_environment[@]}" \
-      "${web_auth_secret_mounts[@]}" \
-      -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
-      -e RAIJIN_APPLICATION_LOG_REQUEST_FILE=/run/application-log-control/request.json \
-      -e RAIJIN_APPLICATION_LOG_RESULT_FILE=/run/application-log-control/result.json \
-      -v "$runtime_root:/run/platform-status:ro,z" \
-      -v "$mode_control_root:/run/mode-control:rw,z" \
-      -v "$application_log_control_root:/run/application-log-control:rw,z" \
-      -v "$secret_root/simulation_postgres_password:/run/secrets/simulation_postgres_password:ro,z" "$image"
-    for attempt in $(seq 1 30); do
-      curl --fail --silent "$RAIJIN_WEB_BIND_PROBE_URL/healthz" >/dev/null && break
-      [[ "$attempt" -lt 30 ]] || { echo "SIMULATION API did not become healthy" >&2; exit 1; }
-      sleep 2
-    done
-    for worker_role in raikou-shin raikou-sei raikou-ko raikou-kai raiju; do
-      container="s3-oci-${worker_role}"
-      [[ "$worker_role" == raiju ]] && container=s3-oci-transfer-worker
-      podman run -d --name "$container" --replace --restart unless-stopped \
-        --network "$network" \
-        -e "RAIJIN_WORKER_ID=${worker_role}-simulation" -e "RAIJIN_WORKER_ROLE=$worker_role" \
-        -e RAIJIN_OPERATION_MODE=SIMULATION \
-        -e RAIJIN_MODE_REQUEST_FILE=/run/mode-control/request \
-        -e RAIJIN_SIMULATOR_BASE_URL=http://simulator:8090 \
-        -e DATABASE_URL=postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation \
-        -e POSTGRES_PASSWORD_FILE=/run/secrets/simulation_postgres_password \
-        -v "$mode_control_root:/run/mode-control:ro,z" \
-        -v "$secret_root/simulation_postgres_password:/run/secrets/simulation_postgres_password:ro,z" \
-        "$image" python3 -m app.real_worker
-    done
-    ;;
-  *) echo "Mode must be REAL or SIMULATION" >&2; exit 2 ;;
-esac

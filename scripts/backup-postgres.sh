@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-backup_root=/var/lib/s3-oci-migration/backups
+backup_root=/var/lib/raijin-data-migration/backups
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 retention_days=${RAIJIN_LOGICAL_BACKUP_RETENTION_DAYS:-35}
 [[ "$retention_days" =~ ^[0-9]+$ ]] && ((retention_days >= 30)) || {
@@ -10,12 +10,12 @@ retention_days=${RAIJIN_LOGICAL_BACKUP_RETENTION_DAYS:-35}
 }
 mkdir -p "$backup_root"
 
-podman exec s3-oci-postgres pg_dump -U migration -d migration --format=custom \
+podman exec raijin-postgres pg_dump -U migration -d migration --format=custom \
   >"$backup_root/migration-$timestamp.dump"
 
-if podman exec s3-oci-postgres psql -U migration -d migration -tAc \
+if podman exec raijin-postgres psql -U migration -d migration -tAc \
   "SELECT 1 FROM pg_database WHERE datname = 'migration_simulation'" | grep -q 1; then
-  podman exec s3-oci-postgres pg_dump -U migration -d migration_simulation --format=custom \
+  podman exec raijin-postgres pg_dump -U migration -d migration_simulation --format=custom \
     >"$backup_root/migration-simulation-$timestamp.dump"
 fi
 

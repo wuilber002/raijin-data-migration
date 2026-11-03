@@ -13,7 +13,7 @@ def test_legacy_simulation_worker_is_fully_retired():
     api = (ROOT / "app/main.py").read_text(encoding="utf-8")
 
     assert "install_root/scripts/simulated-worker.py" not in bootstrap
-    assert "ExecStart=/usr/bin/python3 /usr/local/sbin/s3-oci-simulated-worker" not in bootstrap
+    assert "ExecStart=/usr/bin/python3 /usr/local/sbin/raijin-simulated-worker" not in bootstrap
     assert '"simulated_worker"' not in status
     assert 'id="set-simulation"' not in frontend
     assert 'post("/api/tasks/{task_id}/simulate")' not in api

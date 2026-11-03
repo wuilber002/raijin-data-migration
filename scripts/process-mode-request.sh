@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-request=/var/lib/s3-oci-migration/mode-control/request
-result=/var/lib/s3-oci-migration/mode-control/result
+request=/var/lib/raijin-data-migration/mode-control/request
+result=/var/lib/raijin-data-migration/mode-control/result
 [[ -s "$request" ]] || exit 0
 target="$(tr -d '[:space:]' <"$request" | tr '[:lower:]' '[:upper:]')"
 mv "$request" "$request.processing"

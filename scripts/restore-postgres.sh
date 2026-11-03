@@ -4,8 +4,8 @@ set -euo pipefail
 # Deliberately explicit recovery tool.  It is never called by the platform and
 # refuses ambiguous paths or an omitted confirmation because it replaces the
 # durable control-plane state (inventory, tasks, waves and audit evidence).
-backup_root=/var/lib/s3-oci-migration/backups
-install_root=/opt/s3-oci-migration/release
+backup_root=/var/lib/raijin-data-migration/backups
+install_root=/opt/raijin-data-migration/release
 confirm=false
 backup_file=''
 
@@ -15,8 +15,8 @@ raijin_load_web_bind
 
 usage() {
   cat <<'EOF'
-Usage: s3-oci-restore-postgres --backup /var/lib/s3-oci-migration/backups/migration-<timestamp>.dump --confirm-restore
-       s3-oci-restore-postgres --backup /var/lib/s3-oci-migration/backups/migration-simulation-<timestamp>.dump --confirm-restore
+Usage: raijin-restore-postgres --backup /var/lib/raijin-data-migration/backups/migration-<timestamp>.dump --confirm-restore
+       raijin-restore-postgres --backup /var/lib/raijin-data-migration/backups/migration-simulation-<timestamp>.dump --confirm-restore
 
 Restores one logical PostgreSQL backup into the Raijin control plane. The
 current database is backed up immediately before replacement. This operation
@@ -43,19 +43,19 @@ backup_file_real=$(realpath "$backup_file")
   exit 2
 }
 
-if [[ "$(podman inspect --format '{{.State.Running}}' s3-oci-postgres 2>/dev/null || true)" != true ]]; then
+if [[ "$(podman inspect --format '{{.State.Running}}' raijin-postgres 2>/dev/null || true)" != true ]]; then
   echo "The PostgreSQL container must be running before a logical restore." >&2
-  echo "Start s3-oci-migration.service first, then retry this command." >&2
+  echo "Start raijin-data-migration.service first, then retry this command." >&2
   exit 1
 fi
 
 target_database=migration
 target_owner=migration
-writers=(s3-oci-app s3-oci-governance-worker s3-oci-raikou-shin s3-oci-raikou-sei s3-oci-raikou-ko s3-oci-raikou-kai s3-oci-transfer-worker)
+writers=(raijin-app raijin-governance-worker raijin-raikou-shin raijin-raikou-sei raijin-raikou-ko raijin-raikou-kai raijin-transfer-worker)
 if [[ "$(basename "$backup_file_real")" == migration-simulation-* ]]; then
   target_database=migration_simulation
   target_owner=migration_simulation
-  writers=(s3-oci-fujin-local s3-oci-fujin-local-materializer)
+  writers=(raijin-fujin-local raijin-fujin-local-materializer)
 fi
 
 # Quiesce only processes that can write to the selected database. Stopping the
@@ -84,13 +84,13 @@ finish_restore() {
 trap finish_restore EXIT
 
 # Preserve the current state before a potentially irreversible logical restore.
-/usr/local/sbin/s3-oci-backup-postgres
+/usr/local/sbin/raijin-backup-postgres
 # Recreate only the selected logical database. Restoring with --clean into an
 # evolved schema can fail when newly added foreign keys depend on constraints
 # that did not exist in the older dump.
-podman exec s3-oci-postgres dropdb -U migration --force "$target_database"
-podman exec s3-oci-postgres createdb -U migration -O "$target_owner" "$target_database"
-podman exec -i s3-oci-postgres pg_restore -U migration -d "$target_database" \
+podman exec raijin-postgres dropdb -U migration --force "$target_database"
+podman exec raijin-postgres createdb -U migration -O "$target_owner" "$target_database"
+podman exec -i raijin-postgres pg_restore -U migration -d "$target_database" \
   --no-owner --exit-on-error <"$backup_file_real"
 
 restore_succeeded=true

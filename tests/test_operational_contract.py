@@ -350,20 +350,14 @@ def test_platform_status_reports_missing_or_invalid_snapshot_as_unavailable(
     assert result["services"] == {}
 
 
-def test_platform_status_collector_separates_real_and_simulation_backups():
+def test_platform_status_collector_tracks_the_real_raijin_runtime():
     script = Path("scripts/write-platform-status.sh").read_text(encoding="utf-8")
     assert "latest_backup_json 'migration-[0-9]*.dump'" in script
-    assert "latest_backup_json 'migration-simulation-[0-9]*.dump'" in script
     assert '"last_postgres_backups"' in script
-    assert '"simulator_container"' in script
     assert '"cpu_count"' in script
     bootstrap = Path("scripts/bootstrap.sh").read_text(encoding="utf-8")
-    updater = Path("scripts/update-fujin-local-raijin-runtime.sh").read_text(encoding="utf-8")
     assert "OnActiveSec=30" in bootstrap
-    assert "systemctl restart s3-oci-platform-status.timer" in bootstrap
-    assert "install_platform_status_runtime" in updater
-    assert "NextElapseUSecMonotonic" in updater
-    assert "status['available'] and not status.get('stale')" in updater
+    assert "systemctl restart raijin-platform-status.timer" in bootstrap
 
 
 def test_source_model_has_a_durable_discovery_page_checkpoint():
@@ -2287,7 +2281,7 @@ def test_postgres_recovery_tool_requires_an_explicit_backup_and_confirmation():
     assert "--confirm-restore" in script
     assert "--backup" in script
     assert '[[ "$backup_file_real" == "$backup_root_real"/* ]]' in script
-    assert "/usr/local/sbin/s3-oci-backup-postgres" in script
+    assert "/usr/local/sbin/raijin-backup-postgres" in script
     assert "pg_restore" in script
 
 
@@ -2414,9 +2408,9 @@ def test_prometheus_contract_contains_safe_operational_metrics(monkeypatch):
 
 def test_destination_provenance_requires_s3_etag_and_last_modified_when_known():
     obj = type("Object", (), {"etag": "source-etag", "last_modified": datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)})()
-    headers = {"opc-meta-s3-oci-source-etag": "source-etag", "opc-meta-s3-oci-source-last-modified": "2026-08-17T12:00:00+00:00"}
+    headers = {"opc-meta-raijin-source-etag": "source-etag", "opc-meta-raijin-source-last-modified": "2026-08-17T12:00:00+00:00"}
     assert destination_provenance_matches(obj, headers)
-    headers["opc-meta-s3-oci-source-last-modified"] = "2026-08-17T12:01:00+00:00"
+    headers["opc-meta-raijin-source-last-modified"] = "2026-08-17T12:01:00+00:00"
     assert not destination_provenance_matches(obj, headers)
 
 

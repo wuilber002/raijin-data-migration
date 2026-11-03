@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$confirm" == true ]] || { echo "Recovery requires --confirm." >&2; exit 2; }
 
-secret_root=/etc/s3-oci-migration/secrets
+secret_root=/etc/raijin-data-migration/secrets
 password_file="${RAIJIN_CONSOLE_ADMIN_PASSWORD_FILE:-}"
 if [[ "$action" != unlock ]]; then
   [[ -n "$password_file" && -f "$password_file" && ! -L "$password_file" ]] || { echo "Set RAIJIN_CONSOLE_ADMIN_PASSWORD_FILE to a protected regular file." >&2; exit 2; }
@@ -31,7 +31,7 @@ if [[ "$action" != unlock ]]; then
   mode="$(stat -c '%a' "$password_file")"
   [[ "$owner" == 0 ]] && (( (8#$mode & 8#077) == 0 )) || { echo "Recovery password file must be root-owned and mode 0600 or stricter." >&2; exit 2; }
 fi
-image="${RAIJIN_IMAGE:-$(podman inspect --format '{{.ImageName}}' s3-oci-app 2>/dev/null || true)}"
+image="${RAIJIN_IMAGE:-$(podman inspect --format '{{.ImageName}}' raijin-app 2>/dev/null || true)}"
 [[ -n "$image" ]] || { echo "Cannot determine the Raijin image; set RAIJIN_IMAGE." >&2; exit 2; }
 args=("$action" "$username" --role "$role" --confirm)
 mounts=(-v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z")
@@ -39,7 +39,7 @@ if [[ "$action" != unlock ]]; then
   mounts+=(-v "$password_file:/run/secrets/console_admin_password:ro,z")
   args+=(--password-file /run/secrets/console_admin_password)
 fi
-podman run --rm --network s3-oci-migration \
+podman run --rm --network raijin-data-migration \
   -e RAIJIN_OPERATION_MODE=REAL -e RAIJIN_WEB_AUTH_MODE=disabled \
   -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
   -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \

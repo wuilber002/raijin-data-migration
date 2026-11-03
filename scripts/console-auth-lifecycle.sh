@@ -6,7 +6,7 @@
 # reads a password or emits an identity other than the lifecycle state.
 raijin_console_auth_lifecycle_state() {
   local state
-  state="$(podman exec s3-oci-postgres psql -U migration -d migration -tAc "
+  state="$(podman exec raijin-postgres psql -U migration -d migration -tAc "
     SELECT CASE
       WHEN to_regclass('public.console_users') IS NULL THEN 'BOOTSTRAP_REQUIRED'
       WHEN EXISTS (

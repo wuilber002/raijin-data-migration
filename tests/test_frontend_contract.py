@@ -577,7 +577,7 @@ def test_console_application_logs_support_periods_and_download():
     assert 'component:query("#console-log-component").value, level:query("#console-log-level").value' in script
     assert "/api/admin/application-logs/download" in script
     assert "raijinLoadApplicationLogs" in page
-    assert 'application_log_control_root=/var/lib/s3-oci-migration/application-log-control' in bootstrap
+    assert 'application_log_control_root=/var/lib/raijin-data-migration/application-log-control' in bootstrap
     assert '"$application_log_control_root"' in bootstrap
     assert 'install -d -m 0750 "$application_log_control_root"' in runtime
 
@@ -891,11 +891,9 @@ def test_wave_table_prioritizes_compact_operational_columns_without_copy_duratio
 
 def test_duration_displays_use_the_shared_calendar_clock_format():
     migration = (ROOT / "app/static/index.html").read_text()
-    simulation = (ROOT / "app/static/simulation.html").read_text()
     formatter = (ROOT / "app/static/duration-format.js").read_text()
-    for page in (migration, simulation):
-        assert 'src="/static/duration-format.js' in page
-        assert "window.RaijinDuration.format" in page
+    assert 'src="/static/duration-format.js' in migration
+    assert "window.RaijinDuration.format" in migration
     assert "global.RaijinDuration = Object.freeze({ format: formatDuration })" in formatter
     assert "if (remaining === 0) return '0s'" in formatter
     assert "remaining % HOUR === 0" in formatter
@@ -904,7 +902,6 @@ def test_duration_displays_use_the_shared_calendar_clock_format():
     assert "if (minutes) return `${pad(minutes)}:${pad(remainingSeconds)}`" in formatter
     assert "function flightBoardDuration(seconds){return duration(seconds)}" in migration
     assert "function completionDuration(seconds){return seconds===null||seconds===undefined?'—':duration(Math.abs(Number(seconds)))}" in migration
-    assert "Real elapsed<b>${duration(r.real_elapsed_seconds)}</b>" in simulation
 
 
 def test_wave_actions_stay_inside_their_scroll_container_and_cost_is_compact():
@@ -957,25 +954,6 @@ def test_restore_queue_state_help_lists_all_operational_states_with_colored_tags
     assert ".restore-operation th,.restore-operation td{min-width:0;padding-inline:.42rem;text-align:center" in page
     assert ".restore-operation th:first-child,.restore-operation td:first-child{width:auto;min-width:0;text-align:left" in page
     assert ".restore-operation .queue-cell-line{text-align:center}" in page
-
-
-def test_simulation_help_uses_the_shared_rich_tooltip_pattern():
-    page = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
-    assert "raijin-tooltip-title" in page
-    assert "const targetFor=node=>node?.closest?.('.help[data-help]')||null" in page
-    assert ".help:hover::after,.help:focus-visible::after{content:none!important}" in page
-
-
-def test_simulation_sources_show_template_status_and_fixed_actions():
-    simulation = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
-    main = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    simulator = (ROOT / "app/simulator.py").read_text(encoding="utf-8")
-    assert "Template: ${esc(s.template_name||'Custom scenario')}" in simulation
-    assert "${sourceStatusTag(s.operational_status)}" in simulation
-    assert "deleteSimulationSource(${s.id},${sourceName})" in simulation
-    assert "/api/simulation/sources/${id}" in simulation
-    assert '@app.delete("/api/simulation/sources/{source_id}")' in main
-    assert '"template_name": template_snapshot.get("name") or "Custom scenario"' in simulator
 
 
 def test_discovered_objects_and_source_cost_actions_live_in_the_discovery_summary():
@@ -1548,18 +1526,6 @@ def test_buttons_use_content_width_and_standard_horizontal_spacing():
     assert 'id="source-edit-action"' in page
 
 
-def test_banner_exposes_synchronized_system_and_simulation_clocks():
-    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    simulation = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
-    for document in (page, simulation):
-        assert 'id="banner-clock"' in document
-        assert 'id="virtual-banner-clock"' in document
-        assert 'id="virtual-clock-rate"' in document
-        assert "/api/runtime/clock" in document
-        assert "Boolean(data.held)" in document
-        assert "ACCELERATED" in document and "HELD" in document
-
-
 def test_operational_history_emphasizes_selected_source_in_title():
     page = Path("app/static/index.html").read_text()
 
@@ -1604,58 +1570,6 @@ def test_source_modal_keeps_original_full_width_form_layout():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "#source-modal .modal-panel{width:min(1400px,100%)}" in page
     assert 'id="source-form" class="source-form-layout"' in page
-
-
-def test_simulation_mode_keeps_the_regular_console_and_exposes_a_red_admin_page():
-    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    simulation = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
-    main = (ROOT / "app/main.py").read_text(encoding="utf-8")
-
-    assert 'id="simulation-nav" class="simulation-nav hidden"' in page
-    assert 'id="simulation-runtime-banner"' in page
-    assert "location.href='/simulation'" in page
-    assert "with open(\"app/static/index.html\"" in main
-    assert '@app.get("/simulation", response_class=HTMLResponse)' in main
-    assert 'class="simulation-active" href="/simulation">Simulation</a>' in simulation
-    assert 'href="/?view=dashboard">Status</a>' in simulation
-    assert 'href="/?view=queue">Queue</a>' in simulation
-    assert 'href="/?view=migrations">Migrations</a>' in simulation
-    assert page.index('id="simulation-nav"') < page.index('class="settings-menu"')
-    assert simulation.index('class="simulation-active"') < simulation.index('class="gear"')
-    assert ".simulation-nav{background:transparent!important" in page
-    assert ".simulation-active{background:#b91c1c" in simulation
-    assert "body.simulation-mode #alerts{top:134px}" in page
-    assert "body.simulation-mode .notification-stack{top:138px}" in page
-    assert "Reative source" in simulation
-    assert "/api/simulation/sources/${id}/reactivate" in simulation
-    assert '@app.post("/api/simulation/sources/{source_id}/reactivate")' in main
-    assert '>Discovery</button><button onclick="createWaves' not in simulation
-    assert '>Create dynamic waves</button>' not in simulation
-    assert '>Queue all</button>' not in simulation
-
-
-def test_simulation_scenario_form_suggests_a_free_immutable_name():
-    simulation = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
-    assert "function refreshScenarioNameSuggestion(scenarios)" in simulation
-    assert "api('/api/simulation/scenarios')" in simulation
-    assert "simulation-${String(number).padStart(3,'0')}" in simulation
-
-
-def test_new_simulated_source_is_available_and_selected_in_migrations_without_reload():
-    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    simulation = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
-
-    assert "cache:'no-store'" in page
-    assert "cache:'no-store'" in simulation
-    assert "raijin:pending-simulation-source-id" in page
-    assert "sessionStorage.setItem('raijin:pending-simulation-source-id',String(sourceId))" in simulation
-    assert "function announceMigrationSource(sourceId)" in simulation
-    assert "new BroadcastChannel('raijin-sources')" in simulation
-    assert "raijin:simulation-source-notification" in simulation
-    assert "function receiveSimulationSourceNotification(message)" in page
-    assert "new BroadcastChannel('raijin-sources')" in page
-    assert "window.addEventListener('storage'" in page
-    assert "onclick=\"reactivateSource(${s.id})\"" in simulation
 
 
 def test_final_report_throughput_chart_resolves_its_id_as_a_css_selector():
@@ -1733,32 +1647,6 @@ def test_missing_backup_alert_requires_two_consecutive_status_snapshots():
     assert "consecutiveMissingBackupSnapshots" in page
     assert "consecutiveMissingBackupSnapshots<2" in page
     assert "key==='missing-backup'" in page
-
-
-def test_simulation_admin_page_keeps_the_persistent_operational_footer():
-    simulation = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
-
-    assert 'id="operational-statusbar" class="operational-statusbar"' in simulation
-    assert 'id="statusbar-ticker" class="statusbar-ticker idle"' in simulation
-    assert "function updateOperationalMessages(operations,platform,observability)" in simulation
-    assert "async function refreshOperationalMessages()" in simulation
-    assert "setInterval(refreshOperationalMessages,30000)" in simulation
-
-
-def test_simulation_scenario_form_uses_grouped_integers_and_gb_units():
-    simulation = (ROOT / "app/static/simulation.html").read_text(encoding="utf-8")
-
-    assert "Logical size (GB)" in simulation
-    assert "DATA stream budget (GB)" in simulation
-    assert 'value="100.000"' in simulation
-    assert 'value="1.000"' in simulation
-    assert 'value="3.600"' in simulation
-    assert "const GB_BYTES=1_000_000_000" in simulation
-    assert "logical_size_bytes:logicalSizeGb*GB_BYTES" in simulation
-    assert "physical_budget_bytes:physicalBudgetGb*GB_BYTES" in simulation
-    assert "function prepareIntegerFields()" in simulation
-    assert "stepIntegerInput(input,direction)" in simulation
-    assert 'step="0.01"' not in simulation
 
 
 def test_public_project_links_use_current_repository_name():

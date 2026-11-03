@@ -241,7 +241,7 @@ Esta funcionalidade **não será desenvolvida diretamente no runtime atualmente 
 
 - `main`/release atual: permanece como versão estável utilizada no ambiente corrente e recebe somente correções aprovadas de produção.
 - Branch de longo prazo sugerida: `feature/raiju-groups-control-plane`.
-- Imagens futuras devem usar namespace/tag distinto, por exemplo `localhost/s3-oci-migration:raiju-groups-dev-<revision>`.
+- Imagens futuras devem usar namespace/tag distinto, por exemplo `localhost/raijin-data-migration:raiju-groups-dev-<revision>`.
 - Nenhum script de deploy da versão atual deve selecionar, por padrão, imagens da futura build.
 - Correções compartilháveis devem ser extraídas em commits pequenos e podem ser aplicadas seletivamente à versão atual somente após revisão explícita.
 

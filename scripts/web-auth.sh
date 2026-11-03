@@ -5,7 +5,7 @@
 # oci-runtime.json: the latter contains Secret references only, whereas this
 # file controls host exposure and session policy.
 raijin_load_web_auth() {
-  local config_file="${RAIJIN_WEB_AUTH_CONFIG:-/etc/s3-oci-migration/web-auth.env}"
+  local config_file="${RAIJIN_WEB_AUTH_CONFIG:-/etc/raijin-data-migration/web-auth.env}"
   local key value line
   local mode="disabled"
   local external_https="false"

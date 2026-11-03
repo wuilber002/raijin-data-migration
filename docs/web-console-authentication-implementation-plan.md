@@ -313,7 +313,7 @@ crítico/alto fica aberto; aceite operacional e de segurança registrado.
   banco, porta e Secret próprios. Nunca usar o PostgreSQL da homologação atual
   durante refatoração incompleta.
 - A imagem futura recebe tag distinta, por exemplo
-  `localhost/s3-oci-migration:web-auth-dev-<revision>`.
+  `localhost/raijin-data-migration:web-auth-dev-<revision>`.
 - Homologação usa cópia de banco vazia/sintética primeiro e somente depois a
   VM de homologação designada, com backup lógico confirmado antes de mudar
   `auth_mode`.

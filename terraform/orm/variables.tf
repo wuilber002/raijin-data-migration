@@ -86,7 +86,7 @@ variable "assign_public_ip" {
 variable "resource_name_prefix" {
   description = "Prefix used in names of all created resources."
   type        = string
-  default     = "s3-oci-migration"
+  default     = "raijin-data-migration"
 
   validation {
     condition     = can(regex("^[A-Za-z][A-Za-z0-9-]{1,40}$", var.resource_name_prefix))

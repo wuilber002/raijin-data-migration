@@ -17,8 +17,8 @@ current version must contain this JSON document:
   "default_region": "us-east-1",
   "bootstrap_access_key_id": "AKIA...",
   "bootstrap_secret_access_key": "...",
-  "migration_role_arn": "arn:aws:iam::123456789012:role/s3-oci-migration-role",
-  "batch_operations_role_arn": "arn:aws:iam::123456789012:role/s3-oci-batch-restore-role",
+  "migration_role_arn": "arn:aws:iam::123456789012:role/raijin-data-migration-role",
+  "batch_operations_role_arn": "arn:aws:iam::123456789012:role/raijin-batch-restore-role",
   "control_bucket": "financeiro-raijin-control",
   "private_endpoint": {
     "sts_endpoint_url": "https://sts.us-east-1.example.internal",

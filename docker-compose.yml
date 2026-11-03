@@ -1,9 +1,3 @@
-x-raijin-build: &raijin-build
-  context: .
-  args:
-    RAIJIN_SERVICE_VERSION: ${RAIJIN_SERVICE_VERSION:-0.8.11}
-    RAIJIN_BUILD_REVISION: ${RAIJIN_BUILD_REVISION:-development}
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -13,11 +7,8 @@ services:
       POSTGRES_USER: migration
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     volumes:
-      - /var/lib/s3-oci-migration/postgres:/var/lib/postgresql/data
-      - ./scripts/init-postgres-simulation.sh:/docker-entrypoint-initdb.d/20-simulation.sh:ro
-    secrets:
-      - postgres_password
-      - simulation_postgres_password
+      - raijin-postgres:/var/lib/postgresql/data
+    secrets: [postgres_password]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U migration -d migration"]
       interval: 10s
@@ -25,367 +16,67 @@ services:
       retries: 10
 
   app:
-    build: *raijin-build
-    profiles: ["real"]
+    build: .
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
+      postgres: {condition: service_healthy}
+    environment: &raijin-environment
       RAIJIN_OPERATION_MODE: REAL
       DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       RAIJIN_WEB_BIND_HOST: ${RAIJIN_WEB_BIND_HOST:-127.0.0.1}
       RAIJIN_WEB_AUTH_MODE: ${RAIJIN_WEB_AUTH_MODE:-disabled}
-      RAIJIN_WEB_EXTERNAL_HTTPS: ${RAIJIN_WEB_EXTERNAL_HTTPS:-false}
-      RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS: ${RAIJIN_WEB_AUTH_TRUSTED_PROXY_CIDRS:-}
-      RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES: ${RAIJIN_WEB_AUTH_SESSION_IDLE_MINUTES:-30}
-      RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES: ${RAIJIN_WEB_AUTH_SESSION_ABSOLUTE_MINUTES:-720}
     ports:
       - "${RAIJIN_WEB_BIND_HOST:-127.0.0.1}:${RAIJIN_WEB_BIND_PORT:-1604}:8080"
-    secrets:
-      - postgres_password
-
-  # LOCAL deliberately remains a REAL Raijin process. Fujin is a separate
-  # provider service; only the generic endpoint configuration points clients
-  # at its private network aliases.
-  local-app:
-    build: *raijin-build
-    profiles: ["local"]
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      fujin-local:
-        condition: service_healthy
-    environment:
-      RAIJIN_OPERATION_MODE: REAL
-      DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      OCI_RUNTIME_CONFIG_FILE: /run/oci-runtime/oci-runtime.json
-    expose: ["8080"]
     secrets: [postgres_password]
-    # The UI network is control-plane only.  It lets the loopback gateway
-    # resolve the app and Fujin aliases without joining its data API to the
-    # default application network.
-    networks: [fujin-local-ui, default, fujin-local-data]
-    dns: [172.30.0.53]
-    volumes:
-      - /var/lib/s3-oci-migration/fujin-local/tls:/etc/fujin-local-ca:ro
-      - /etc/s3-oci-migration/oci-runtime-local.json:/run/oci-runtime/oci-runtime.json:ro
 
-  local-raikou-shin: &local-raikou-worker
-    build: *raijin-build
-    profiles: ["local"]
+  raikou-shin: &worker
+    build: .
     restart: unless-stopped
-    # A release must let an in-flight control call settle its durable task
-    # state instead of converting a normal SIGTERM into a SIGKILL incident.
-    stop_grace_period: 2m
     depends_on:
-      postgres:
-        condition: service_healthy
-      local-app:
-        condition: service_started
-      fujin-local:
-        condition: service_healthy
-    command: ["python3", "-m", "app.controller_worker"]
-    environment: &local-raikou-worker-environment
-      RAIJIN_OPERATION_MODE: REAL
+      postgres: {condition: service_healthy}
+    environment:
+      <<: *raijin-environment
       RAIJIN_WORKER_ROLE: raikou-shin
-      RAIJIN_WORKER_ID: raikou-shin-local
-      DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      OCI_RUNTIME_CONFIG_FILE: /run/oci-runtime/oci-runtime.json
-    secrets: [postgres_password]
-    networks: [default, fujin-local-data]
-    dns: [172.30.0.53]
-    volumes:
-      - /var/lib/s3-oci-migration/fujin-local/tls:/etc/fujin-local-ca:ro
-      - /etc/s3-oci-migration/oci-runtime-local.json:/run/oci-runtime/oci-runtime.json:ro
-
-  local-raikou-sei:
-    <<: *local-raikou-worker
-    command: ["python3", "-m", "app.restore_worker"]
-    environment:
-      <<: *local-raikou-worker-environment
-      RAIJIN_WORKER_ROLE: raikou-sei
-      RAIJIN_WORKER_ID: raikou-sei-local
-
-  local-raikou-ko:
-    <<: *local-raikou-worker
-    command: ["python3", "-m", "app.discovery_worker"]
-    environment:
-      <<: *local-raikou-worker-environment
-      RAIJIN_WORKER_ROLE: raikou-ko
-      RAIJIN_WORKER_ID: raikou-ko-local
-
-  local-raikou-kai:
-    <<: *local-raikou-worker
-    command: ["python3", "-m", "app.audit_worker"]
-    environment:
-      <<: *local-raikou-worker-environment
-      RAIJIN_WORKER_ROLE: raikou-kai
-      RAIJIN_WORKER_ID: raikou-kai-local
-
-  local-transfer-worker:
-    build: *raijin-build
-    profiles: ["local"]
-    restart: unless-stopped
-    # Raiju observes SIGTERM at each committed object/multipart-part boundary.
-    # Two minutes leave room for the active SDK call and the PostgreSQL
-    # checkpoint to settle before Podman considers forceful termination.
-    stop_grace_period: 2m
-    depends_on:
-      postgres:
-        condition: service_healthy
-      local-app:
-        condition: service_started
-      fujin-local:
-        condition: service_healthy
-    environment:
-      RAIJIN_OPERATION_MODE: REAL
-      RAIJIN_WORKER_ROLE: raiju
-      RAIJIN_WORKER_ID: raiju-local
-      DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      OCI_RUNTIME_CONFIG_FILE: /run/oci-runtime/oci-runtime.json
-    command: ["python3", "-m", "app.transfer_worker"]
-    secrets: [postgres_password]
-    networks: [default, fujin-local-data]
-    dns: [172.30.0.53]
-    volumes:
-      - /var/lib/s3-oci-migration/fujin-local/tls:/etc/fujin-local-ca:ro
-      - /etc/s3-oci-migration/oci-runtime-local.json:/run/oci-runtime/oci-runtime.json:ro
-
-  fujin-local:
-    build: *raijin-build
-    profiles: ["local"]
-    restart: unless-stopped
-    # Keep the provider available long enough for a Raiju to finish or safely
-    # checkpoint its current request during a coordinated rollout.
-    stop_grace_period: 2m
-    environment:
-      FUJIN_LOCAL_DATABASE_URL: sqlite+pysqlite:////var/lib/fujin-local/catalog.db
-      FUJIN_LOCAL_PAYLOAD_ROOT: /var/lib/fujin-local/payloads
-      FUJIN_LOCAL_STAGING_ROOT: /var/lib/fujin-local/staging
-      FUJIN_LOCAL_AWS_REGION: us-east-1
-      FUJIN_LOCAL_OCI_REGION: sa-saopaulo-1
-      FUJIN_LOCAL_VPCE_ID: vpce-fujin-local
-      FUJIN_LOCAL_ADMIN_TOKEN_FILE: /run/secrets/fujin_local_admin_token
-    command: ["scripts/run-fujin-local.sh"]
-    expose: ["443"]
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:443/healthz', context=ssl._create_unverified_context(), timeout=2)"]
-      interval: 10s
-      timeout: 3s
-      retries: 15
-    volumes:
-      - /var/lib/s3-oci-migration/fujin-local:/var/lib/fujin-local
-      # Representative payloads are immutable physical input.  The Fujin may
-      # index and stream them, but never writes source bytes or its staging
-      # cache back to the dedicated payload volume.
-      - /var/lib/s3-oci-migration/fujin-payloads:/var/lib/fujin-local/payloads:ro
-    secrets: [fujin_local_admin_token]
-    networks:
-      default: {}
-      fujin-local-data:
-        ipv4_address: 172.30.0.10
-      fujin-local-ui: {}
-
-  # The provider serves immutable source bytes read-only.  Materialization is
-  # a separate Fujin-owned control worker, with no data-plane port and no
-  # Raijin mount, so an interrupted generation cannot expose a partial
-  # dataset through S3 LOCAL.
-  fujin-local-materializer:
-    build: *raijin-build
-    profiles: ["local"]
-    restart: unless-stopped
-    depends_on:
-      fujin-local:
-        condition: service_started
-    environment:
-      FUJIN_LOCAL_DATABASE_URL: sqlite+pysqlite:////var/lib/fujin-local/catalog.db
-      FUJIN_LOCAL_PAYLOAD_ROOT: /var/lib/fujin-local/payloads
-    command: ["python3", "-m", "app.fujin_local_materializer"]
-    volumes:
-      - /var/lib/s3-oci-migration/fujin-local:/var/lib/fujin-local
-      - /var/lib/s3-oci-migration/fujin-payloads:/var/lib/fujin-local/payloads:rw
-    networks: [default]
-
-  fujin-local-dns:
-    image: coredns/coredns:1.11.3
-    profiles: ["local"]
-    restart: unless-stopped
-    command: ["-conf", "/etc/coredns/Corefile"]
-    volumes:
-      - ./docker/fujin-local.Corefile:/etc/coredns/Corefile:ro
-    networks:
-      fujin-local-data:
-        ipv4_address: 172.30.0.53
-
-  local-ui-gateway:
-    image: nginx:1.27-alpine
-    profiles: ["local"]
-    restart: unless-stopped
-    depends_on: [local-app, fujin-local]
-    ports: ["${RAIJIN_WEB_BIND_HOST:-127.0.0.1}:${RAIJIN_WEB_BIND_PORT:-1604}:8080"]
-    volumes:
-      - ./docker/nginx-local-ui.conf:/opt/fujin/nginx-local-ui.conf:ro
-      - ./docker/run-local-ui-gateway.sh:/opt/fujin/run-local-ui-gateway.sh:ro
-    command: ["/bin/sh", "/opt/fujin/run-local-ui-gateway.sh"]
-    networks: [default, fujin-local-ui]
-
-  simulator:
-    build: *raijin-build
-    profiles: ["simulation"]
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      simulation-migrate:
-        condition: service_completed_successfully
-    environment:
-      RAIJIN_OPERATION_MODE: SIMULATION
-      RAIJIN_SIMULATOR_DATABASE_URL: postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation
-      RAIJIN_SIMULATOR_POSTGRES_PASSWORD_FILE: /run/secrets/simulation_postgres_password
-    command: ["uvicorn", "app.simulator:app", "--host", "0.0.0.0", "--port", "8090"]
-    expose:
-      - "8090"
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=2)"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-    secrets:
-      - simulation_postgres_password
-
-  simulation-migrate:
-    build: *raijin-build
-    profiles: ["simulation"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      RAIJIN_OPERATION_MODE: SIMULATION
-      RAIJIN_SIMULATOR_BASE_URL: http://simulator:8090
-      DATABASE_URL: postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation
-      RAIJIN_SIMULATOR_DATABASE_URL: postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation
-      POSTGRES_PASSWORD_FILE: /run/secrets/simulation_postgres_password
-      RAIJIN_SIMULATOR_POSTGRES_PASSWORD_FILE: /run/secrets/simulation_postgres_password
-    command: ["python3", "scripts/migrate-simulation.py"]
-    secrets:
-      - simulation_postgres_password
-
-  simulation-app:
-    build: *raijin-build
-    profiles: ["simulation"]
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      simulator:
-        condition: service_healthy
-    environment:
-      RAIJIN_OPERATION_MODE: SIMULATION
-      RAIJIN_SIMULATOR_BASE_URL: http://simulator:8090
-      DATABASE_URL: postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation
-      POSTGRES_PASSWORD_FILE: /run/secrets/simulation_postgres_password
-    ports:
-      - "${RAIJIN_WEB_BIND_HOST:-127.0.0.1}:${RAIJIN_WEB_BIND_PORT:-1604}:8080"
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-    secrets:
-      - simulation_postgres_password
-
-  simulation-raikou-shin: &simulation-raikou-worker
-    build: *raijin-build
-    profiles: ["simulation"]
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      simulator:
-        condition: service_healthy
-      simulation-app:
-        condition: service_healthy
+      RAIJIN_WORKER_ID: raikou-shin-compose
     command: ["python3", "-m", "app.controller_worker"]
-    environment: &simulation-raikou-worker-environment
-      RAIJIN_OPERATION_MODE: SIMULATION
-      RAIJIN_SIMULATOR_BASE_URL: http://simulator:8090
-      RAIJIN_WORKER_ROLE: raikou-shin
-      RAIJIN_WORKER_ID: raikou-shin-simulation
-      DATABASE_URL: postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation
-      POSTGRES_PASSWORD_FILE: /run/secrets/simulation_postgres_password
-    secrets:
-      - simulation_postgres_password
+    secrets: [postgres_password]
 
-  simulation-raikou-sei:
-    <<: *simulation-raikou-worker
-    command: ["python3", "-m", "app.restore_worker"]
+  raikou-sei:
+    <<: *worker
     environment:
-      <<: *simulation-raikou-worker-environment
+      <<: *raijin-environment
       RAIJIN_WORKER_ROLE: raikou-sei
-      RAIJIN_WORKER_ID: raikou-sei-simulation
+      RAIJIN_WORKER_ID: raikou-sei-compose
+    command: ["python3", "-m", "app.restore_worker"]
 
-  simulation-raikou-ko:
-    <<: *simulation-raikou-worker
-    command: ["python3", "-m", "app.discovery_worker"]
+  raikou-ko:
+    <<: *worker
     environment:
-      <<: *simulation-raikou-worker-environment
+      <<: *raijin-environment
       RAIJIN_WORKER_ROLE: raikou-ko
-      RAIJIN_WORKER_ID: raikou-ko-simulation
+      RAIJIN_WORKER_ID: raikou-ko-compose
+    command: ["python3", "-m", "app.discovery_worker"]
 
-  simulation-raikou-kai:
-    <<: *simulation-raikou-worker
-    command: ["python3", "-m", "app.audit_worker"]
+  raikou-kai:
+    <<: *worker
     environment:
-      <<: *simulation-raikou-worker-environment
+      <<: *raijin-environment
       RAIJIN_WORKER_ROLE: raikou-kai
-      RAIJIN_WORKER_ID: raikou-kai-simulation
+      RAIJIN_WORKER_ID: raikou-kai-compose
+    command: ["python3", "-m", "app.audit_worker"]
 
-  simulation-transfer-worker:
-    build: *raijin-build
-    profiles: ["simulation"]
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      simulator:
-        condition: service_healthy
-      simulation-app:
-        condition: service_healthy
+  raiju:
+    <<: *worker
     environment:
-      RAIJIN_OPERATION_MODE: SIMULATION
-      RAIJIN_SIMULATOR_BASE_URL: http://simulator:8090
+      <<: *raijin-environment
       RAIJIN_WORKER_ROLE: raiju
-      RAIJIN_WORKER_ID: raiju-transfer
-      DATABASE_URL: postgresql+psycopg://migration_simulation@postgres:5432/migration_simulation
-      POSTGRES_PASSWORD_FILE: /run/secrets/simulation_postgres_password
+      RAIJIN_WORKER_ID: raiju-compose
     command: ["python3", "-m", "app.transfer_worker"]
-    secrets:
-      - simulation_postgres_password
 
 secrets:
   postgres_password:
-    file: /etc/s3-oci-migration/secrets/postgres_password
-  simulation_postgres_password:
-    file: /etc/s3-oci-migration/secrets/simulation_postgres_password
-  # LOCAL administration is intentionally separate from Raijin and protected
-  # even inside the loopback-only UI topology.  The secret is generated or
-  # provisioned by the host bootstrap and is never injected into Raijin.
-  fujin_local_admin_token:
-    file: /etc/s3-oci-migration/secrets/fujin_local_admin_token
+    file: ${RAIJIN_POSTGRES_PASSWORD_FILE:?set RAIJIN_POSTGRES_PASSWORD_FILE}
 
-networks:
-  # The provider data plane has no host-published port.  Only Raijin workers
-  # and the local UI bridge may reach it on this internal Docker network.
-  fujin-local-data:
-    internal: true
-    ipam:
-      config:
-        - subnet: 172.30.0.0/24
-  fujin-local-ui:
-    internal: true
+volumes:
+  raijin-postgres:

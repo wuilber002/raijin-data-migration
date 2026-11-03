@@ -169,8 +169,8 @@ resource "oci_vault_secret" "initial_aws_connection" {
       default_region              = "us-east-1"
       bootstrap_access_key_id     = "REPLACE_WITH_ACCESS_KEY_ID"
       bootstrap_secret_access_key = "REPLACE_WITH_SECRET_ACCESS_KEY"
-      migration_role_arn          = "arn:aws:iam::123456789012:role/s3-oci-migration-role"
-      batch_operations_role_arn   = "arn:aws:iam::123456789012:role/s3-oci-batch-restore-role"
+      migration_role_arn          = "arn:aws:iam::123456789012:role/raijin-data-migration-role"
+      batch_operations_role_arn   = "arn:aws:iam::123456789012:role/raijin-batch-restore-role"
       control_bucket              = "REPLACE_WITH_UNIQUE_CONTROL_BUCKET"
     }))
     name  = "initial-template"

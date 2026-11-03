@@ -21,12 +21,12 @@ Para `N` compartments distintos que guardam buckets de destino e `S` compartment
 Exemplo com três buckets em dois compartments:
 
 ```text
-Allow dynamic-group s3-oci-migration-vm to inspect secret-family in compartment id <SECRETS_COMPARTMENT_OCID>
-Allow dynamic-group s3-oci-migration-vm to read secret-bundles in compartment id <SECRETS_COMPARTMENT_OCID>
-Allow dynamic-group s3-oci-migration-vm to inspect buckets in compartment id <COMPARTMENT_A_OCID>
-Allow dynamic-group s3-oci-migration-vm to manage objects in compartment id <COMPARTMENT_A_OCID> where any {target.bucket.name='destination-finance', target.bucket.name='destination-legal'}
-Allow dynamic-group s3-oci-migration-vm to inspect buckets in compartment id <COMPARTMENT_B_OCID>
-Allow dynamic-group s3-oci-migration-vm to manage objects in compartment id <COMPARTMENT_B_OCID> where target.bucket.name='destination-technology'
+Allow dynamic-group raijin-data-migration-vm to inspect secret-family in compartment id <SECRETS_COMPARTMENT_OCID>
+Allow dynamic-group raijin-data-migration-vm to read secret-bundles in compartment id <SECRETS_COMPARTMENT_OCID>
+Allow dynamic-group raijin-data-migration-vm to inspect buckets in compartment id <COMPARTMENT_A_OCID>
+Allow dynamic-group raijin-data-migration-vm to manage objects in compartment id <COMPARTMENT_A_OCID> where any {target.bucket.name='destination-finance', target.bucket.name='destination-legal'}
+Allow dynamic-group raijin-data-migration-vm to inspect buckets in compartment id <COMPARTMENT_B_OCID>
+Allow dynamic-group raijin-data-migration-vm to manage objects in compartment id <COMPARTMENT_B_OCID> where target.bucket.name='destination-technology'
 ```
 
 ## Aviso sobre limites

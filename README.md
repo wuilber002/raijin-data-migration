@@ -48,7 +48,7 @@ Ela não executa chamadas AWS ou OCI a partir do navegador. O container **Worker
 - `terraform/orm`: Stack Terraform para OCI Resource Manager e seu formulário.
 - `docs`: arquitetura, deployment, IAM AWS/OCI e plano de validação.
 
-Consulte [arquitetura](docs/architecture.md), [deploy e instalação](docs/deployment.md), [AWS Setup](docs/aws-setup.md), [OCI Setup manual](docs/oci-setup.md), [IAM OCI](docs/oci-iam.md), [conexões AWS](docs/aws-connections.md), [estimativas de custo](docs/cost-estimates.md), [plano de validação](docs/validation-test-plan.md), [teste de objetos grandes](docs/large-object-test-runbook.md), [recuperação](docs/recovery-runbook.md) e [cleanup controlado de testes](docs/test-cleanup.md).
+Consulte [arquitetura](docs/architecture.md), [deploy e instalação](docs/deployment.md), [instalação manual](docs/manual-installation.md), [AWS Setup](docs/aws-setup.md), [OCI Setup manual](docs/oci-setup.md), [IAM OCI](docs/oci-iam.md), [conexões AWS](docs/aws-connections.md), [estimativas de custo](docs/cost-estimates.md), [plano de validação](docs/validation-test-plan.md), [teste de objetos grandes](docs/large-object-test-runbook.md), [recuperação](docs/recovery-runbook.md) e [cleanup controlado de testes](docs/test-cleanup.md).
 
 Para uma visão consolidada e mantida das capacidades e do modo de operação da
 plataforma, consulte [Capacidades e operação do RAIJIN](docs/capabilities.md).
@@ -61,4 +61,4 @@ Crie um túnel SSH até a VM e mantenha o terminal aberto:
 ssh -N -L 1604:127.0.0.1:1604 -i ~/.ssh/id_rsa opc@<ip-da-vm>
 ```
 
-Abra `http://127.0.0.1:1604`. Por padrão, a console é vinculada apenas a `127.0.0.1:1604` na VM. Para ajustar host/interface e porta, edite `/etc/s3-oci-migration/web-bind.env` e reinicie `s3-oci-migration.service`.
+Abra `http://127.0.0.1:1604`. Por padrão, a console é vinculada apenas a `127.0.0.1:1604` na VM. Para ajustar host/interface e porta, edite `/etc/raijin-data-migration/web-bind.env` e reinicie `raijin-data-migration.service`.

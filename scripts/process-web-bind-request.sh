@@ -3,13 +3,13 @@
 # service; the web container can only write a constrained request file.
 set -euo pipefail
 
-install_root=/opt/s3-oci-migration/release
-control_root=/var/lib/s3-oci-migration/web-bind-control
+install_root=/opt/raijin-data-migration/release
+control_root=/var/lib/raijin-data-migration/web-bind-control
 request="$control_root/request.json"
 result="$control_root/result.json"
 retire_request="$control_root/retire-bootstrap"
-config=/etc/s3-oci-migration/web-bind.env
-secret_root=/etc/s3-oci-migration/secrets
+config=/etc/raijin-data-migration/web-bind.env
+secret_root=/etc/raijin-data-migration/secrets
 
 # The container sees only its Podman interfaces. Collect candidate bind
 # addresses on the host, where the listener is actually published.
@@ -55,7 +55,7 @@ if [[ -e "$retire_request" ]]; then
   if [[ "$RAIJIN_WEB_AUTH_MODE" == local && "$(raijin_console_auth_lifecycle_state)" == READY ]]; then
     rm -f "$secret_root/console_bootstrap_password" "$retire_request"
     printf '{"status":"SUCCEEDED","message":"Bootstrap password retired; reconnect to continue."}\n' >"$result"
-    systemctl restart s3-oci-migration.service
+    systemctl restart raijin-data-migration.service
   else
     rm -f "$retire_request"
     printf '{"status":"REJECTED","message":"Bootstrap password can only be retired after an enabled administrator changes it."}\n' >"$result"
@@ -111,7 +111,7 @@ PY
 
 host="${values[0]}" port="${values[1]}" transport="${values[2]}" upstreams="${values[3]}"
 if [[ "$transport" == https ]]; then
-  tls_root=/etc/s3-oci-migration/web-tls
+  tls_root=/etc/raijin-data-migration/web-tls
   install -d -m 0750 "$tls_root"
   command -v openssl >/dev/null || { finish FAILED "openssl is required to generate the local TLS certificate"; exit 0; }
   # A wildcard listener is reached through one of the host's real VNIC
@@ -163,5 +163,5 @@ WEB_TRANSPORT=$transport
 WEB_TRUSTED_UPSTREAM_IPS=$upstreams
 EOF
 mv "$config.tmp" "$config"
-systemctl restart s3-oci-migration.service
+systemctl restart raijin-data-migration.service
 finish SUCCEEDED "Console endpoint request applied; the service was restarted."

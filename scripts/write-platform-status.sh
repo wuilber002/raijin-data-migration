@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-runtime_root=/run/s3-oci-migration
+runtime_root=/run/raijin-data-migration
 status_file="$runtime_root/status.json"
-backup_root=/var/lib/s3-oci-migration/backups
+backup_root=/var/lib/raijin-data-migration/backups
 mkdir -p "$runtime_root"
 
 unit_state() {
@@ -70,17 +70,17 @@ printf '{"available":true,"generated_at":"%s","resources":{"cpu_percent":%s,"cpu
   "$((memory_total_kb * 1024))" \
   "$((memory_used_kb * 1024))" \
   "$memory_percent" \
-  "$(unit_state s3-oci-migration.service)" \
-  "$(container_state s3-oci-postgres)" \
-  "$(container_state s3-oci-app)" \
-  "$(container_state s3-oci-raikou-shin)" \
-  "$(container_state s3-oci-raikou-sei)" \
-  "$(container_state s3-oci-raikou-ko)" \
-  "$(container_state s3-oci-raikou-kai)" \
-  "$(container_state s3-oci-transfer-worker)" \
-  "$(container_state s3-oci-simulator)" \
-  "$(unit_state s3-oci-backup-postgres.timer)" \
-  "$(unit_state s3-oci-platform-status.timer)" \
+  "$(unit_state raijin-data-migration.service)" \
+  "$(container_state raijin-postgres)" \
+  "$(container_state raijin-app)" \
+  "$(container_state raijin-raikou-shin)" \
+  "$(container_state raijin-raikou-sei)" \
+  "$(container_state raijin-raikou-ko)" \
+  "$(container_state raijin-raikou-kai)" \
+  "$(container_state raijin-transfer-worker)" \
+  "$(container_state raijin-simulator)" \
+  "$(unit_state raijin-backup-postgres.timer)" \
+  "$(unit_state raijin-platform-status.timer)" \
   "$real_backup_json" \
   "$simulation_backup_json" >"$temporary_file"
 chmod 644 "$temporary_file"

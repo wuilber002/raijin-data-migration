@@ -9,7 +9,7 @@ raijin_load_web_bind() {
   local config_file configured_host=127.0.0.1 configured_port=1604 configured_transport=http configured_upstreams=""
   local key value line host port transport upstreams probe_host probe_host_url publish_host
 
-  config_file="${RAIJIN_WEB_BIND_CONFIG:-/etc/s3-oci-migration/web-bind.env}"
+  config_file="${RAIJIN_WEB_BIND_CONFIG:-/etc/raijin-data-migration/web-bind.env}"
   if [[ -e "$config_file" ]]; then
     [[ -f "$config_file" && -r "$config_file" ]] || {
       echo "Web bind configuration is not a readable file: $config_file" >&2

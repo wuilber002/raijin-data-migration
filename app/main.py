@@ -1421,7 +1421,7 @@ class RuntimeSettings(Base):
     aws_migration_role_arn: Mapped[str] = mapped_column(String(2048), default="")
     aws_batch_role_arn: Mapped[str] = mapped_column(String(2048), default="")
     aws_control_bucket: Mapped[str] = mapped_column(String(255), default="")
-    aws_control_prefix: Mapped[str] = mapped_column(String(1024), default="s3-oci-control/")
+    aws_control_prefix: Mapped[str] = mapped_column(String(1024), default="raijin-control/")
     preserve_s3_tags: Mapped[bool] = mapped_column(default=True)
     cost_estimation_enabled: Mapped[bool] = mapped_column(default=False)
     cost_include_aws_transfer_out: Mapped[bool] = mapped_column(default=True)
@@ -2408,7 +2408,7 @@ def create_schema() -> None:
         "aws_migration_role_arn": "VARCHAR(2048) NOT NULL DEFAULT ''",
         "aws_batch_role_arn": "VARCHAR(2048) NOT NULL DEFAULT ''",
         "aws_control_bucket": "VARCHAR(255) NOT NULL DEFAULT ''",
-        "aws_control_prefix": "VARCHAR(1024) NOT NULL DEFAULT 's3-oci-control/'",
+        "aws_control_prefix": "VARCHAR(1024) NOT NULL DEFAULT 'raijin-control/'",
         "preserve_s3_tags": "BOOLEAN NOT NULL DEFAULT TRUE",
         "cost_estimation_enabled": "BOOLEAN NOT NULL DEFAULT FALSE",
         "cost_include_aws_transfer_out": "BOOLEAN NOT NULL DEFAULT TRUE",
@@ -6275,9 +6275,9 @@ def destination_provenance_matches(obj: ObjectRecord, headers: dict) -> bool:
     replaced under the same key and size without charging AWS requests or
     rereading object data.
     """
-    if obj.etag and headers.get("opc-meta-s3-oci-source-etag", "") != obj.etag:
+    if obj.etag and headers.get("opc-meta-raijin-source-etag", "") != obj.etag:
         return False
-    if obj.last_modified and headers.get("opc-meta-s3-oci-source-last-modified", "") != obj.last_modified.isoformat():
+    if obj.last_modified and headers.get("opc-meta-raijin-source-last-modified", "") != obj.last_modified.isoformat():
         return False
     return True
 

@@ -838,7 +838,7 @@ def aws_clients(settings, region: str, source: Source):
         """
         assumed = sts.assume_role(
             RoleArn=values["migration_role_arn"],
-            RoleSessionName="s3-oci-migration-worker",
+            RoleSessionName="raijin-data-migration-worker",
             DurationSeconds=3600,
         )["Credentials"]
         expiration = assumed["Expiration"]
@@ -1816,7 +1816,7 @@ def restored_pending_archives_from_head(s3, source: Source, archives: list[Objec
                 second_batch = batch[second_start:second_start + requests_per_second]
                 second_started_at = time.monotonic()
                 with ThreadPoolExecutor(max_workers=min(concurrency, len(second_batch)),
-                                        thread_name_prefix="s3-oci-restore-poll") as executor:
+                                        thread_name_prefix="raijin-restore-poll") as executor:
                     futures = [executor.submit(check, obj) for obj in second_batch]
                     for future in as_completed(futures):
                         metrics["requests"] = int(metrics["requests"]) + 1
@@ -2455,7 +2455,7 @@ def poll_restore(session, task: Task, settings) -> None:
         return
     # Keep the control-bucket layout in sync with submission.  The completion
     # report lives under the source-specific Raijin prefix, not the legacy
-    # s3-oci-control prefix.
+    # raijin-control prefix.
     operation = aws_operation_config(source, settings)
     s3, s3control, account_id = aws_clients(settings, source.aws_region, source)
     if wave.batch_job_id:
@@ -2755,16 +2755,16 @@ def transfer_object(s3, namespace: str, source_bucket: str, destination_bucket: 
         # prove that the object is associated with this discovered S3 version
         # without downloading the payload again.
         if obj.etag:
-            metadata["s3-oci-source-etag"] = obj.etag
+            metadata["raijin-source-etag"] = obj.etag
         if obj.last_modified:
-            metadata["s3-oci-source-last-modified"] = obj.last_modified.isoformat()
+            metadata["raijin-source-last-modified"] = obj.last_modified.isoformat()
         # This immutable provenance marks multipart sessions originated by
         # Raiju.  It lets Fujin's maintenance tool distinguish future
         # migration remnants from any independent OCI-compatible client.
-        metadata["s3-oci-raijin-object-id"] = str(obj.id)
+        metadata["raijin-object-id"] = str(obj.id)
         tags_json = json.dumps({tag["Key"]: tag["Value"] for tag in tags}, separators=(",", ":"), ensure_ascii=False)
         if preserve_s3_tags:
-            metadata["s3-oci-tags-json"] = tags_json[:1800]
+            metadata["raijin-tags-json"] = tags_json[:1800]
         progress_bytes, progress_baseline, progress_baseline_at, last_persist, persisted_once = 0, 0, time.monotonic(), time.monotonic(), False
         elapsed_baseline = time.monotonic()
 

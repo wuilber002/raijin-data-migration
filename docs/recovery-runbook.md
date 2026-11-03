@@ -7,7 +7,7 @@ ondas, fila, checkpoints multipart, eventos, duração acumulada do discovery e 
 ## Recuperação após reboot ou parada acidental
 
 1. Conecte-se à VM por SSH e confirme que a porta web continua local.
-2. Execute `sudo systemctl start s3-oci-migration.service`.
+2. Execute `sudo systemctl start raijin-data-migration.service`.
 3. Confirme saúde com `curl -fsS http://127.0.0.1:1604/healthz`.
 4. Abra a console pelo túnel SSH e revise **Status → Observabilidade** e a
    fila. Tarefas cujo lease venceu voltam a ser elegíveis; uploads multipart
@@ -25,13 +25,13 @@ Use somente depois de confirmar que o volume de boot ou o banco local não pode
 ser recuperado normalmente. A restauração devolve o banco ao instante do backup
 e, portanto, pode exigir reconciliação OCI e revisão das tarefas posteriores.
 
-1. Liste backups: `sudo ls -lht /var/lib/s3-oci-migration/backups/`.
+1. Liste backups: `sudo ls -lht /var/lib/raijin-data-migration/backups/`.
 2. Registre o arquivo escolhido e a razão da restauração no ticket operacional.
 3. Execute, com caminho absoluto:
 
    ```bash
-   sudo s3-oci-restore-postgres \
-     --backup /var/lib/s3-oci-migration/backups/migration-YYYYMMDDTHHMMSSZ.dump \
+   sudo raijin-restore-postgres \
+     --backup /var/lib/raijin-data-migration/backups/migration-YYYYMMDDTHHMMSSZ.dump \
      --confirm-restore
    ```
 
@@ -49,7 +49,7 @@ escritores só são retomados depois de uma importação bem-sucedida; em qualqu
 falha permanecem parados para impedir operação sobre estado parcial. Quando os
 escritores estavam ativos no início, o utilitário também aguarda `/healthz`
 voltar a responder. Se isso não ocorrer, não reenvie restores AWS: investigue
-`sudo journalctl -u s3-oci-migration.service -n 200`.
+`sudo journalctl -u raijin-data-migration.service -n 200`.
 
 Após a recuperação, execute **Validate OCI destination** nas sources com ondas
 concluídas e revise a fila antes de retomar qualquer wave.

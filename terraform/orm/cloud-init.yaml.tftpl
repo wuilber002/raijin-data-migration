@@ -18,12 +18,12 @@ write_files:
       ChallengeResponseAuthentication no
       PubkeyAuthentication yes
       PermitRootLogin no
-  - path: /etc/s3-oci-migration/oci-runtime.json
+  - path: /etc/raijin-data-migration/oci-runtime.json
     owner: root:root
     permissions: '0600'
     content: |
       ${oci_runtime_config}
-  - path: /usr/local/sbin/s3-oci-expand-boot-volume
+  - path: /usr/local/sbin/raijin-expand-boot-volume
     owner: root:root
     permissions: '0750'
     content: |
@@ -31,9 +31,9 @@ write_files:
 
 runcmd:
   - [ bash, -lc, "sshd -t && systemctl reload sshd" ]
-  - [ /usr/local/sbin/s3-oci-expand-boot-volume ]
-  - [ mkdir, -p, /opt/s3-oci-migration ]
-  - [ bash, -lc, "git clone --depth 1 --branch '${bootstrap_ref}' '${bootstrap_repository}' /opt/s3-oci-migration/release || (rm -rf /opt/s3-oci-migration/release && git clone --depth 1 '${bootstrap_repository}' /opt/s3-oci-migration/release)" ]
-  - [ bash, -lc, "if [ -x /opt/s3-oci-migration/release/scripts/bootstrap.sh ]; then /opt/s3-oci-migration/release/scripts/bootstrap.sh; fi" ]
+  - [ /usr/local/sbin/raijin-expand-boot-volume ]
+  - [ mkdir, -p, /opt/raijin-data-migration ]
+  - [ bash, -lc, "git clone --depth 1 --branch '${bootstrap_ref}' '${bootstrap_repository}' /opt/raijin-data-migration/release || (rm -rf /opt/raijin-data-migration/release && git clone --depth 1 '${bootstrap_repository}' /opt/raijin-data-migration/release)" ]
+  - [ bash, -lc, "if [ -x /opt/raijin-data-migration/release/scripts/bootstrap.sh ]; then /opt/raijin-data-migration/release/scripts/bootstrap.sh; fi" ]
 
-final_message: "s3-oci migration bootstrap completed. Application interface is bound only to 127.0.0.1."
+final_message: "Raijin Data Migration bootstrap completed. Application interface is bound only to 127.0.0.1."
