@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from app.real_worker import (
     DeepAuditQueuePaused, GracefulWorkerShutdown, RAIKOU_AUDIT_TASK_KINDS,
-    SessionLocal, SimulatedNetworkRecoveryPending, classify_task_error,
+    SessionLocal, classify_task_error,
     claim_task, cloud_backend, fail_permanently, release_task_for_graceful_shutdown,
     retry, runtime_context, runtime_settings, task_lease_heartbeat, verify_wave,
 )
-from app.runtime_context import mode_switch_requested
 
 
 ROLE = "raikou-kai"
@@ -22,8 +21,6 @@ def run_once(role: str = ROLE) -> None:
     """Claim and verify one wave while maintaining its durable lease."""
     if role != ROLE:
         raise RuntimeError(f"Audit execution does not support role {role!r}")
-    if mode_switch_requested():
-        return
     with SessionLocal() as session:
         settings = runtime_settings(session)
         allowed_task_kinds = RAIKOU_AUDIT_TASK_KINDS
@@ -44,6 +41,6 @@ def run_once(role: str = ROLE) -> None:
         except Exception as error:
             disposition, summary = classify_task_error(error)
             if disposition == "retry":
-                retry(session, task, summary, seconds=1 if isinstance(error, SimulatedNetworkRecoveryPending) else None)
+                retry(session, task, summary)
             else:
                 fail_permanently(session, task, summary)

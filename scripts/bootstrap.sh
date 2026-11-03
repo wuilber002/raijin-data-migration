@@ -265,21 +265,6 @@ install -m 0750 "$install_root/scripts/process-update-request.sh" /usr/local/sbi
 install -m 0750 "$install_root/scripts/process-application-log-request.sh" /usr/local/sbin/raijin-process-application-log-request
 RAIJIN_IMAGE="$release_image" /usr/local/sbin/raijin-start-runtime
 
-# The single-runtime release retires the old mode switch and the temporary
-# Fujin co-location helpers. Remove them explicitly on upgrade so they cannot
-# be selected again after a reboot.
-systemctl disable --now raijin-mode-request.timer 2>/dev/null || true
-rm -f \
-  /etc/systemd/system/raijin-mode-request.service \
-  /etc/systemd/system/raijin-mode-request.timer \
-  /usr/local/sbin/raijin-mode \
-  /usr/local/sbin/raijin-process-mode-request \
-  /usr/local/sbin/raijin-start-fujin-local-runtime \
-  /usr/local/sbin/raijin-mount-fujin-payload \
-  /usr/local/sbin/configure-fujin-local-oci-runtime \
-  /etc/raijin-data-migration/operation-mode \
-  /etc/raijin-data-migration/deployment-profile
-
 cat >/etc/systemd/system/raijin-data-migration.service <<'EOF'
 [Unit]
 Description=Raijin Data Migration platform
@@ -427,13 +412,6 @@ systemctl daemon-reload
 systemctl enable raijin-platform-status.timer
 systemctl restart raijin-platform-status.timer
 /usr/local/sbin/raijin-write-platform-status
-
-# Remove the legacy task-advancing simulation worker. The replacement backend
-# simulator is intentionally not installed until the exclusive Simulation mode
-# and its isolated database are available.
-systemctl disable --now raijin-simulated-worker.service 2>/dev/null || true
-rm -f /etc/systemd/system/raijin-simulated-worker.service /usr/local/sbin/raijin-simulated-worker
-systemctl daemon-reload
 
 bootstrap_complete=true
 trap - EXIT

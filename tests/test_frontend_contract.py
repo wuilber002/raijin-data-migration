@@ -10,7 +10,7 @@ def test_raijin_uses_the_shared_operational_card_contract():
     styles = (ROOT / "app/static/operational-shell.css").read_text(encoding="utf-8")
     assert "window.OperationalShell?.enhanceCards()" in page
     assert "createCard" in shell and "enhanceCards" in shell
-    assert "selector='.metric,.fujin-metric,.service,.worker-status'" in shell
+    assert "selector='.metric,.service,.worker-status'" in shell
     assert "observer.observe(scope,{subtree:true,childList:true})" in shell
     assert "attributes:true" not in shell
     assert "--ops-card-neutral" in styles
@@ -661,7 +661,7 @@ def test_aws_connection_interface_never_places_secret_content_in_javascript():
     assert "bootstrap_secret_access_key" not in page.split("<script>", 1)[1]
 
 
-def test_aws_connection_interface_can_submit_generic_private_endpoints_without_fujin_mode():
+def test_aws_connection_interface_can_submit_generic_private_endpoints_without_separado_mode():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     for identifier in ("aws-sts-endpoint-url", "aws-s3-endpoint-url", "aws-s3control-endpoint-url", "aws-s3-addressing-style", "aws-tls-ca-bundle-path"):
         assert f'id="{identifier}"' in page
@@ -670,7 +670,7 @@ def test_aws_connection_interface_can_submit_generic_private_endpoints_without_f
     assert "sts_endpoint_url:b('#aws-sts-endpoint-url')" in submit
     assert "s3_endpoint_url:b('#aws-s3-endpoint-url')" in submit
     assert "s3control_endpoint_url:b('#aws-s3control-endpoint-url')" in submit
-    assert "Fujin" not in submit and "LOCAL" not in submit
+    assert "separado" not in submit and "LOCAL" not in submit
 
 
 def test_aws_connection_template_is_formatted_and_copyable():
@@ -1041,21 +1041,21 @@ def test_all_confirmation_questions_use_the_raijin_modal_instead_of_browser_conf
 
 def test_discovery_origin_is_visible_and_retired_lab_mode_is_not_exposed():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    assert 'id="set-laboratory-mode"' not in page
-    assert 'id="laboratory-mode-banner"' not in page
-    assert "syncLaboratoryModeBanner" not in page
+    assert 'id="set-retired-mode"' not in page
+    assert 'id="retired-mode-banner"' not in page
+    assert "syncRetiredModeBanner" not in page
     assert "Discovery: ${escape(discoveryModeLabel(discovery.mode))}" in page
     # Runtime selection is an administrative localhost API operation.  It
     # must never be available to a console operator as a settings control.
-    assert 'id="operation-mode-action"' not in page
-    assert "requestOperationMode(" not in page
+    assert 'id="configuração de execução-action"' not in page
+    assert "requestRetiredMode(" not in page
 
 
-def test_real_mode_hides_every_virtual_clock_residue_and_centers_system_clock():
+def test_banner_uses_only_the_system_clock():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    assert 'id="system-clock-row"' in page
-    assert "body:not(.simulation-mode) #virtual-clock-row{display:none!important}" in page
-    assert "body:not(.simulation-mode) #system-clock-row .banner-clock-label" in page
+    assert 'id="banner-clock"' in page
+    assert "runtime/clock" not in page
+    assert "relógio-efetivo-row" not in page
 
 
 def test_source_prefixes_use_a_controlled_add_remove_list():
@@ -1310,7 +1310,7 @@ def test_queue_restore_panel_hides_completed_waves_but_migrations_keeps_history(
 
 def test_restore_queue_uses_availability_as_progress_without_redundant_labels():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    restore_renderer = page.split("// Day-to-day operations are two independent flows.", 1)[1].split("// Make virtual-time semantics explicit", 1)[0]
+    restore_renderer = page.split("// Day-to-day operations are two independent flows.", 1)[1].split("// Make efetivo-time semantics explicit", 1)[0]
 
     assert "restoreBadge" not in restore_renderer
     assert "wave.task_kind" not in restore_renderer

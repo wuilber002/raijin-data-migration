@@ -12,7 +12,6 @@ from app.real_worker import (
     GracefulWorkerShutdown,
     RAIKOU_RESTORE_TASK_KINDS,
     SessionLocal,
-    SimulatedNetworkRecoveryPending,
     classify_task_error,
     claim_task,
     cloud_backend,
@@ -24,7 +23,6 @@ from app.real_worker import (
     runtime_settings,
     submit_restore,
 )
-from app.runtime_context import mode_switch_requested
 
 
 ROLE = "raikou-sei"
@@ -36,8 +34,6 @@ def run_once(role: str = ROLE) -> None:
     """Claim and execute one restore task at a durable task boundary."""
     if role != ROLE:
         raise RuntimeError(f"Restore execution does not support role {role!r}")
-    if mode_switch_requested():
-        return
     with SessionLocal() as session:
         settings = runtime_settings(session)
         allowed_task_kinds = RAIKOU_RESTORE_TASK_KINDS

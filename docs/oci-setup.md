@@ -4,7 +4,7 @@ Este guia descreve o preparo manual, pela Console da Oracle Cloud Infrastructure
 (OCI) ou pela OCI Command Line Interface (OCI CLI), do ambiente que executa a
 plataforma de migração. Ele não depende de automação de infraestrutura.
 
-O objetivo é criar uma única máquina virtual (VM) com estado persistente,
+O objetivo é criar uma única máquina efetivo (VM) com estado persistente,
 acesso restrito à interface local, leitura de *Secrets* no Vault e escrita
 somente nos *buckets* OCI explicitamente autorizados.
 
@@ -167,59 +167,16 @@ oci kms management key create \
   --endpoint "$VAULT_MANAGEMENT_ENDPOINT"
 ```
 
-## 6. Criar os Secrets de plataforma
+## 6. Criar o Secret de plataforma
 
-A VM precisa de dois *Secrets* de senha distintos: um para o banco real e
-outro para o banco isolado do simulador. Ambos devem conter texto UTF-8 não
-vazio, com senha aleatória de ao menos 48 caracteres. Não reutilize a senha em
-outros sistemas.
-
-Crie os dois *Secrets* no Vault selecionado:
-
-| Chave no runtime | Nome recomendado do Secret | Conteúdo |
-|---|---|---|
-| `postgres_password` | `oracle-data-migration-postgres-password` | Senha aleatória do PostgreSQL operacional. |
-| `simulation_postgres_password` | `oracle-data-migration-simulation-postgres-password` | Senha aleatória distinta do PostgreSQL do simulador. |
-
-Na Console OCI, para cada entrada:
-
-1. Abra **Vault → <vault> → Secrets → Create Secret**.
-2. Selecione a chave pelo nome exibido.
-3. Informe o nome recomendado, uma descrição sem a senha e cole o valor no
-   conteúdo da versão **Current**.
-4. Salve e registre o OCID do Secret.
-
-Procedimento equivalente com OCI CLI. Crie os arquivos de senha em uma estação
-protegida, com permissão restrita, e não os envie ao repositório:
+A VM precisa de um Secret `postgres_password` com uma senha aleatória de ao menos 48 caracteres. Registre o OCID no perfil de runtime OCI.
 
 ```bash
 umask 077
 openssl rand -base64 72 | tr -dc 'A-Za-z0-9' | head -c 48 > postgres_password.txt
-openssl rand -base64 72 | tr -dc 'A-Za-z0-9' | head -c 48 > simulation_postgres_password.txt
-
-oci vault secret create-base64 \
-  --compartment-id "<SECRETS_COMPARTMENT_OCID>" \
-  --vault-id "<VAULT_OCID>" \
-  --key-id "<KEY_OCID>" \
-  --secret-name "oracle-data-migration-postgres-password" \
-  --description "Senha gerada para PostgreSQL operacional da plataforma." \
-  --secret-content-content "$(base64 --wrap=0 postgres_password.txt)"
-
-oci vault secret create-base64 \
-  --compartment-id "<SECRETS_COMPARTMENT_OCID>" \
-  --vault-id "<VAULT_OCID>" \
-  --key-id "<KEY_OCID>" \
-  --secret-name "oracle-data-migration-simulation-postgres-password" \
-  --description "Senha gerada para PostgreSQL isolado do simulador." \
-  --secret-content-content "$(base64 --wrap=0 simulation_postgres_password.txt)"
-
-shred -u postgres_password.txt simulation_postgres_password.txt
+# Crie a versão do Secret no Vault e remova o arquivo local em seguida.
+shred -u postgres_password.txt
 ```
-
-As conexões AWS também são armazenadas como *Secrets* OCI, um JSON por conexão.
-Elas podem ficar neste ou em outro compartment autorizado. Use o formato e o
-procedimento de [AWS connections](aws-connections.md); a aplicação lista apenas
-*Secrets* aos quais a Dynamic Group tem acesso e cujo JSON é compatível.
 
 ## 7. Criar a VM
 
@@ -391,5 +348,5 @@ configuração de runtime e o reinício controlado do serviço são descritos no
 | OCI CLI | Interface de linha de comando da Oracle Cloud Infrastructure. |
 | Podman | Motor de containers usado pela VM para executar os componentes locais. |
 | Secret | Recurso do OCI Vault que armazena conteúdo cifrado e versionado. |
-| VM | Máquina virtual que hospeda a plataforma. |
+| VM | Máquina efetivo que hospeda a plataforma. |
 | Vault | Serviço OCI que protege chaves e Secrets. |

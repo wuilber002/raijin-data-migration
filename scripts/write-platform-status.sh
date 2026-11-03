@@ -33,11 +33,7 @@ latest_backup_json() {
     "$(stat -c %s "$latest_backup")"
 }
 
-# Keep both database domains in the host snapshot. The Raijin API selects only
-# the entry that belongs to its immutable process mode before returning it to
-# the browser.
 real_backup_json=$(latest_backup_json 'migration-[0-9]*.dump')
-simulation_backup_json=$(latest_backup_json 'migration-simulation-[0-9]*.dump')
 
 # CPU is calculated from consecutive host-wide /proc/stat samples. The status
 # timer runs every minute, so this represents VM utilization during the last
@@ -63,7 +59,7 @@ memory_used_kb=$((memory_total_kb - memory_available_kb))
 memory_percent=$(awk -v total="$memory_total_kb" -v used="$memory_used_kb" 'BEGIN { printf "%.2f", used*100/total }')
 
 temporary_file=$(mktemp "$runtime_root/status.XXXXXX")
-printf '{"available":true,"generated_at":"%s","resources":{"cpu_percent":%s,"cpu_count":%s,"memory_total_bytes":%s,"memory_used_bytes":%s,"memory_percent":%s},"services":{"migration_systemd":"%s","postgres_container":"%s","app_container":"%s","raikou_shin_worker":"%s","raikou_sei_worker":"%s","raikou_ko_worker":"%s","raikou_kai_worker":"%s","transfer_worker":"%s","simulator_container":"%s","postgres_backup_timer":"%s","platform_status_timer":"%s"},"last_postgres_backups":{"REAL":%s,"SIMULATION":%s}}\n' \
+printf '{"available":true,"generated_at":"%s","resources":{"cpu_percent":%s,"cpu_count":%s,"memory_total_bytes":%s,"memory_used_bytes":%s,"memory_percent":%s},"services":{"migration_systemd":"%s","postgres_container":"%s","app_container":"%s","raikou_shin_worker":"%s","raikou_sei_worker":"%s","raikou_ko_worker":"%s","raikou_kai_worker":"%s","transfer_worker":"%s","postgres_backup_timer":"%s","platform_status_timer":"%s"},"last_postgres_backups":{"REAL":%s}}\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   "$cpu_percent" \
   "$cpu_count" \
@@ -78,10 +74,8 @@ printf '{"available":true,"generated_at":"%s","resources":{"cpu_percent":%s,"cpu
   "$(container_state raijin-raikou-ko)" \
   "$(container_state raijin-raikou-kai)" \
   "$(container_state raijin-transfer-worker)" \
-  "$(container_state raijin-simulator)" \
   "$(unit_state raijin-backup-postgres.timer)" \
   "$(unit_state raijin-platform-status.timer)" \
-  "$real_backup_json" \
-  "$simulation_backup_json" >"$temporary_file"
+  "$real_backup_json" >"$temporary_file"
 chmod 644 "$temporary_file"
 mv "$temporary_file" "$status_file"

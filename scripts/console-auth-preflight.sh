@@ -15,7 +15,7 @@ image="${RAIJIN_IMAGE:-$(podman inspect --format '{{.ImageName}}' raijin-app 2>/
 [[ -n "$image" ]] || { echo "Cannot determine the Raijin image; set RAIJIN_IMAGE." >&2; exit 2; }
 
 podman run --rm --network raijin-data-migration \
-  -e RAIJIN_OPERATION_MODE=REAL \
+ \
   -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
   -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
   -e "RAIJIN_WEB_BIND_HOST=127.0.0.1" \

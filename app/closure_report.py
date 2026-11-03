@@ -133,7 +133,7 @@ def _pdf_lines(snapshot: dict, manifest_hash: str, preview: bool) -> list[tuple[
           if not preview else "Esta e uma previa para conferencia e nao comprova o encerramento do projeto."), 10, False),
         ("", 8, False),
         (f"Manifesto SHA-256: {manifest_hash}", 8, False),
-        (f"Raijin {snapshot['application']['version']} ({snapshot['application']['revision']}) | modo {snapshot['application']['mode']}", 8, False),
+        (f"Raijin {snapshot['application']['version']} ({snapshot['application']['revision']})", 8, False),
         ("Verifique checksums.sha256 antes de utilizar as evidencias tecnicas.", 8, False),
     ])
     return lines

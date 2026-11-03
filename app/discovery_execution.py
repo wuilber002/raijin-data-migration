@@ -8,7 +8,6 @@ from app.real_worker import (
     import_s3_inventory_manifest, or_, runtime_context, runtime_settings,
     select, utcnow,
 )
-from app.runtime_context import mode_switch_requested
 
 
 ROLE = "raikou-ko"
@@ -22,8 +21,6 @@ def run_once(role: str = ROLE) -> None:
     """Recover, claim and execute one durable discovery job."""
     if role != ROLE:
         raise RuntimeError(f"Discovery execution does not support role {role!r}")
-    if mode_switch_requested():
-        return
     with SessionLocal() as session:
         settings = runtime_settings(session)
         scope = Source.archived_at.is_(None), or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED")

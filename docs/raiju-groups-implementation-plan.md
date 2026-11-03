@@ -250,7 +250,7 @@ Esta funcionalidade **não será desenvolvida diretamente no runtime atualmente 
 | Ambiente | Finalidade | Isolamento obrigatório |
 | --- | --- | --- |
 | Atual/homologação existente | continuidade do Raijin atual e testes em curso | imagem, banco, portas e volumes atuais preservados. |
-| Desenvolvimento Raiju Groups | refatoração, contratos e agentes remotos simulados | banco próprio, compose/runtime próprio, portas e credenciais de teste próprias. |
+| Desenvolvimento Raiju Groups | refatoração, contratos e agentes remotos de teste | banco próprio, compose/runtime próprio, portas e credenciais de teste próprias. |
 | Pré-produção futura | testes reais controlados após maturidade | VM/recursos próprios ou isolamento completo, credenciais dedicadas, grupos de teste sem tocar no runtime atual. |
 
 O ambiente futuro deve usar banco independente. Não é aceitável apontar uma build de desenvolvimento para o PostgreSQL da versão atual. Migrações de banco serão ensaiadas em cópia anonimizada/sintética antes de qualquer promoção.

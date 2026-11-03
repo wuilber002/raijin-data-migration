@@ -21,7 +21,6 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
     environment: &raijin-environment
-      RAIJIN_OPERATION_MODE: REAL
       DATABASE_URL: postgresql+psycopg://migration@postgres:5432/migration
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       RAIJIN_WEB_BIND_HOST: ${RAIJIN_WEB_BIND_HOST:-127.0.0.1}

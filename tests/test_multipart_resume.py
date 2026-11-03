@@ -100,7 +100,7 @@ def test_multipart_parts_listing_accepts_the_oci_sdk_bare_list_shape():
     assert multipart_parts_on_oci(Client(), "ns", "bucket", "key", "upload") == {1: {"etag": "etag-1", "size": 64}}
 
 
-def test_multipart_parts_listing_accepts_fujin_json_mapping_shape():
+def test_multipart_parts_listing_accepts_json_mapping_shape():
     class Client:
         def list_multipart_upload_parts(self, *_args, **_kwargs):
             return type("Response", (), {

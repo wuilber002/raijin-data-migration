@@ -9,7 +9,7 @@ o release de compatibilidade permanece em `RAIJIN_WEB_AUTH_MODE=disabled`.
 | Readiness cloud | `/api/readiness` | `ADMIN` | Executa validações de credenciais e conectividade; não é healthcheck público. |
 | Login | `/login`, `/api/auth/login` | Pública com rate-limit | Sem redirecionamento para origem externa; respostas genéricas. |
 | Sessão | `/api/auth/logout`, `/api/auth/me`, troca de senha | Usuário autenticado + CSRF nas mutações | Cookie opaco, `HttpOnly`, `SameSite=Lax`. |
-| Console HTML/estáticos | `/`, `/simulation`, `/static/*` | Sessão válida, exceto ativos mínimos da tela de login | A versão inicial local não expõe a console de Simulation. |
+| Console HTML/estáticos | `/`, `/static/*` | Sessão válida, exceto ativos mínimos da tela de login | A console serve exclusivamente ao Raijin. |
 | Consulta operacional | `GET /api/*`, CSV, relatórios e downloads | `VIEWER` | Exceto rotas explicitamente administrativas ou internas nesta tabela. |
 | Operação de migração | mutações de sources, discoveries, waves, queue, audit e pause/resume | `OPERATOR` | Inclui reprocessamento e ações que alteram filas ou waves. |
 | Administração | runtime mode, settings, AWS/OCI connections, pricing, project lifecycle | `ADMIN` | Inclui credenciais e limites operacionais. |

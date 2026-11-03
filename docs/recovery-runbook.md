@@ -35,12 +35,6 @@ e, portanto, pode exigir reconciliação OCI e revisão das tarefas posteriores.
      --confirm-restore
    ```
 
-Para recuperar o ambiente simulado, use o arquivo
-`migration-simulation-YYYYMMDDTHHMMSSZ.dump` no mesmo comando. O utilitário
-identifica o banco de destino pelo nome do arquivo. Os dois bancos são
-copiados diariamente e a retenção padrão de 35 dias cobre toda a quarentena
-padrão de 30 dias.
-
 O comando exige confirmação explícita, aceita somente arquivos do diretório de
 backups e cria um backup adicional do estado atual. Ele mantém o PostgreSQL em
 execução, interrompe somente os processos capazes de escrever no banco-alvo,

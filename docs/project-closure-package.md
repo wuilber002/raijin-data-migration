@@ -73,4 +73,4 @@ execução ao abrir o documento em planilhas.
 
 O snapshot utiliza somente dados persistidos pelo Raijin e os contratos
 públicos dos provedores AWS e OCI. Não utiliza contratos, tempos ou metadados
-internos de simuladores. Todos os timestamps do snapshot técnico usam UTC.
+internos de ambientes de teste. Todos os timestamps do snapshot técnico usam UTC.

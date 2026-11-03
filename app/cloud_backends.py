@@ -6,12 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
-from app.runtime_context import OperationMode, RuntimeContext
+from app.runtime_context import RuntimeContext
 
 
 @dataclass(frozen=True)
 class BackendReadiness:
-    mode: OperationMode
     contract_version: str | None
     operations_enabled: bool
     capabilities: tuple[str, ...] = ()
@@ -33,7 +32,7 @@ class CloudBackend(Protocol):
 
 class RealCloudBackend:
     def readiness(self, require_operations: bool = False) -> BackendReadiness:
-        return BackendReadiness(OperationMode.REAL, None, True)
+        return BackendReadiness(None, True)
 
     def clock(self, execution_id: str | None = None) -> BackendClock:
         now = datetime.now(timezone.utc)

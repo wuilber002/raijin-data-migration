@@ -126,10 +126,10 @@ if [[ "$RAIJIN_WEB_AUTH_MODE" == local && "$console_auth_lifecycle" == BOOTSTRAP
   web_auth_secret_mounts+=( -v "$secret_root/console_bootstrap_password:/run/secrets/console_bootstrap_password:ro,z" )
 fi
 
-# Raijin has one production runtime. Fujin is a separate provider project and
+# Raijin has one production runtime. separado is a separate provider project and
 # is never started by this launcher.
     podman run --rm --network "$network" \
-      -e RAIJIN_OPERATION_MODE=REAL \
+ \
       -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
       -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
       -v "$secret_root/postgres_password:/run/secrets/postgres_password:ro,z" \
@@ -137,7 +137,7 @@ fi
     if [[ "$runtime_component" == full || "$runtime_component" == web ]]; then
       podman run -d --name raijin-app --replace --restart unless-stopped \
       --network "$network" -p "$RAIJIN_WEB_BIND_PUBLISH" \
-      -e RAIJIN_OPERATION_MODE=REAL \
+ \
       -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
       -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
       "${web_auth_environment[@]}" \
@@ -196,7 +196,7 @@ fi
         --stop-timeout 120 \
         --network "$network" \
         -e "RAIJIN_WORKER_ID=${worker_role}-vm" -e "RAIJIN_WORKER_ROLE=$worker_role" \
-        -e RAIJIN_OPERATION_MODE=REAL \
+ \
         -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
         -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
         -e OCI_RUNTIME_CONFIG_FILE=/run/oci-runtime/oci-runtime.json \

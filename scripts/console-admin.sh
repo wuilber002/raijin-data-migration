@@ -40,7 +40,7 @@ if [[ "$action" != unlock ]]; then
   args+=(--password-file /run/secrets/console_admin_password)
 fi
 podman run --rm --network raijin-data-migration \
-  -e RAIJIN_OPERATION_MODE=REAL -e RAIJIN_WEB_AUTH_MODE=disabled \
+ -e RAIJIN_WEB_AUTH_MODE=disabled \
   -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
   -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
   "${mounts[@]}" "$image" python3 scripts/console-admin.py "${args[@]}"

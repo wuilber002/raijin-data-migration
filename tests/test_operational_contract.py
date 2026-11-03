@@ -29,7 +29,6 @@ from app.main import ConsolePresence, ConsolePresenceHeartbeat, console_presence
 from app.closure_report import build_artifacts, canonical_json, safe_csv_cell, sha256
 from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, RAIKOU_AUDIT_TASK_KINDS, RAIKOU_RESTORE_TASK_KINDS, RAIKOU_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
 from app import real_worker
-from app.runtime_context import OperationMode, RuntimeContext
 
 
 def test_object_model_contains_durable_multipart_checkpoint_fields():
@@ -221,7 +220,7 @@ def test_closure_artifact_contains_manifest_hashes_and_safe_csv_cells():
         package_text = b"\n".join(archive.read(name).lower() for name in archive.namelist()
                                    if name.endswith((".json", ".csv")))
         assert b"cost" not in package_text and b"deep_audit" not in package_text
-        assert b"fujin" not in package_text
+        assert b"separado" not in package_text
     assert safe_csv_cell("+formula") == "'+formula"
     assert canonical_json({"b": 1, "a": 2}) == b'{"a":2,"b":1}'
 
@@ -280,13 +279,9 @@ def test_platform_status_exposes_the_real_runtime_domain(tmp_path, monkeypatch):
     }), encoding="utf-8")
     monkeypatch.setattr(main, "platform_status_file", str(snapshot))
     monkeypatch.setattr(main, "utcnow", lambda: generated_at)
-    monkeypatch.setattr(main, "runtime_context", RuntimeContext(OperationMode.REAL, "sqlite+pysqlite:///:memory:"))
-
     result = main.platform_status()
 
-    assert result["operation_mode"] == OperationMode.REAL.value
     assert result["last_postgres_backup"]["path"] == "/backups/migration-20260908.dump"
-    assert "simulator_container" not in result["services"]
     assert "migration_systemd" not in result["services"]
     assert result["stale"] is False
     assert result["age_seconds"] == 60
@@ -362,10 +357,10 @@ def test_real_source_freezes_generic_private_endpoint_profile_before_execution()
     connection = AwsConnection(
         label="private-endpoints", secret_ocid="ocid1.vaultsecret.oc1..local", aws_account_id="123456789012",
         default_region="us-east-1", control_bucket="control",
-        sts_endpoint_url="https://sts.us-east-1.fujin.internal",
-        s3_endpoint_url="https://vpce-fujin-local.s3.us-east-1.fujin.internal",
-        s3control_endpoint_url="https://control.vpce-fujin-local.s3.us-east-1.fujin.internal",
-        s3_addressing_style="virtual", tls_ca_bundle_path="/etc/fujin-local-ca/fujin-local.crt",
+        sts_endpoint_url="https://sts.us-east-1.separado.internal",
+        s3_endpoint_url="https://vpce-separado-local.s3.us-east-1.separado.internal",
+        s3control_endpoint_url="https://control.vpce-separado-local.s3.us-east-1.separado.internal",
+        s3_addressing_style="virtual", tls_ca_bundle_path="/etc/separado-local-ca/separado-local.crt",
     )
     source = Source(name="frozen-endpoint", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
     freeze_source_endpoint_configuration(source, connection)
@@ -941,8 +936,8 @@ def test_completion_report_keeps_retry_evidence_without_repeated_payload():
         source = Source(id=201, name="retry-evidence", s3_bucket="source", aws_region="us-east-1",
                         destination_bucket="destination", status="DISCOVERED")
         wave = Wave(id=202, source_id=source.id, name="wave", max_bytes=100, restore_days=1,
-                    restore_tier="BULK", status="COMPLETED", restore_requested_virtual_at=now,
-                    last_restore_available_virtual_at=now + timedelta(seconds=10),
+                    restore_tier="BULK", status="COMPLETED", restore_observed_at=now,
+                    last_restore_available_at=now + timedelta(seconds=10),
                     predicted_restore_complete_seconds=10)
         obj = ObjectRecord(id=203, source_id=source.id, wave_id=wave.id, object_key="one", size_bytes=100,
                            state=ObjectState.VERIFIED, transferred_at=now + timedelta(seconds=20),
@@ -1248,15 +1243,6 @@ def test_continuous_lane_counts_the_initial_lease_for_single_object_admission():
     """A just-claimed sole item must still start at least one Raiju."""
     worker = Path("app/real_worker.py").read_text(encoding="utf-8")
     assert "live_leases + len(initial) + global_ready_after_initial_claim" in worker
-
-
-def test_simulation_lane_advances_only_after_a_bounded_raiju_fill():
-    """Simulation must not retain virtual time for an unbounded local loop."""
-    worker = Path("app/real_worker.py").read_text(encoding="utf-8")
-    assert "max(len(initial), worker_ceiling) if runtime_context.is_simulation else None" in worker
-    assert "def simulation_cycle_has_capacity()" in worker
-    assert "if not simulation_cycle_has_capacity():" in worker
-    assert '"continuous transfer lane occupancy"' in worker
 
 
 def test_completed_object_lease_is_reconciled_after_raiju_interruption():
@@ -1643,7 +1629,7 @@ def test_aggregate_lane_rate_uses_progress_delta_once_per_window():
 
 
 def test_aggregate_lane_rate_accepts_sqlite_reloaded_naive_timestamp():
-    """Fujin Local must not fail after SQLite removes the stored UTC offset."""
+    """separado Local must not fail after SQLite removes the stored UTC offset."""
     from app.main import TransferAutoscaleState
 
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -2340,7 +2326,7 @@ def test_multipart_size_runtime_setting_has_safe_bounds():
             continuous.continuous_transfer_critical_batch_max_bytes,
             continuous.continuous_transfer_critical_priority) == (100, 1024**3, 20, 256 * 1024**2, 90)
     with pytest.raises(ValidationError):
-        RuntimeSettingsUpdate(**(payload | {"laboratory_mode_enabled": False}))
+        RuntimeSettingsUpdate(**(payload | {"retired_mode_enabled": False}))
     with pytest.raises(ValidationError):
         RuntimeSettingsUpdate(**(payload | {"multipart_part_size_mib": 15}))
     with pytest.raises(ValidationError):
@@ -2714,8 +2700,6 @@ def test_dynamic_flight_board_uses_local_planned_and_actual_wave_timing():
     assert '"restore_window_started": True' in source
     assert '"restore_window_started_at": restore_start' in source
     assert 'timeline_start = min(submitted_points)' in source
-    assert 'or row_source.id in source_clock_now' in source
-    assert 'except (OSError, TimeoutError, ValueError):' in source
     assert '#flight-board-modal .modal-panel{display:flex;flex-direction:column;width:min(1500px,calc(100vw - 2rem));max-height:calc(100vh - 2rem);overflow:hidden}' in frontend
     assert '.flight-board-chart{overflow:hidden;max-height:none}' in frontend
     assert '.flight-board-track{position:relative;height:20px;border-radius:4px;background:#0b1220;min-width:0}' in frontend
@@ -2725,15 +2709,12 @@ def test_dynamic_flight_board_uses_local_planned_and_actual_wave_timing():
     assert 'id="pipeline-history-card"' in frontend
     assert 'function loadPipelineHistory()' in frontend
     assert '"planned_lookahead": planned' in source
-    assert 'observed_virtual_start = wave.transfer_started_virtual_at if simulated else None' in source
     assert 'lane_start = max(lane_start, restore_floor)' in source
     assert '"transfer_lane": {"enabled": True, "phases": transfer_lane_phases,' in source
     assert '"idle_breakdown": lane_idle' in source
     assert 'transfer_lane_phases.append({' in source
     assert 'Only the durable TransferLaneSegment records created at' in source
     assert 'transfer = phase("TRANSFER", transfer_start, transfer_end,' not in source
-    assert 'simulation_transfer_task_active(session, wave)' in Path("app/real_worker.py").read_text()
-    assert 'synchronize_simulation_source_clocks(session)' in Path("app/real_worker.py").read_text()
 
 
 def test_flight_board_continuous_lane_uses_only_observed_transfer_segments():
@@ -3017,8 +2998,8 @@ def test_flight_board_projects_only_durable_ready_backlog_and_recovers_zero_widt
         session.add(source); session.flush()
         completed = Wave(source_id=source.id, name="completed", max_bytes=1024, restore_days=1,
                          restore_tier="BULK", planner_mode="DYNAMIC", status="COMPLETED",
-                         transfer_started_virtual_at=now - timedelta(minutes=10),
-                         transfer_completed_virtual_at=now - timedelta(minutes=5))
+                         transfer_observed_started_at=now - timedelta(minutes=10),
+                         transfer_observed_completed_at=now - timedelta(minutes=5))
         ready = Wave(source_id=source.id, name="ready", max_bytes=1024, restore_days=1,
                      restore_tier="BULK", planner_mode="DYNAMIC", status="RESTORED")
         session.add_all([completed, ready]); session.flush()
@@ -3105,8 +3086,8 @@ def test_source_arrival_report_uses_calendar_windows_and_frozen_link_estimate():
         second = Wave(source_id=source.id, name="second", max_bytes=500_000_000, restore_days=1,
                       restore_tier="STANDARD", planned_restore_at=now + timedelta(hours=13))
         session.add_all([first, second]); session.flush()
-        first.restore_requested_virtual_at, first.last_restore_available_virtual_at = now, now + timedelta(hours=12)
-        second.restore_requested_virtual_at, second.last_restore_available_virtual_at = now + timedelta(hours=13), now + timedelta(hours=25)
+        first.restore_observed_at, first.last_restore_available_at = now, now + timedelta(hours=12)
+        second.restore_observed_at, second.last_restore_available_at = now + timedelta(hours=13), now + timedelta(hours=25)
         one = ObjectRecord(source_id=source.id, wave_id=first.id, object_key="one", size_bytes=500_000_000,
                            state=ObjectState.TRANSFERRED, restore_requested_at=now,
                            restored_at=now + timedelta(hours=12))
@@ -3175,39 +3156,6 @@ def test_source_arrival_report_uses_calendar_windows_and_frozen_link_estimate():
             "bulk": {"first_seconds": 48 * 3600, "complete_seconds": 48 * 3600},
             "standard": {"first_seconds": 12 * 3600, "complete_seconds": 12 * 3600},
         }
-
-
-def test_simulated_throughput_chart_uses_virtual_lane_timestamps():
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    wall_clock = datetime.now(timezone.utc).replace(microsecond=0)
-    virtual_clock = datetime(2032, 4, 5, 12, tzinfo=timezone.utc)
-    with Session() as session:
-        session.add(RuntimeSettings(max_throughput_mbps=100))
-        source = Source(name="virtual-throughput", s3_bucket="source", aws_region="us-east-1",
-                        destination_bucket="destination", backend_kind="SIMULATED")
-        session.add(source); session.flush()
-        wave = Wave(source_id=source.id, name="wave", max_bytes=100, restore_days=1,
-                    restore_tier="BULK")
-        session.add(wave); session.flush()
-        obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="object", size_bytes=100,
-                           state=ObjectState.TRANSFERRED)
-        session.add(obj); session.flush()
-        batch = TransferDispatchBatch(source_id=source.id, wave_id=wave.id,
-                                      started_at=wall_clock, observed_lane_mbps=75)
-        session.add(batch); session.flush()
-        item = TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=obj.id, size_bytes=100,
-                                 dispatch_batch_id=batch.id, state=TransferQueueState.TRANSFERRED)
-        session.add(item); session.flush()
-        session.add(TransferLaneSegment(source_id=source.id, wave_id=wave.id, queue_item_id=item.id,
-                                        started_at=virtual_clock,
-                                        completed_at=virtual_clock + timedelta(seconds=1), bytes_transferred=100))
-        session.flush()
-        chart = source_throughput_samples(source.id, buckets=24, session=session)
-        assert chart["samples"] == 1
-        assert chart["started_at"] == virtual_clock
-        assert chart["completed_at"] == virtual_clock + timedelta(seconds=1)
 
 
 def test_source_arrival_report_is_hidden_until_integrity_completion():
@@ -3342,316 +3290,12 @@ def test_dynamic_replan_preserves_submitted_waves_and_exposes_forecast():
     assert "replan_dynamic_pipeline(session, settings)" in worker
 
 
-def test_dynamic_replan_uses_control_mode_logical_elapsed_time():
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    # SQLite intentionally returns naive datetimes even for timezone-aware
-    # columns; production PostgreSQL keeps the UTC offset.
-    initial = datetime(2026, 8, 25, 12, 0)
-    with Session() as session:
-        source = Source(
-            id=971,
-            name="logical-replan",
-            s3_bucket="sim-source",
-            aws_region="us-east-1",
-            destination_bucket="sim-destination",
-            backend_kind="SIMULATED",
-            simulation_fidelity="CONTROL",
-        )
-        settings = RuntimeSettings(
-            id=1,
-            max_throughput_mbps=1100,
-        )
-        run = DynamicPipelineRun(
-            id=972,
-            source_id=source.id,
-            status="SCHEDULED",
-            scheduled_restores=True,
-            restore_safety_seconds=0,
-        )
-        completed = Wave(
-            id=973,
-            source_id=source.id,
-            pipeline_run_id=run.id,
-            name="wave-001",
-            max_bytes=1,
-            restore_days=1,
-            restore_tier="BULK",
-            status="COMPLETED",
-            planner_mode="DYNAMIC",
-            predicted_transfer_seconds=60,
-            planned_transfer_start_at=initial,
-        )
-        future = Wave(
-            id=974,
-            source_id=source.id,
-            pipeline_run_id=run.id,
-            name="wave-002",
-            max_bytes=1,
-            restore_days=1,
-            restore_tier="BULK",
-            status="RESTORE_SCHEDULED",
-            planner_mode="DYNAMIC",
-            predicted_transfer_seconds=60,
-            planned_transfer_start_at=initial + timedelta(seconds=60),
-            planned_restore_at=initial,
-        )
-        session.add_all([source, settings, run, completed, future])
-        session.flush()
-        session.add_all([
-            ObjectRecord(
-                id=975,
-                source_id=source.id,
-                wave_id=completed.id,
-                object_key="a.bin",
-                size_bytes=1,
-                state=ObjectState.TRANSFERRED,
-                transfer_started_at=initial,
-                transferred_at=initial,
-                transfer_elapsed_seconds=300,
-            ),
-            ObjectRecord(
-                id=976,
-                source_id=source.id,
-                wave_id=completed.id,
-                object_key="b.bin",
-                size_bytes=1,
-                state=ObjectState.TRANSFERRED,
-                transfer_started_at=initial,
-                transferred_at=initial,
-                transfer_elapsed_seconds=300,
-            ),
-        ])
-        session.flush()
-        changed = replan_dynamic_pipeline(session, settings, now=initial)
-        # The lane forecast and its independent latest-safe submission
-        # deadline are both durable planner outputs.
-        assert changed >= 1
-        # The scheduler never learns Fujin's local delay. An unsubmitted BULK
-        # restore needs the public 48-hour reference plus the default 6-hour
-        # operational reserve even in CONTROL acceptance tests.
-        assert future.planned_transfer_start_at == initial + timedelta(hours=54)
-        event = session.scalar(select(Event).where(Event.kind == "DYNAMIC_WAVE_REPLANNED"))
-        assert event is not None
-        assert "transfer 2026-08-27T18:00:00" in event.message
-
-
-def test_dynamic_replan_does_not_pin_unsubmitted_wave_to_an_old_calendar_slot():
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    initial = datetime(2026, 8, 25, 12, 0)
-    with Session() as session:
-        source = Source(id=980, name="mutable-calendar", s3_bucket="source", aws_region="us-east-1",
-                        destination_bucket="destination", backend_kind="SIMULATED", simulation_fidelity="CONTROL")
-        settings = RuntimeSettings(id=1, max_throughput_mbps=1100)
-        run = DynamicPipelineRun(id=981, source_id=source.id, status="SCHEDULED", scheduled_restores=True,
-                                 restore_safety_seconds=0)
-        completed = Wave(id=982, source_id=source.id, pipeline_run_id=run.id, name="done", max_bytes=1,
-                         restore_days=1, restore_tier="BULK", status="COMPLETED", planner_mode="DYNAMIC",
-                         predicted_transfer_seconds=300, planned_transfer_start_at=initial,
-                         transfer_started_virtual_at=initial,
-                         transfer_completed_virtual_at=initial + timedelta(seconds=300))
-        future = Wave(id=983, source_id=source.id, pipeline_run_id=run.id, name="mutable", max_bytes=1,
-                      restore_days=1, restore_tier="BULK", status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
-                      predicted_transfer_seconds=60, planned_restore_at=initial + timedelta(days=20),
-                      planned_transfer_start_at=initial + timedelta(days=22))
-        session.add_all([source, settings, run, completed, future]); session.flush()
-        # The calendar correction and the newly persisted latest-safe AWS
-        # submission deadline are distinct durable changes.
-        assert replan_dynamic_pipeline(session, settings, now=initial) >= 1
-        assert future.planned_transfer_start_at == initial + timedelta(hours=54)
-        assert future.planned_restore_at == initial
-
-
-def test_dynamic_replan_does_not_delay_restore_eligibility_behind_lane_forecast():
-    """The transfer cursor forecasts consumption; it must not reserve Raikou."""
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    initial = datetime(2026, 8, 25, 12, 0)
-    with Session() as session:
-        source = Source(id=984, name="independent-restore-lane", s3_bucket="source", aws_region="us-east-1",
-                        destination_bucket="destination", backend_kind="SIMULATED", simulation_fidelity="CONTROL")
-        settings = RuntimeSettings(id=1, max_throughput_mbps=1100)
-        run = DynamicPipelineRun(id=985, source_id=source.id, status="SCHEDULED", scheduled_restores=True,
-                                 restore_safety_seconds=0)
-        completed = Wave(id=986, source_id=source.id, pipeline_run_id=run.id, name="lane-work", max_bytes=1,
-                         restore_days=1, restore_tier="BULK", status="COMPLETED", planner_mode="DYNAMIC",
-                         predicted_transfer_seconds=24 * 3600, planned_transfer_start_at=initial,
-                         transfer_started_virtual_at=initial,
-                         transfer_completed_virtual_at=initial + timedelta(hours=24))
-        future = Wave(id=987, source_id=source.id, pipeline_run_id=run.id, name="next-restore", max_bytes=1,
-                      restore_days=1, restore_tier="BULK", status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
-                      predicted_transfer_seconds=60, predicted_restore_complete_seconds=60,
-                      planned_restore_at=initial + timedelta(days=7),
-                      planned_transfer_start_at=initial + timedelta(days=7))
-        session.add_all([source, settings, run, completed, future]); session.flush()
-
-        assert replan_dynamic_pipeline(session, settings, now=initial) >= 1
-        # Even in CONTROL, the Raijin calendar uses the public BULK ceiling
-        # and reserve; the simulator is never a scheduling oracle.
-        assert future.planned_transfer_start_at == initial + timedelta(hours=54)
-        # The horizon function decides when a physical restore slot is free.
-        assert future.planned_restore_at == initial
-
-
-def test_simulated_replan_keeps_future_restore_behind_two_occupied_slots():
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    initial = datetime(2026, 8, 25, 12, 0)
-    with Session() as session:
-        source = Source(id=988, name="simulated-restore-slots", s3_bucket="source",
-                        aws_region="us-east-1", destination_bucket="destination",
-                        backend_kind="SIMULATED", simulation_fidelity="CONTROL")
-        settings = RuntimeSettings(id=1, max_throughput_mbps=1100, dynamic_restore_max_slots=2)
-        run = DynamicPipelineRun(id=989, source_id=source.id, status="SCHEDULED",
-                                 scheduled_restores=True, restore_safety_seconds=0)
-        active = [
-            Wave(id=1100 + index, source_id=source.id, pipeline_run_id=run.id,
-                 name=f"active-{index}", max_bytes=1, restore_days=1,
-                 restore_tier="BULK", status="RESTORING", planner_mode="DYNAMIC",
-                 predicted_transfer_seconds=60, restore_requested_virtual_at=initial,
-                 planned_restore_at=initial, planned_transfer_start_at=initial + timedelta(days=3))
-            for index in range(2)
-        ]
-        future = Wave(id=1102, source_id=source.id, pipeline_run_id=run.id,
-                      name="future", max_bytes=1, restore_days=1, restore_tier="BULK",
-                      status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
-                      predicted_transfer_seconds=60, planned_restore_at=initial + timedelta(days=8),
-                      planned_transfer_start_at=initial + timedelta(days=9))
-        session.add_all([source, settings, run, *active, future]); session.flush()
-
-        assert replan_dynamic_pipeline(session, settings, now=initial) >= 1
-        assert future.planned_restore_at == initial + timedelta(hours=48)
-
-
-def test_real_replan_keeps_overdue_restore_eligibility_stable_while_capacity_is_occupied():
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    initial = datetime(2026, 8, 25, 12, 0)
-    with Session() as session:
-        source = Source(id=1103, name="real-capacity-wait", s3_bucket="source",
-                        aws_region="us-east-1", destination_bucket="destination",
-                        backend_kind="REAL")
-        settings = RuntimeSettings(id=1, max_throughput_mbps=1100)
-        run = DynamicPipelineRun(id=1104, source_id=source.id, status="SCHEDULED",
-                                 scheduled_restores=True, restore_safety_seconds=0)
-        active = Wave(id=1105, source_id=source.id, pipeline_run_id=run.id,
-                      name="active", max_bytes=1, restore_days=1, restore_tier="BULK",
-                      status="RESTORING", planner_mode="DYNAMIC",
-                      predicted_transfer_seconds=60,
-                      restore_requested_virtual_at=initial,
-                      planned_restore_at=initial,
-                      planned_transfer_start_at=initial + timedelta(hours=48))
-        waiting = Wave(id=1106, source_id=source.id, pipeline_run_id=run.id,
-                       name="waiting", max_bytes=1, restore_days=1, restore_tier="BULK",
-                       status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
-                       predicted_transfer_seconds=60,
-                       planned_restore_at=initial + timedelta(days=7),
-                       planned_transfer_start_at=initial + timedelta(days=8))
-        session.add_all([source, settings, run, active, waiting])
-        session.flush()
-        session.add(Task(wave_id=active.id, kind="SUBMIT_BATCH_RESTORE",
-                         state=TaskState.SUCCEEDED))
-        session.flush()
-
-        assert replan_dynamic_pipeline(session, settings, now=initial) >= 1
-        eligible_at = waiting.planned_restore_at
-        events_after_material_change = session.scalar(select(func.count(Event.id)).where(
-            Event.kind == "DYNAMIC_WAVE_REPLANNED", Event.wave_id == waiting.id,
-        ))
-
-        assert replan_dynamic_pipeline(
-            session, settings, now=initial + timedelta(minutes=1)
-        ) == 0
-        assert replan_dynamic_pipeline(
-            session, settings, now=initial + timedelta(minutes=10)
-        ) == 0
-        assert waiting.planned_restore_at == eligible_at == initial
-        assert session.scalar(select(func.count(Event.id)).where(
-            Event.kind == "DYNAMIC_WAVE_REPLANNED", Event.wave_id == waiting.id,
-        )) == events_after_material_change
-
-
-def test_real_replan_never_keeps_an_unsubmitted_restore_on_an_impossible_transfer_date():
-    """A planned timestamp is not evidence that AWS received the restore."""
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    initial = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
-    with Session() as session:
-        source = Source(id=1200, name="late-submission", s3_bucket="source",
-                        aws_region="us-east-1", destination_bucket="destination", backend_kind="REAL")
-        settings = RuntimeSettings(id=1, max_throughput_mbps=1100,
-                                   dynamic_restore_safety_seconds=6 * 3600)
-        run = DynamicPipelineRun(id=1201, source_id=source.id, status="SCHEDULED",
-                                 scheduled_restores=True, restore_safety_seconds=6 * 3600)
-        waiting = Wave(id=1202, source_id=source.id, pipeline_run_id=run.id,
-                       name="late", max_bytes=1, restore_days=7, restore_tier="BULK",
-                       status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
-                       predicted_transfer_seconds=60,
-                       planned_restore_at=initial - timedelta(hours=2),
-                       planned_transfer_start_at=initial - timedelta(hours=1))
-        obj = ObjectRecord(id=1203, source_id=source.id, wave_id=waiting.id,
-                           object_key="late.bin", size_bytes=1,
-                           state=ObjectState.WAVE_ASSIGNED)
-        session.add_all([source, settings, run, waiting, obj]); session.flush()
-
-        # The calendar correction and the newly persisted latest-safe AWS
-        # submission deadline are distinct durable changes.
-        assert replan_dynamic_pipeline(session, settings, now=initial) >= 1
-        assert waiting.planned_restore_at == initial - timedelta(hours=2)
-        assert waiting.planned_transfer_start_at >= initial + timedelta(hours=54)
-
-
 def test_dynamic_restore_slot_correction_is_persisted_independently_of_lane_forecast():
     source = Path("app/main.py").read_text(encoding="utf-8")
     assert "materially_changed_schedule(" in source
     assert "transfer_schedule_changed" in source
     assert "restore_schedule_changed" in source
     assert "replan_dynamic_pipeline(session, settings, now=source_scheduler_clock(source).effective_now)" in source
-
-
-def test_real_reforecast_anchors_submitted_wave_to_observed_restore_request():
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    initial = datetime(2026, 8, 25, 12, 0)
-    with Session() as session:
-        source = Source(id=1110, name="real-request-anchor", s3_bucket="source",
-                        aws_region="us-east-1", destination_bucket="destination",
-                        backend_kind="REAL")
-        settings = RuntimeSettings(id=1, max_throughput_mbps=1100)
-        run = DynamicPipelineRun(
-            id=1111, source_id=source.id, status="SCHEDULED",
-            scheduled_restores=True, restore_safety_seconds=0,
-            planner_version="v8-lane-capacity",
-        )
-        wave = Wave(
-            id=1112, source_id=source.id, pipeline_run_id=run.id,
-            name="restoring", max_bytes=1, restore_days=7,
-            restore_tier="BULK", status="RESTORING", planner_mode="DYNAMIC",
-            predicted_transfer_seconds=3600,
-            planned_restore_at=initial - timedelta(days=2),
-            planned_transfer_start_at=initial + timedelta(days=8),
-        )
-        obj = ObjectRecord(
-            id=1113, source_id=source.id, wave_id=wave.id,
-            object_key="archive.bin", size_bytes=1,
-            state=ObjectState.RESTORE_REQUESTED,
-            restore_requested_at=initial,
-        )
-        session.add_all([source, settings, run, wave, obj]); session.flush()
-        session.add(Task(wave_id=wave.id, kind="SUBMIT_BATCH_RESTORE",
-                         state=TaskState.SUCCEEDED))
-        session.flush()
-
-        assert replan_dynamic_pipeline(session, settings, now=initial) == 1
-        assert wave.planned_transfer_start_at == initial + timedelta(hours=48)
 
 
 def test_restore_release_checks_maximum_buffer_after_adding_candidate_wave():
@@ -3849,32 +3493,6 @@ def test_later_small_restore_overtakes_an_oversized_wave_only_below_minimum_buff
             assert str(oversized.id) in held.message
 
 
-def test_reforecast_never_postpones_a_persisted_restore_submission_deadline():
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    initial = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
-    with Session() as session:
-        source = Source(id=1230, name="deadline-monotonic", s3_bucket="source",
-                        aws_region="us-east-1", destination_bucket="destination", backend_kind="REAL")
-        settings = RuntimeSettings(id=1, dynamic_restore_safety_seconds=6 * 3600)
-        run = DynamicPipelineRun(id=1231, source_id=source.id, status="SCHEDULED",
-                                 scheduled_restores=True, restore_safety_seconds=6 * 3600)
-        original_deadline = initial - timedelta(hours=2)
-        waiting = Wave(id=1232, source_id=source.id, pipeline_run_id=run.id,
-                       name="monotonic", max_bytes=1, restore_days=7, restore_tier="BULK",
-                       status="RESTORE_SCHEDULED", planner_mode="DYNAMIC",
-                       planned_restore_at=initial,
-                       restore_submission_deadline_at=original_deadline,
-                       planned_transfer_start_at=initial + timedelta(days=4),
-                       predicted_transfer_seconds=60)
-        session.add_all([source, settings, run, waiting])
-        session.flush()
-
-        assert replan_dynamic_pipeline(session, settings, now=initial) == 0
-        assert waiting.restore_submission_deadline_at == original_deadline
-
-
 def test_restore_release_records_why_a_due_wave_remains_unsubmitted():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -3934,32 +3552,6 @@ def test_dynamic_repacking_is_debounced_and_forecasts_require_material_change():
     assert "materially_changed_duration(" in source
     assert "Hysteresis must govern both persistence and placement" in source
     assert "already-earned restore eligibility follow the wall clock" in source
-
-
-def test_dynamic_replan_anchors_submitted_restore_to_its_actual_service_window():
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    initial = datetime(2026, 8, 25, 12, 0)
-    with Session() as session:
-        source = Source(id=990, name="submitted-calendar", s3_bucket="source", aws_region="us-east-1",
-                        destination_bucket="destination", backend_kind="SIMULATED", simulation_fidelity="CONTROL")
-        settings = RuntimeSettings(id=1, max_throughput_mbps=1100)
-        run = DynamicPipelineRun(id=991, source_id=source.id, status="SCHEDULED", scheduled_restores=True,
-                                 restore_safety_seconds=0)
-        restoring = Wave(id=992, source_id=source.id, pipeline_run_id=run.id, name="restoring", max_bytes=1,
-                         restore_days=1, restore_tier="BULK", status="RESTORING", planner_mode="DYNAMIC",
-                         predicted_transfer_seconds=60, planned_restore_at=initial + timedelta(days=8),
-                         planned_transfer_start_at=initial + timedelta(days=10),
-                         restore_requested_virtual_at=initial,
-                         predicted_restore_complete_seconds=36 * 3600)
-        session.add_all([source, settings, run, restoring]); session.flush()
-        session.add(Task(wave_id=restoring.id, kind="SUBMIT_BATCH_RESTORE", state=TaskState.SUCCEEDED))
-        session.flush()
-        assert replan_dynamic_pipeline(session, settings, now=initial) == 1
-    # The published BULK reference is stable even when the simulator has a
-    # more precise scenario profile.
-    assert restoring.planned_transfer_start_at == initial + timedelta(hours=48)
 
 
 def test_connection_api_limits_are_durable_and_used_by_workers():

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from app.real_worker import (
     GracefulWorkerShutdown, MigrationProject, SessionLocal,
-    SimulatedNetworkRecoveryPending, Source, TRANSFER_TASK_KINDS,
+    Source, TRANSFER_TASK_KINDS,
     classify_task_error, claim_task, cloud_backend, fail_permanently, or_,
     reconcile_completed_continuous_item_leases, release_task_for_graceful_shutdown,
     retry, runtime_context, runtime_settings, select, transfer_continuous,
 )
-from app.runtime_context import mode_switch_requested
 
 
 ROLE = "raiju"
@@ -22,8 +21,6 @@ def run_once(role: str = ROLE) -> None:
     """Reconcile durable transfer leases then execute one transfer task."""
     if role not in {ROLE, "transfer"}:
         raise RuntimeError(f"Transfer execution does not support role {role!r}")
-    if mode_switch_requested():
-        return
     with SessionLocal() as session:
         settings = runtime_settings(session)
         reconciled = sum(
@@ -44,6 +41,6 @@ def run_once(role: str = ROLE) -> None:
         except Exception as error:
             disposition, summary = classify_task_error(error)
             if disposition == "retry":
-                retry(session, task, summary, seconds=1 if isinstance(error, SimulatedNetworkRecoveryPending) else None)
+                retry(session, task, summary)
             else:
                 fail_permanently(session, task, summary)

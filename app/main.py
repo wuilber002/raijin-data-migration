@@ -144,7 +144,7 @@ def source_scheduler_clock(source: "Source"):
     """Return the source clock used only by migration planning.
 
     Durable queue leases, retry delays and task availability deliberately keep
-    using the real system clock.  Only simulated cloud time is accelerated.
+    using the real system clock.  Uses the real system clock.
     """
     return cloud_backend.clock()
 
@@ -181,8 +181,8 @@ def restore_availability_poll_delay_seconds(accepted_at: datetime | None, now: d
     }.get(str(restore_tier).upper(), 48 * 60 * 60)
     elapsed = max(0, (now - accepted_at).total_seconds()) if accepted_at else 0
     # A learned first-availability forecast belongs to Raijin itself.  It is
-    # derived from prior public AWS observations and never from a Fujin
-    # simulation profile.  Stay inexpensive early, then enter a six-hour (or
+    # derived from prior public AWS observations and never from a local test backend
+    # test execution profile.  Stay inexpensive early, then enter a six-hour (or
     # 25% of the tier window) safety guard before the predicted first object.
     if predicted_first_seconds and float(predicted_first_seconds) > 0:
         predicted = min(expected_window, max(0.0, float(predicted_first_seconds)))
@@ -375,16 +375,6 @@ class Source(Base):
     # The connection remains reusable, but data endpoints are frozen before
     # discovery so an administrative edit cannot redirect an executing source.
     aws_endpoint_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
-    # Deprecated execution metadata. It is retained only so pre-existing
-    # reporting rows can be read during the clean-install transition; Raijin
-    # creates and executes REAL sources exclusively.
-    backend_kind: Mapped[str] = mapped_column(String(16), default="REAL", index=True)
-    simulation_scenario_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    simulation_execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    simulation_correlation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    simulation_tenant_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    simulation_project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    simulation_fidelity: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Nullable until a later explicit project-adoption flow. Existing sources
     # keep their exact independent operational behaviour.
     migration_project_id: Mapped[int | None] = mapped_column(
@@ -696,12 +686,12 @@ class Wave(Base):
     # Historical timing columns remain mapped while the reporting migration is
     # simplified; production execution writes only the provider timestamps on
     # ObjectRecord and TransferLaneSegment.
-    restore_requested_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    first_restore_available_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_restore_available_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    transfer_started_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    transfer_completed_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    simulation_transfer_clock_held: Mapped[bool] = mapped_column(Boolean, default=False)
+    restore_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_restore_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_restore_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    transfer_observed_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    transfer_observed_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    transfer_clock_held: Mapped[bool] = mapped_column(Boolean, default=False)
     restore_reapproval_required: Mapped[bool] = mapped_column(Boolean, default=False)
     restore_reapproval_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     restore_reapproval_detected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -879,9 +869,6 @@ class TransferQueueItem(Base):
     object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), index=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
-    # A simulated source has its own virtual clock. This is deliberately
-    # separate from the operational enqueue timestamp used for leases.
-    available_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     restore_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     predicted_transfer_seconds: Mapped[float] = mapped_column(Float, default=0)
     priority_score: Mapped[int] = mapped_column(Integer, default=0, index=True)
@@ -1675,10 +1662,8 @@ def active_source_scope_conflicts(session: Session, bucket: str, prefixes: list[
 
 def require_non_overlapping_source_scope(session: Session, source: Source) -> None:
     """Block new operational work for an ambiguous active source scope."""
-    # Scenario catalogs are isolated by execution. Equal virtual bucket and
+    # Scenario catalogs are isolated by execution. Equal effective bucket and
     # prefix labels in different scenarios cannot address the same object.
-    if runtime_context.is_simulation:
-        return
     conflicts = active_source_scope_conflicts(session, source.s3_bucket, source_prefix_values(source), source.id)
     if conflicts:
         names = ", ".join(sorted({item["source_name"] for item in conflicts}))
@@ -2147,7 +2132,7 @@ async def console_authentication_guard(request: FastAPIRequest, call_next):
             elif browser_session and browser_session.revoked_at is None:
                 browser_session.revoked_at = now
                 browser_session.revoke_reason = "expired_or_disabled"
-                session.commit()
+        session.commit()
     if principal is None:
         response = auth_response(401, "Authentication required", redirect=not path.startswith("/api/"))
         response.delete_cookie(CONSOLE_SESSION_COOKIE, path="/")
@@ -2213,9 +2198,9 @@ def ensure_console_auth_bootstrap() -> None:
 
 @app.on_event("startup")
 def create_schema() -> None:
-    # A Simulation process must prove it is talking to the expected external
+    # A test execution process must prove it is talking to the expected external
     # backend before touching its isolated schema. Operations may still be
-    # disabled while the following simulator phases are being implemented.
+    # disabled while the following provider emulator phases are being implemented.
     cloud_backend.readiness(require_operations=False)
     # Production schema changes are versioned and serialized by the explicit
     # migrator. The startup call is intentionally idempotent for development
@@ -2352,10 +2337,10 @@ def create_schema() -> None:
         "restore_forecast_standard_first_seconds": "INTEGER NOT NULL DEFAULT 14400",
         "restore_forecast_standard_complete_seconds": "INTEGER NOT NULL DEFAULT 64800",
     }
-    source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_objects_inserted": "BIGINT NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "backend_kind": "VARCHAR(16) NOT NULL DEFAULT 'REAL'", "simulation_scenario_id": "VARCHAR(36)", "simulation_execution_id": "VARCHAR(36)", "simulation_correlation_id": "VARCHAR(36)", "simulation_tenant_id": "VARCHAR(36)", "simulation_project_id": "VARCHAR(36)", "simulation_fidelity": "VARCHAR(16)", "migration_project_id": "BIGINT", "destination_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''", "business_priority": "INTEGER NOT NULL DEFAULT 999"}
+    source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_objects_inserted": "BIGINT NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "migration_project_id": "BIGINT", "destination_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''", "business_priority": "INTEGER NOT NULL DEFAULT 999"}
     source_columns["archived_at"] = "TIMESTAMP WITH TIME ZONE"
     source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION", "completion_estimate_json": "TEXT NOT NULL DEFAULT '{}'"})
-    wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "restore_submission_deadline_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_requested_virtual_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_started_virtual_at": "TIMESTAMP WITH TIME ZONE", "transfer_completed_virtual_at": "TIMESTAMP WITH TIME ZONE", "simulation_transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
+    wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "restore_submission_deadline_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_observed_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_started_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_completed_at": "TIMESTAMP WITH TIME ZONE", "transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
     existing_runtime_columns = {column["name"] for column in inspect(engine).get_columns("runtime_settings")}
     existing_source_columns = {column["name"] for column in inspect(engine).get_columns("sources")}
     existing_wave_columns = {column["name"] for column in inspect(engine).get_columns("waves")}
@@ -2374,8 +2359,8 @@ def create_schema() -> None:
     existing_discovery_change_columns = {column["name"] for column in inspect(engine).get_columns("discovery_changes")}
     existing_event_columns = {column["name"] for column in inspect(engine).get_columns("events")}
     with engine.begin() as connection:
-        if engine.dialect.name == "postgresql" and "simulation_enabled" in existing_runtime_columns:
-            connection.execute(text("ALTER TABLE runtime_settings DROP COLUMN simulation_enabled"))
+        if engine.dialect.name == "postgresql" and "test execution_enabled" in existing_runtime_columns:
+            connection.execute(text("ALTER TABLE runtime_settings DROP COLUMN test execution_enabled"))
         for column, sql_type in expected_columns.items():
             if column not in existing_columns:
                 connection.execute(text(f"ALTER TABLE objects ADD COLUMN {column} {sql_type}"))
@@ -2407,7 +2392,6 @@ def create_schema() -> None:
         lane_columns = {
             "project_id": "BIGINT",
             "dispatch_batch_id": "BIGINT",
-            "available_virtual_at": "TIMESTAMP WITH TIME ZONE",
             "preemption_cooldown_until": "TIMESTAMP WITH TIME ZONE",
             "preemption_successor_item_id": "BIGINT",
             "preemption_requested_at": "TIMESTAMP WITH TIME ZONE",
@@ -2582,31 +2566,6 @@ def create_schema() -> None:
         runtime = session.get(RuntimeSettings, 1)
         if runtime and int(runtime.restore_forecast_bulk_complete_seconds or 0) == 72 * 3600:
             runtime.restore_forecast_bulk_complete_seconds = 48 * 3600
-        # A source-level deep-audit action was briefly allowed for CONTROL
-        # simulations, which cannot replay payload bytes. Recover only this
-        # exact rejected audit signature: the migration evidence itself is
-        # already VERIFIED, and unrelated FAILED waves must remain untouched.
-        rejected_control_audits = list(session.scalars(select(Task).join(Wave).join(Source).where(
-            Task.kind == "VERIFY_WAVE", Task.state == TaskState.FAILED,
-            Task.error.contains("Deep SHA-256 audit requires a DATA simulation"),
-            Wave.status == "FAILED", Source.backend_kind == "SIMULATED",
-            Source.simulation_fidelity != "DATA",
-        )))
-        for task in rejected_control_audits:
-            wave = task.wave
-            outstanding = session.scalar(select(func.count(ObjectRecord.id)).where(
-                ObjectRecord.wave_id == wave.id, ObjectRecord.state != ObjectState.VERIFIED
-            )) or 0
-            if outstanding:
-                continue
-            task.state, task.error, task.completed_at, task.lease_expires_at = (
-                TaskState.CANCELLED, "Cancelled: deep audit requires DATA simulation; migration integrity remains verified.",
-                utcnow(), None,
-            )
-            wave.status = "COMPLETED"
-            record_event(session, "CONTROL_DEEP_AUDIT_CANCELLED",
-                         "Incompatible CONTROL deep-audit task cancelled; verified migration state restored.",
-                         source_id=wave.source_id, wave_id=wave.id)
         # Releases before v0.8.5 let the continuous-lane reconciler overwrite
         # VERIFIED with COMPLETED after a successful deep audit. Restore only
         # waves backed by both a succeeded VERIFY_WAVE task and per-object
@@ -2658,43 +2617,7 @@ def create_schema() -> None:
             record_event(session, "DYNAMIC_SCHEDULE_SEMANTICS_UPGRADED",
                          f"Pipeline run {run.id} now separates the AWS service window from operational safety",
                          source_id=run.source_id)
-        # Before the simulator surfaced restore expiry as a typed 409, this
-        # exact condition appeared as an opaque logical-transfer HTTP 500.
-        # Upgrade only that known signature to the explicit paid-restore
-        # approval state; unrelated failed transfers retain their original
-        # failure diagnosis.
-        legacy_expiry_waves = list(session.scalars(
-            select(Wave)
-            .join(Source, Wave.source_id == Source.id)
-            .join(Task, Task.wave_id == Wave.id)
-            .where(
-                Source.backend_kind == "SIMULATED",
-                Wave.status == "FAILED",
-                Wave.restore_reapproval_required.is_(False),
-                Task.kind == "TRANSFER_CONTINUOUS",
-                Task.state == TaskState.FAILED,
-                Task.error.contains("logical-transfer"),
-                Task.error.contains("HTTP Error 500"),
-            )
-            .distinct()
-        ))
-        for wave in legacy_expiry_waves:
-            wave.status = "RESTORE_REAPPROVAL_REQUIRED"
-            wave.restore_reapproval_required = True
-            wave.restore_reapproval_reason = (
-                "A previous simulator logical-transfer response reported HTTP 500 while a restored "
-                "copy was being transferred. The current release treats this known condition as "
-                "restore unavailability; a new restore requires explicit approval because it may incur AWS charges."
-            )
-            wave.restore_reapproval_detected_at = migration_now
-            record_event(
-                session,
-                "RESTORE_REAPPROVAL_REQUIRED",
-                "Historic simulator restore-expiry failure converted to explicit operator reapproval required",
-                source_id=wave.source_id,
-                wave_id=wave.id,
-            )
-        session.commit()
+            session.commit()
 
 
 def get_session() -> Generator[Session, None, None]:
@@ -2833,7 +2756,7 @@ def transfer_priority(score_deadline: datetime | None, predicted_seconds: float,
     now = now or utcnow()
     # PostgreSQL preserves timezone metadata, while SQLite contract tests do
     # not.  Normalize both sides at this boundary so the same priority and
-    # expiry semantics apply to real and simulated control databases.
+    # expiry semantics apply to production control database.
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     if score_deadline is not None and score_deadline.tzinfo is None:
@@ -2929,7 +2852,6 @@ def enqueue_available_transfer_objects(session: Session, wave: Wave,
         values = {
             "size_bytes": obj.size_bytes,
             "available_at": obj.restored_at or observed_at,
-            "available_virtual_at": (observed_at if wave.source.backend_kind == "SIMULATED" else None),
             "restore_expires_at": obj.restore_expires_at,
             "predicted_transfer_seconds": float(obj.planned_transfer_seconds or 0),
             "priority_score": score,
@@ -2975,7 +2897,7 @@ def enqueue_available_transfer_objects(session: Session, wave: Wave,
                 )
                 created += int(result.rowcount or 0)
             else:
-                # SQLite is used only by the deterministic local simulator;
+                # SQLite is used only by the deterministic local provider emulator;
                 # its writer lock serializes this boundary. Production always
                 # uses PostgreSQL's atomic ON CONFLICT path above.
                 session.add(TransferQueueItem(**identity))
@@ -3565,7 +3487,7 @@ def is_retired_secret_reference(value: str) -> bool:
 
 
 def normalized_private_endpoint(value: str | None, field: str) -> str | None:
-    """Validate an optional SDK endpoint without treating it as a Fujin mode.
+    """Validate an optional SDK endpoint without treating it as a local test backend mode.
 
     HTTPS is mandatory for custom endpoints.  The normal public SDK endpoint
     remains represented by ``None``; no caller can accidentally turn a label
@@ -3902,7 +3824,7 @@ def wave_cost_estimate(session: Session, wave: Wave) -> dict:
     supplies their regional/contractual prices for the connection.
     """
     source = wave.source
-    # Simulated sources intentionally have no Secret-backed AWS connection.
+    # Observed timeline sources intentionally have no Secret-backed AWS connection.
     # They still use the same public catalog and billable-unit model, but do
     # not offer per-account contractual overrides or OCI price overrides.
     pricing = pricing_or_create(session, source.aws_connection_id) if source.aws_connection_id else None
@@ -4011,9 +3933,9 @@ def wave_cost_estimate(session: Session, wave: Wave) -> dict:
         if observed_temp_rate is not None else None
     )
     return {"wave_id": wave.id, "connection_id": source.aws_connection_id,
-            "connection_label": source.aws_connection.label if source.aws_connection else "AWS public Price List (simulation)",
+            "connection_label": source.aws_connection.label if source.aws_connection else "AWS public Price List (test execution)",
             "currency": pricing.currency.upper() if pricing is not None else public["currency"].upper(),
-            "pricing_reference": pricing.reference if pricing is not None else "Public AWS Price List; no contractual overrides in Simulation mode",
+            "pricing_reference": pricing.reference if pricing is not None else "Public AWS Price List; no contractual overrides in test execution mode",
             "pricing_updated_at": pricing.updated_at if pricing is not None else public.get("fetched_at"),
             "global_pricing": public,
             "complete": not missing_by_category["one_time"] and not unpriced_archive_gib,
@@ -5200,7 +5122,6 @@ def platform_status() -> dict:
                     "Host status is stale; the collector has not produced a fresh "
                     f"snapshot within {PLATFORM_STATUS_MAX_AGE_SECONDS} seconds"
                 ),
-                "operation_mode": runtime_context.mode.value,
                 "resources": {},
                 "services": {},
                 "last_postgres_backup": None,
@@ -5217,24 +5138,14 @@ def platform_status() -> dict:
             "postgres_backup_timer",
             "platform_status_timer",
         )
-        visible_service_names = list(common_service_names)
-        if runtime_context.is_simulation:
-            visible_service_names.append("simulator_container")
         status["services"] = {
-            name: services[name] for name in visible_service_names if name in services
+            name: services[name] for name in common_service_names if name in services
         }
 
-        operation_mode = runtime_context.mode.value
         backups = status.get("last_postgres_backups") or {}
-        selected_backup = backups.get(operation_mode)
-        # Compatibility with snapshots created before backups were separated by
-        # database domain. Never expose a backup from the other mode.
+        selected_backup = backups.get("REAL")
         if selected_backup is None and (legacy_backup := status.get("last_postgres_backup")):
-            backup_name = os.path.basename(str(legacy_backup.get("path") or ""))
-            legacy_is_simulation = backup_name.startswith("migration-simulation-")
-            if legacy_is_simulation == runtime_context.is_simulation:
-                selected_backup = legacy_backup
-        status["operation_mode"] = operation_mode
+            selected_backup = legacy_backup
         status["stale"] = False
         status["age_seconds"] = age_seconds
         status["last_postgres_backup"] = selected_backup
@@ -5246,7 +5157,6 @@ def platform_status() -> dict:
             "available": False,
             "stale": False,
             "message": f"Host status unavailable: {error}",
-            "operation_mode": runtime_context.mode.value,
             "resources": {},
             "services": {},
             "last_postgres_backup": None,
@@ -5566,22 +5476,11 @@ def destination_provenance_matches(obj: ObjectRecord, headers: dict) -> bool:
 def normalized_etag(value: str | None) -> str:
     """Compare ETags across providers without confusing presentation quotes.
 
-    S3 inventory commonly returns an unquoted ETag whereas the Fujin cloud
+    S3 inventory commonly returns an unquoted ETag whereas the local test backend cloud
     contract, like OCI's HTTP APIs, presents it with RFC-style quotes.  The
     immutable value is the token inside those quotes, not the display form.
     """
     return (value or "").strip().strip('"')
-
-
-def simulated_destination_provenance_matches(obj: ObjectRecord, descriptor: object | None) -> bool:
-    """Reconcile Fujin destination evidence with the discovered source row."""
-    if descriptor is None:
-        return False
-    metadata = json.loads(obj.metadata_json or "{}")
-    return (
-        (not obj.etag or normalized_etag(getattr(descriptor, "etag", None)) == normalized_etag(obj.etag))
-        and getattr(descriptor, "metadata", {}) == metadata
-    )
 
 
 @app.get("/api/readiness")
@@ -5785,18 +5684,8 @@ def operations_overview(session: Session = Depends(get_session),
         ObjectRecord.transfer_progress_at >= utcnow() - timedelta(minutes=2),
         object_scope,
     )) or 0)
-    control_logical_recent = session.scalar(select(ObjectRecord.id).join(Source).where(
-        ObjectRecord.transferred_at >= since,
-        Source.backend_kind == "SIMULATED",
-        Source.simulation_fidelity == "CONTROL",
-        source_scope,
-    ).limit(1)) is not None
-    control_logical_active = session.scalar(select(ObjectRecord.id).join(Wave).join(Source).where(
-        ObjectRecord.state == ObjectState.TRANSFERRING,
-        Source.backend_kind == "SIMULATED",
-        Source.simulation_fidelity == "CONTROL",
-        source_scope,
-    ).limit(1)) is not None
+    control_logical_recent = False
+    control_logical_active = False
     # Tiny objects can finish before a two-second in-flight sample exists. Add
     # their completion throughput from a short fixed window so current activity
     # remains meaningful for workloads with many small files.
@@ -5812,15 +5701,6 @@ def operations_overview(session: Session = Depends(get_session),
     # The configured source link is a physical contract for both REAL and
     # CONTROL. Sampling and object-boundary accounting may never report more.
     live_transfer_mbps = min(float(settings.max_throughput_mbps), live_transfer_mbps)
-    if control_logical_recent:
-        logical_elapsed = float(session.scalar(select(func.coalesce(func.sum(ObjectRecord.transfer_elapsed_seconds), 0)).join(Source).where(
-            ObjectRecord.transferred_at >= since,
-            Source.backend_kind == "SIMULATED",
-            Source.simulation_fidelity == "CONTROL",
-            source_scope,
-        )) or 0)
-        if logical_elapsed > 0:
-            transfer_seconds = max(1, logical_elapsed / max(1, RAIJU_MIN_WORKERS))
     active_transfer_rows = session.execute(
         select(
             Wave.id, Wave.name, Source.name,
@@ -5904,7 +5784,7 @@ def operations_overview(session: Session = Depends(get_session),
             "transfer_mbps": round(transfer_mbps, 2),
             "transfer_live_mbps": round(live_transfer_mbps, 2),
             "transfer_limit_mbps": int(settings.max_throughput_mbps),
-            "simulation_logical_metrics": bool(control_logical_recent or control_logical_active),
+            "test execution_logical_metrics": bool(control_logical_recent or control_logical_active),
             "transfer_live_window_seconds": live_window_seconds,
             "restored_files": restored_files,
             "restore_requested_total": int(restore_requested_total or 0),
@@ -6232,7 +6112,7 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
         if operational_state in {"RESTORE + TRANSFER", "TRANSFER DRAINING"}:
             state_since = totals.get("transfer_started_at") or lane.get("available_at") or restore.get("first_available_at")
         elif operational_state in {"RESTORE REQUESTED", "RESTORE ACCEPTED", "RESTORING"}:
-            state_since = restore.get("requested_at") or wave.restore_requested_virtual_at or (task.created_at if task else None)
+            state_since = restore.get("requested_at") or wave.restore_observed_at or (task.created_at if task else None)
         elif operational_state == "RESTORE SCHEDULED":
             state_since = wave.created_at
         elif operational_state == "RESTORE REAPPROVAL REQUIRED":
@@ -6428,62 +6308,12 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
         "stalled": item.id in stalled_ids,
     } for index, (item, obj, wave, source) in enumerate(active_raiju_rows, start=1)]
     lane_totals["activity_basis"] = "WALL_CLOCK"
-    # Fujin CONTROL finishes the physical database operation in milliseconds
-    # while the durable segment carries the virtual WAN interval.  A normal
+    # local test backend CONTROL finishes the physical database operation in milliseconds
+    # while the durable segment carries the effective lane interval.  A normal
     # browser refresh can therefore miss every wall-clock thread. For a
-    # simulated source, render the Raijus whose persisted segments contain
-    # the source's current virtual instant; that is the truthful operational
+    # use_observed_timeline source, render the Raijus whose persisted segments contain
+    # the source's current effective instant; that is the truthful operational
     # view of an accelerated execution.
-    if runtime_context.is_simulation:
-        virtual_sources = {
-            source.id: source for source in session.scalars(select(Source).where(
-                Source.id.in_({wave.source_id for wave in wave_models.values()}),
-                Source.simulation_execution_id.is_not(None),
-                Source.archived_at.is_(None),
-            ))
-        } if wave_models else {}
-        virtual_nows: dict[int, datetime] = {}
-        for source_id, source in virtual_sources.items():
-            try:
-                virtual_nows[source_id] = cloud_backend.clock(source.simulation_execution_id).effective_now
-            except (OSError, TimeoutError, ValueError):
-                continue
-        virtual_workers = []
-        for source_id, virtual_now in virtual_nows.items():
-            for segment, item, obj, wave, source in session.execute(
-                select(TransferLaneSegment, TransferQueueItem, ObjectRecord, Wave, Source)
-                .join(TransferQueueItem, TransferQueueItem.id == TransferLaneSegment.queue_item_id)
-                .join(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
-                .join(Wave, Wave.id == TransferLaneSegment.wave_id)
-                .join(Source, Source.id == TransferLaneSegment.source_id)
-                .where(
-                    TransferLaneSegment.source_id == source_id,
-                    TransferLaneSegment.started_at <= virtual_now,
-                    TransferLaneSegment.completed_at > virtual_now,
-                ).order_by(TransferLaneSegment.worker_slot, TransferLaneSegment.id)
-            ):
-                started = segment.started_at.replace(tzinfo=timezone.utc) if segment.started_at.tzinfo is None else segment.started_at
-                completed = segment.completed_at.replace(tzinfo=timezone.utc) if segment.completed_at.tzinfo is None else segment.completed_at
-                total_bytes = int(obj.size_bytes or item.size_bytes or 0)
-                elapsed = max(0.0, (virtual_now - started).total_seconds())
-                total_seconds = max(1.0, (completed - started).total_seconds())
-                virtual_workers.append({
-                    "slot": int(segment.worker_slot or len(virtual_workers) + 1),
-                    "state": "TRANSFERRING", "source_id": source.id, "source_name": source.name,
-                    "wave_id": wave.id, "wave_name": wave.name, "object_key": obj.object_key,
-                    "progress_bytes": min(total_bytes, int(total_bytes * elapsed / total_seconds)),
-                    "total_bytes": total_bytes,
-                    "rate_mbps": round(total_bytes * 8 / total_seconds / 1_000_000, 2),
-                    "elapsed_seconds": int(elapsed), "priority_band": item.priority_band,
-                    "restore_expires_at": item.restore_expires_at,
-                })
-        # A durable current lease is the authoritative live view. Virtual
-        # segments fill the short CONTROL gap only when no object is actually
-        # leased; replacing live rows with historical overlapping segments can
-        # misleadingly make every Raiju look busy during a stalled transfer.
-        if virtual_workers and not lane_totals["workers"] and lane_totals["leased_items"]:
-            lane_totals["workers"] = virtual_workers
-            lane_totals["activity_basis"] = "VIRTUAL_LANE"
     # A lease is a crash-safe ownership fence, not proof that bytes are being
     # copied at this exact instant.  Keep those concepts distinct in the UI:
     # only TRANSFERRING objects occupy a displayed Raiju.  A lease paired with
@@ -6842,7 +6672,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     ).order_by(RestoreAttempt.wave_id, RestoreAttempt.created_at.desc(), RestoreAttempt.id.desc())):
         restore_attempt_counts[attempt.wave_id] = restore_attempt_counts.get(attempt.wave_id, 0) + 1
         latest_restore_attempts.setdefault(attempt.wave_id, attempt)
-    # A segment is the durable transfer-lane evidence.  CONTROL simulations
+    # A segment is the durable transfer-lane evidence.  CONTROL test executions
     # created before the lane recorded the logical elapsed duration can have a
     # zero-width segment; the linked object still retains its measured logical
     # duration, which lets this read model faithfully recover the interval.
@@ -6856,41 +6686,10 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     ):
         segments_by_wave.setdefault(segment.wave_id, []).append((segment, float(elapsed_seconds or 0)))
     # The board is an observability endpoint and must remain available while a
-    # large simulation is busy.  In particular, do not perform one clock HTTP
+    # large test execution is busy.  In particular, do not perform one clock HTTP
     # call per wave: ``dict.setdefault`` evaluates its value argument before
-    # deciding whether the key already exists.  One stalled simulator request
+    # deciding whether the key already exists.  One stalled provider emulator request
     # must not turn an otherwise local, durable timeline into a 500 response.
-    source_clock_now: dict[int, datetime] = {}
-    for _wave, row_source in rows:
-        if (not runtime_context.is_simulation or not row_source.simulation_execution_id
-                or row_source.id in source_clock_now):
-            continue
-        persisted_virtual_points = [
-            item
-            for candidate_wave, candidate_source in rows
-            if candidate_source.id == row_source.id
-            for item in (
-                candidate_wave.restore_requested_virtual_at,
-                candidate_wave.first_restore_available_virtual_at,
-                candidate_wave.last_restore_available_virtual_at,
-                candidate_wave.transfer_started_virtual_at,
-                candidate_wave.transfer_completed_virtual_at,
-                candidate_wave.planned_restore_at,
-                candidate_wave.planned_transfer_start_at,
-            )
-            if item is not None
-        ]
-        persisted_now = max(persisted_virtual_points) if persisted_virtual_points else now
-        try:
-            source_clock_now[row_source.id] = cloud_backend.clock(
-                row_source.simulation_execution_id
-            ).effective_now
-        except (OSError, TimeoutError, ValueError):
-            # The known virtual milestone is sufficient to render a stable,
-            # truthful snapshot.  The next dashboard refresh will use the
-            # live clock again once the simulator is responsive.
-            source_clock_now[row_source.id] = persisted_now
-
     def board_timestamp(value: datetime | None) -> datetime | None:
         """SQLite test rows are naive; API timestamps are always UTC-aware."""
         if value is not None and value.tzinfo is None:
@@ -6976,26 +6775,24 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             candidate_times = object_times.get(candidate_wave.id, {})
             candidate_latest_attempt = latest_restore_attempts.get(candidate_wave.id)
             candidate_is_retry = restore_attempt_counts.get(candidate_wave.id, 0) > 1
-            candidate_simulated = runtime_context.is_simulation and bool(
-                candidate_source.simulation_execution_id
-            )
+            use_observed_timeline = False
             candidate_request = board_timestamp(
-                candidate_wave.restore_requested_virtual_at
-                if candidate_simulated else candidate_times.get("restore_requested_at")
+                candidate_wave.restore_observed_at
+                if use_observed_timeline else candidate_times.get("restore_requested_at")
             )
             if candidate_wave.status == "RESTORE_SCHEDULED":
                 # Reapproval is not a new AWS request.  Place it back in the
                 # projected slot queue rather than drawing its old restore.
                 candidate_request = None
-            elif (candidate_is_retry and not candidate_simulated
+            elif (candidate_is_retry and not use_observed_timeline
                   and candidate_wave.status in active_restore_statuses
                   and candidate_latest_attempt is not None):
                 candidate_request = board_timestamp(candidate_latest_attempt.created_at)
             candidate_available = board_timestamp(
-                candidate_wave.last_restore_available_virtual_at
-                if candidate_simulated else candidate_times.get("last_available_at")
+                candidate_wave.last_restore_available_at
+                if use_observed_timeline else candidate_times.get("last_available_at")
             )
-            candidate_now = board_timestamp(source_clock_now.get(candidate_source.id, now))
+            candidate_now = board_timestamp(now)
             if candidate_request and not candidate_available and candidate_wave.status in active_restore_statuses:
                 reference_end = candidate_request + timedelta(
                     seconds=restore_service_window_seconds(candidate_wave.restore_tier)
@@ -7011,7 +6808,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             board_timestamp(item[0].created_at), item[0].id
         ))
         for candidate_wave, candidate_source in scheduled_rows:
-            candidate_now = board_timestamp(source_clock_now.get(candidate_source.id, now))
+            candidate_now = board_timestamp(now)
             eligible_at = board_timestamp(candidate_wave.planned_restore_at) or candidate_now
             materialized_at = board_timestamp(candidate_wave.created_at) or eligible_at
             if slot_releases:
@@ -7060,20 +6857,20 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                 "transferred_objects": transferred_objects,
                 "total_objects": total_objects,
             }
-        simulated = runtime_context.is_simulation and bool(row_source.simulation_execution_id)
+        use_observed_timeline = False
         latest_restore_attempt = latest_restore_attempts.get(wave.id)
         is_restore_retry = restore_attempt_counts.get(wave.id, 0) > 1
-        request_at = board_timestamp(wave.restore_requested_virtual_at if simulated else times.get("restore_requested_at"))
-        first_available_at = board_timestamp(wave.first_restore_available_virtual_at if simulated else times.get("first_available_at"))
-        available_at = board_timestamp(wave.last_restore_available_virtual_at if simulated else times.get("last_available_at"))
-        transfer_started_at = board_timestamp(wave.transfer_started_virtual_at if simulated else times.get("transfer_started_at"))
-        transfer_completed_at = board_timestamp(wave.transfer_completed_virtual_at if simulated else times.get("transfer_completed_at"))
+        request_at = board_timestamp(wave.restore_observed_at if use_observed_timeline else times.get("restore_requested_at"))
+        first_available_at = board_timestamp(wave.first_restore_available_at if use_observed_timeline else times.get("first_available_at"))
+        available_at = board_timestamp(wave.last_restore_available_at if use_observed_timeline else times.get("last_available_at"))
+        transfer_started_at = board_timestamp(wave.transfer_observed_started_at if use_observed_timeline else times.get("transfer_started_at"))
+        transfer_completed_at = board_timestamp(wave.transfer_observed_completed_at if use_observed_timeline else times.get("transfer_completed_at"))
         if wave.status == "RESTORE_SCHEDULED":
             # Old evidence remains in reports, but the current retry has not
             # yet reached AWS and must be shown only as scheduled work.
             request_at = first_available_at = available_at = None
             transfer_started_at = transfer_completed_at = None
-        elif (is_restore_retry and not simulated and wave.status in active_restore_statuses
+        elif (is_restore_retry and not use_observed_timeline and wave.status in active_restore_statuses
               and latest_restore_attempt is not None):
             # Use the new Batch attempt, never the first historical request.
             request_at = board_timestamp(latest_restore_attempt.created_at)
@@ -7082,7 +6879,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         if (is_restore_retry or wave.status == "RESTORE_SCHEDULED") and wave_progress and transferred_objects > 0:
             wave_progress = {**wave_progress, "phase": "Entrega preservada",
                              "label": f"{wave_progress['percent']}% Entrega preservada"}
-        effective_now = board_timestamp(source_clock_now.get(row_source.id, now))
+        effective_now = board_timestamp(now)
         task = latest_tasks.get(wave.id)
         phases = []
         restore_waiting_for_capacity = bool(
@@ -7110,10 +6907,10 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         restore_projection = restore_projection_by_wave.get(wave.id, {})
         projected_restore_at = board_timestamp(restore_projection.get("projected_at"))
         queue_end = request_at or projected_restore_at or wave.planned_restore_at
-        # Simulation timestamps live in a source-owned virtual clock.  Do not
+        # test execution timestamps live in a source-owned effective clock.  Do not
         # mix them with the database wall-clock creation timestamp, otherwise
         # a planned lane can appear to start days before its own scenario.
-        queue_start = board_timestamp(wave.planned_restore_at if simulated else wave.created_at)
+        queue_start = board_timestamp(wave.planned_restore_at if use_observed_timeline else wave.created_at)
         queue_end = board_timestamp(queue_end)
         if queue_start and queue_end and queue_start > queue_end:
             queue_start = queue_end
@@ -7153,7 +6950,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         # immutable observed timestamp.
         restore_start = request_at or projected_restore_at or wave.planned_restore_at
         # The board intentionally uses the published tier reference, rather
-        # than an object-count/Fujin precision estimate.  The tier is durable
+        # than an object-count/local test backend precision estimate.  The tier is durable
         # on the wave, therefore this baseline survives later configuration.
         restore_complete_forecast_seconds = restore_service_window_seconds(wave.restore_tier)
         expected_first_available_at = (
@@ -7360,7 +7157,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     wave_by_id = {wave.id: wave for wave, _source in rows}
     board_by_id = {wave["wave_id"]: wave for wave in board_waves}
     observed_intervals: list[dict] = []
-    dispatched_virtual_intervals: list[dict] = []
+    dispatched_intervals: list[dict] = []
     latest_positive_segment_id = {
         int(segment.queue_item_id): int(segment.id)
         for entries in segments_by_wave.values()
@@ -7370,7 +7167,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     for wave_id, entries in segments_by_wave.items():
         board_wave = board_by_id[wave_id]
         terminal_at = board_timestamp(board_wave.get("transfer_completed_at"))
-        effective_now = board_timestamp(source_clock_now.get(wave_by_id[wave_id].source_id, now))
+        effective_now = board_timestamp(now)
         has_prior_segment_before_terminal = bool(
             terminal_at and any(board_timestamp(segment.started_at) < terminal_at for segment, _elapsed in entries)
         )
@@ -7381,7 +7178,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                 end = completed
             elif terminal_at is not None and (terminal_at > start or has_prior_segment_before_terminal):
                 # Older CONTROL runs recorded a zero-width segment for every
-                # object while preserving the wave's virtual completion.
+                # object while preserving the wave's effective completion.
                 end = max(start + timedelta(seconds=1), terminal_at)
             elif logical_elapsed > 0:
                 end = start + timedelta(seconds=logical_elapsed)
@@ -7407,18 +7204,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                 "nearest_expiry_at": segment.nearest_expiry_at,
                 "segment_count": 1,
             }
-            # CONTROL commits the object record immediately but its segment
-            # represents scheduled virtual WAN occupancy. A future segment is
-            # not yet observed calendar work. Split it at the source clock so
-            # solid blue never hides the striped forecast that remains.
-            if runtime_context.is_simulation:
-                virtual_now = board_timestamp(source_clock_now.get(interval["source_id"], now))
-                if interval["start_at"] < virtual_now:
-                    observed_intervals.append({**interval, "end_at": min(interval["end_at"], virtual_now)})
-                if interval["end_at"] > virtual_now:
-                    dispatched_virtual_intervals.append({**interval, "start_at": max(interval["start_at"], virtual_now)})
-            else:
-                observed_intervals.append(interval)
+            observed_intervals.append(interval)
 
     def merge_lane_intervals(intervals: list[dict]) -> list[dict]:
         merged: list[dict] = []
@@ -7439,7 +7225,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
         return merged
 
     merged_observed = merge_lane_intervals(observed_intervals)
-    merged_dispatched_virtual = merge_lane_intervals(dispatched_virtual_intervals)
+    merged_dispatched = merge_lane_intervals(dispatched_intervals)
 
     transfer_lane_phases: list[dict] = []
     for interval in merged_observed:
@@ -7459,7 +7245,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             "nearest_expiry_at": interval["nearest_expiry_at"],
         })
     dispatched_lane_end_by_source: dict[int, datetime] = {}
-    for interval in merged_dispatched_virtual:
+    for interval in merged_dispatched:
         involved = sorted(interval["wave_ids"])
         labels = [f"#{wave_id}: {board_by_id[wave_id]['wave_name']}" for wave_id in involved]
         dispatched_lane_end_by_source[interval["source_id"]] = max(
@@ -7474,7 +7260,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
             "wave_id": involved[0] if len(involved) == 1 else None,
             "wave_name": board_by_id[involved[0]]["wave_name"] if len(involved) == 1 else None,
             "entry_reason": f"{interval['segment_count']} segmento(s) já despachados na lane; " + ", ".join(labels),
-            "exit_reason": "ocupação virtual já despachada",
+            "exit_reason": "ocupação effective já despachada",
             "nearest_expiry_at": interval["nearest_expiry_at"],
         })
 
@@ -7504,7 +7290,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     settings = runtime_settings(session)
     if queued_items:
         cursors_by_source = {
-            source_id: max(board_timestamp(source_clock_now.get(source_id, now)), lane_end)
+            source_id: max(board_timestamp(now), lane_end)
             for source_id, lane_end in dispatched_lane_end_by_source.items()
         }
         # The configured link is the reference baseline.  A lower effective
@@ -7528,7 +7314,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                 )["effective_mbps"] * 1_000_000 / 8)
                 rate_bps_by_source[item_source_id] = rate_bps
             cursor = cursors_by_source.get(
-                item_source_id, board_timestamp(source_clock_now.get(item_source_id, now))
+                item_source_id, board_timestamp(now)
             )
             seconds = max(1, math.ceil(int(item.size_bytes or 0) / rate_bps))
             start, end = cursor, cursor + timedelta(seconds=seconds)
@@ -7572,9 +7358,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
                 int(projection["bytes_transferred"] or 0) / baseline_rate_bps
             ))
             baseline_end = projection["start_at"] + timedelta(seconds=baseline_seconds)
-            source_now = board_timestamp(source_clock_now.get(
-                wave_by_id[wave_id].source_id, now
-            ))
+            source_now = board_timestamp(now)
             if baseline_end < projection["end_at"] and source_now >= baseline_end:
                 extension = dict(projection)
                 extension.update({"start_at": baseline_end, "forecast_extension": True,
@@ -7704,7 +7488,7 @@ def deep_audits(project_id: int | None = None,
         completion_event = session.scalar(select(Event).where(
             Event.wave_id == wave.id,
             Event.created_at >= task.created_at,
-            Event.kind.in_(["INTEGRITY_VERIFICATION_COMPLETED", "SIMULATED_INTEGRITY_VERIFICATION_COMPLETED"]),
+            Event.kind.in_(["INTEGRITY_VERIFICATION_COMPLETED", ""]),
         ).order_by(Event.created_at.desc(), Event.id.desc()).limit(1))
         completed_at = completion_event.created_at if completion_event else None
         if completed_at is None and task.state == TaskState.SUCCEEDED:
@@ -7903,7 +7687,7 @@ def refresh_oci_bucket_cache(session: Session = Depends(get_session)) -> dict:
     A generic private Object Storage endpoint cannot participate in OCI
     Resource Search.  In that deployment shape, use the normal OCI SDK
     ``get_namespace``/``list_buckets`` contract instead.  This applies to any
-    private endpoint, not just Fujin LOCAL.
+    private endpoint, not just local test backend LOCAL.
     """
     try:
         import oci
@@ -8639,7 +8423,7 @@ def project_closure_snapshot(session: Session, project: MigrationProject, readin
     lane_intervals = []
     for segment, elapsed, terminal in session.execute(select(
         TransferLaneSegment, ObjectRecord.transfer_elapsed_seconds,
-        Wave.transfer_completed_virtual_at,
+        Wave.transfer_observed_completed_at,
     ).join(TransferQueueItem, TransferQueueItem.id == TransferLaneSegment.queue_item_id)
      .outerjoin(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
      .join(Wave, Wave.id == TransferLaneSegment.wave_id)
@@ -8673,7 +8457,7 @@ def project_closure_snapshot(session: Session, project: MigrationProject, readin
         "schema": "raijin.project-closure.snapshot.v2", "report_id": report_id,
         "revision": revision, "generated_at": _closure_iso(generated_at),
         "application": {"name": "Raijin", "version": RAIJIN_SERVICE_VERSION,
-            "revision": RAIJIN_BUILD_REVISION, "mode": runtime_context.mode.value},
+            "revision": RAIJIN_BUILD_REVISION},
         "project": {"id": project.id, "name": project.name, "created_at": _closure_iso(project.created_at)},
         "closure": {"status": "COMPLETED", "reason": reason, "reservations": [],
             "blockers": readiness["blockers"],
@@ -9132,16 +8916,10 @@ def remove_source_from_migration_project(project_id: int, source_id: int,
 
 @app.get("/api/sources")
 def list_sources(session: Session = Depends(get_session)) -> list[dict]:
-    if runtime_context.is_simulation:
-        # Returning to Migration must show a source created in Fujin without
-        # requiring a full-browser reload, even if a prior bind was cut off.
-        recover_orphaned_simulation_sources(session)
     # Deactivated sources remain selectable so their inventory, waves and
     # audit trail can still be consulted.  Execution paths continue to use
     # ``archived_at IS NULL`` as the backward-compatible active predicate.
-    sources = list(session.scalars(select(Source).where(
-        Source.backend_kind != "SIMULATED_DELETED"
-    ).order_by(Source.id)))
+    sources = list(session.scalars(select(Source).order_by(Source.id)))
     source_ids = [s.id for s in sources]
     wave_statuses: dict[int, set[str]] = {}
     if source_ids:
@@ -9207,12 +8985,11 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
              "s3_transfer_endpoint_mode": source_s3_transfer_endpoint_mode(s),
              "business_priority": int(s.business_priority or 999),
              "aws_connection_label": (s.aws_connection.label if s.aws_connection else
-                                      ("Simulated backend" if runtime_context.is_simulation else "Unassigned AWS connection")),
+                                      ("Observed timeline backend" if False else "Unassigned AWS connection")),
              "discovery_requested_at": s.discovery_requested_at, "discovery_completed_at": s.discovery_completed_at,
              "discovery_error": s.discovery_error, "discovery_pages_completed": s.discovery_pages_completed,
              "discovery_objects_inserted": s.discovery_objects_inserted,
              "last_discovery_mode": s.last_discovery_mode, "discovery_generation": s.discovery_generation,
-             "simulation_fidelity": s.simulation_fidelity,
              "discovery_can_resume": bool(s.discovery_continuation_token),
              "deactivated": s.archived_at is not None, "deactivated_at": s.archived_at,
              "lifecycle_status": ("DEACTIVATED" if s.archived_at is not None else "ACTIVE"),
@@ -9236,7 +9013,7 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
                                         "missing": s.destination_missing_count, "size_mismatches": s.destination_size_mismatch_count},
              "migration_status": migration_status(s), "operational_status": operational_status(s),
              "can_delete": not source_has_executed_wave(session, s.id),
-             "scope_conflicts": ([] if runtime_context.is_simulation else
+             "scope_conflicts": ([] if False else
                                  active_source_scope_conflicts(session, s.s3_bucket, source_prefix_values(s), s.id))}
             for s in sources]
 
@@ -10484,7 +10261,7 @@ def continuous_lane_capacity_profile(session: Session, source_id: int,
     waves from dividing one aggregate link measurement into artificial,
     slower per-wave rates.
     The configured limit is a hard ceiling even when historic CONTROL data
-    predates virtual-lane serialization and looks faster than the link.
+    predates effective-lane serialization and looks faster than the link.
     """
     ceiling = max(1.0, float(configured_mbps))
     rows = list(session.execute(
@@ -11229,34 +11006,12 @@ def dynamic_schedule_times(now: datetime, plans: list[dict], safety_seconds: int
     return times
 
 
-def _fujin_restore_profile(source: Source | None) -> dict:
-    """Read the immutable Fujin execution profile when it is locally usable.
-
-    The control plane must remain available when Fujin is temporarily down,
-    therefore a missing/unreachable simulator simply falls back to the
-    configured conservative profile. Executions retain their immutable
-    scenario snapshot, so template edits never change an active source.
-    """
-    if (source is None or source.backend_kind != "SIMULATED" or
-            not source.simulation_scenario_id or not runtime_context.simulator_base_url):
-        return {}
-    try:
-        executions = SimulatorAdminClient(runtime_context.simulator_base_url).list_scenario_executions(
-            source.simulation_scenario_id
-        )
-        execution = next((item for item in executions
-                          if item.get("id") == source.simulation_execution_id), None)
-        return dict(((execution or {}).get("snapshot") or {}).get("configuration") or {})
-    except (SimulatorAdminError, OSError, TimeoutError, ValueError):
-        return {}
-
-
 def restore_forecast_seconds(tier: str | None, settings: RuntimeSettings | None = None,
                              *, source: Source | None = None, object_count: int = 0,
                              total_bytes: int = 0) -> tuple[int, int]:
     """Return the documented reference window for the selected archive tier.
 
-    This is deliberately not a Fujin-derived completion guess.  AWS documents
+    AWS documents
     BULK Deep Archive as *typically within 48h* and STANDARD as *within 12h*;
     the UI must not present a fabricated intermediate precision as a promise.
     Object availability itself remains event-driven and can warm the lane
@@ -11299,7 +11054,7 @@ def restore_submission_lead_seconds(wave: Wave, run: DynamicPipelineRun,
                                     settings: RuntimeSettings) -> int:
     """Return the conservative public-S3 lead required before lane handoff.
 
-    This deliberately uses the documented tier ceiling, not Fujin timing nor
+    This deliberately uses the documented tier ceiling, not local test backend timing nor
     an optimistic per-object observation.  The safety reserve is operational
     slack after the public service window and therefore also belongs in the
     latest-safe submission calculation.
@@ -11404,11 +11159,7 @@ def _completion_lane_idle_breakdown(session: Session, source: Source,
               "unknown_seconds": 0}
     if not windows:
         return result
-    simulated = source.backend_kind == "SIMULATED"
-    availability_column = (
-        TransferQueueItem.available_virtual_at if simulated
-        else TransferQueueItem.available_at
-    )
+    availability_column = TransferQueueItem.available_at
     first_available = session.scalar(select(func.min(availability_column)).where(
         TransferQueueItem.source_id == source.id
     ))
@@ -11420,7 +11171,7 @@ def _completion_lane_idle_breakdown(session: Session, source: Source,
         gap = int(max(0, (right[0] - left[1]).total_seconds()))
         if not gap:
             continue
-        # Do not compare the simulator's virtual lane to ``transferred_at``:
+        # Do not compare the provider emulator's effective lane to ``transferred_at``:
         # that is a real wall-clock durability timestamp. A segment beginning
         # after this gap is durable proof that the object was still pending.
         pending = session.scalar(select(func.count(TransferQueueItem.id)).join(
@@ -11474,7 +11225,6 @@ def capture_source_completion_estimate(session: Session, source: Source,
     bits_per_second = max(1.0, float(settings.max_throughput_mbps or 1) * 1_000_000)
     source.completion_estimated_transfer_seconds = float(total_bytes) * 8 / bits_per_second
     source.completion_estimate_created_at = utcnow()
-    fujin_profile = _fujin_restore_profile(source)
     bulk_first, bulk_complete = restore_forecast_seconds("BULK")
     standard_first, standard_complete = restore_forecast_seconds("STANDARD")
     source.completion_estimate_json = json.dumps({
@@ -11486,7 +11236,6 @@ def capture_source_completion_estimate(session: Session, source: Source,
         },
         "restore_max_slots": int(settings.dynamic_restore_max_slots),
         "restore_confidence": "±25% da distância entre primeiro e último arquivo previsto por wave",
-        "fujin_profile": fujin_profile,
         "planner": "v10-documented-service-window",
     }, sort_keys=True)
 
@@ -11497,7 +11246,7 @@ def source_completion_statistics(session: Session, source: Source,
     if not completed:
         return {"available": False, "reason": "Aguardando a conclusão e a verificação de integridade da source."}
     settings = runtime_settings(session)
-    simulated = runtime_context.is_simulation and bool(source.simulation_execution_id)
+    use_observed_timeline = False
     waves = list(session.scalars(select(Wave).where(Wave.source_id == source.id).order_by(Wave.id)))
     if not waves:
         return {"available": False, "reason": "A source não possui waves com execução concluída."}
@@ -11513,8 +11262,8 @@ def source_completion_statistics(session: Session, source: Source,
     actual_restore: list[tuple[datetime | None, datetime | None]] = []
     for wave in waves:
         persisted_requested, persisted_available = object_times.get(wave.id, (None, None))
-        requested = wave.restore_requested_virtual_at if simulated else persisted_requested
-        available = wave.last_restore_available_virtual_at if simulated else persisted_available
+        requested = wave.restore_observed_at if use_observed_timeline else persisted_requested
+        available = wave.last_restore_available_at if use_observed_timeline else persisted_available
         planned = wave.planned_restore_at or requested
         if planned:
             expected_restore.append((planned, planned + timedelta(seconds=(
@@ -11525,7 +11274,7 @@ def source_completion_statistics(session: Session, source: Source,
 
     actual_lane: list[tuple[datetime | None, datetime | None]] = []
     for segment, elapsed, terminal in session.execute(
-        select(TransferLaneSegment, ObjectRecord.transfer_elapsed_seconds, Wave.transfer_completed_virtual_at)
+        select(TransferLaneSegment, ObjectRecord.transfer_elapsed_seconds, Wave.transfer_observed_completed_at)
         .join(TransferQueueItem, TransferQueueItem.id == TransferLaneSegment.queue_item_id)
         .outerjoin(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
         .join(Wave, Wave.id == TransferLaneSegment.wave_id)
@@ -11739,34 +11488,6 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
         if run.status == "NEEDS_ATTENTION":
             continue
         scheduler_now = now or source_scheduler_clock(run.source).effective_now
-        if runtime_context.is_simulation and run.source.backend_kind == "SIMULATED" and now is None:
-            # Simulator time is intentionally paused between durable
-            # decisions. When this source has no claimed/ready work, jump only
-            # to the next already-planned restore submission; never let a
-            # free-running accelerated clock burn a temporary restore window.
-            active_work = session.scalar(select(Task.id).join(Wave).where(
-                Wave.source_id == run.source_id,
-                Task.state.in_([TaskState.READY, TaskState.RUNNING]),
-            ).limit(1))
-            if active_work is None:
-                next_wave = session.scalar(select(Wave).where(
-                    Wave.pipeline_run_id == run.id,
-                    Wave.status == "RESTORE_SCHEDULED",
-                    Wave.planned_restore_at.is_not(None),
-                ).order_by(Wave.planned_restore_at, Wave.id).limit(1))
-                if next_wave and next_wave.planned_restore_at and next_wave.planned_restore_at > scheduler_now:
-                    advance_seconds = (next_wave.planned_restore_at - scheduler_now).total_seconds()
-                    SimulatorAdminClient(runtime_context.simulator_base_url).control_clock(
-                        run.source.simulation_execution_id, "ADVANCE", advance_seconds
-                    )
-                    scheduler_now = source_scheduler_clock(run.source).effective_now
-                    record_event(
-                        session,
-                        "SIMULATION_CLOCK_ADVANCED",
-                        f"Virtual clock advanced {format_duration(advance_seconds)} to the next scheduled restore",
-                        source_id=run.source_id,
-                        wave_id=next_wave.id,
-                    )
         source_release_capacity = adaptive_restore_slot_limit(session, run, settings)
         available_backlog_seconds = continuous_lane_backlog_seconds(session, run.source_id)
         # Restore and transfer are now decoupled.  Do not wait for a calendar
@@ -11876,7 +11597,7 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
             if wave.restore_submission_deadline_at is None and continuity_deadline is not None:
                 # Upgrade active pre-deadline rows lazily and safely.  The
                 # value is derived solely from the Raijin/AWS calendar and
-                # does not require an external call or Fujin knowledge.
+                # does not require an external call or local test backend knowledge.
                 wave.restore_submission_deadline_at = continuity_deadline
             continuity_deadline_due = bool(
                 continuity_deadline
@@ -11987,7 +11708,7 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
                 if backlog_at_first_file >= minimum_buffer and not continuity_deadline_due:
                     record_restore_deferral(wave, f"global expiry preflight rejected admission: {preflight_reason}")
                     continue
-            # Task leases always use wall time. A virtual timestamp here would
+            # Task leases always use wall time. A effective timestamp here would
             # make the real durable queue wait until that future date.
             session.add(Task(wave_id=wave.id, kind="SUBMIT_BATCH_RESTORE", available_at=queue_now))
             if global_restore_capacity > 2:
@@ -12164,7 +11885,7 @@ def observed_transfer_lane_window(session: Session, wave: Wave) -> tuple[datetim
     per-object durations and dividing by a fixed worker floor is not a lane
     measurement: it can turn one saturated link hour into many days whenever
     Raikou scales above the minimum worker count.  Older CONTROL records with
-    zero-width object segments are recovered from the durable virtual wave
+    zero-width object segments are recovered from the durable effective wave
     completion or the logical object duration.
     """
     rows = list(session.execute(
@@ -12178,7 +11899,7 @@ def observed_transfer_lane_window(session: Session, wave: Wave) -> tuple[datetim
         return None, None
     starts: list[datetime] = []
     ends: list[datetime] = []
-    terminal_at = wave.transfer_completed_virtual_at
+    terminal_at = wave.transfer_observed_completed_at
     has_prior_segment_before_terminal = bool(
         terminal_at and any(started_at < terminal_at for started_at, _completed_at, _elapsed in rows)
     )
@@ -12201,7 +11922,7 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
     Restore requests, active waves and their audit record are immutable. The
     transfer *forecast* remains mutable: moving it never sends an AWS request
     and is required to keep the serial transfer lane truthful after an
-    observed delay.  Simulation planning uses source-owned virtual milestones,
+    observed delay.  test execution planning uses source-owned observed milestones,
     never wall-clock timestamps produced by a fast CONTROL transfer.
     """
     changed = 0
@@ -12277,14 +11998,14 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             )
             .group_by(ObjectRecord.wave_id)
         ).all()) if waves else {}
-        # FUJIN has one virtual restore lane per source.  A mutable horizon
+        # local test backend has one effective restore lane per source.  A mutable horizon
         # wave must not be redrawn as eligible "now" while every restore slot
         # is already occupied: it has not been submitted, but its forecast
         # still needs to wait for the first active restore reference window.
-        # Keep this simulation-only so the established real planner remains
-        # completely untouched by virtual-clock scheduling rules.
-        simulated_restore_slot_floor: datetime | None = None
-        if run.source.backend_kind == "SIMULATED":
+        # Keep this test execution-only so the established real planner remains
+        # completely untouched by effective-clock scheduling rules.
+        restore_slot_floor: datetime | None = None
+        if False:
             active_restore_statuses = {"RESTORE_REQUESTED", "RESTORE_REQUEST_ACCEPTED", "RESTORING"}
             occupied_restore_ends: list[datetime] = []
             for candidate in waves:
@@ -12296,10 +12017,10 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                     candidate.status == "RESTORE_SCHEDULED" and has_submission
                 ):
                     continue
-                restore_started = candidate.restore_requested_virtual_at or candidate.planned_restore_at
+                restore_started = candidate.restore_observed_at or candidate.planned_restore_at
                 if restore_started is None:
                     continue
-                restored_at = candidate.last_restore_available_virtual_at
+                restored_at = candidate.last_restore_available_at
                 occupied_restore_ends.append(
                     restored_at
                     if restored_at
@@ -12309,7 +12030,7 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                 )
             restore_capacity = adaptive_restore_slot_limit(session, run, settings)
             if len(occupied_restore_ends) >= restore_capacity:
-                simulated_restore_slot_floor = min(occupied_restore_ends)
+                restore_slot_floor = min(occupied_restore_ends)
         cursor: datetime | None = None
         cursor_basis = "initial forecast"
         for wave in waves:
@@ -12318,12 +12039,12 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                 func.sum(ObjectRecord.transfer_elapsed_seconds), func.max(ObjectRecord.transfer_elapsed_seconds),
             ).where(ObjectRecord.wave_id == wave.id)).one()
             planned_start = wave.planned_transfer_start_at or scheduler_now
-            # The planner is also exercised against an isolated simulation
+            # The planner is also exercised against an isolated test execution
             # database in tests and recovery tools. The source itself is the
-            # durable authority for whether its timing is virtual.
-            simulated = wave.source.backend_kind == "SIMULATED"
-            observed_virtual_start = wave.transfer_started_virtual_at if simulated else None
-            observed_virtual_end = wave.transfer_completed_virtual_at if simulated else None
+            # durable authority for whether its timing is effective.
+            use_observed_timeline = False
+            observed_start = wave.transfer_observed_started_at if use_observed_timeline else None
+            observed_end = wave.transfer_observed_completed_at if use_observed_timeline else None
             lane_observed_start, lane_observed_end = observed_transfer_lane_window(session, wave)
             if lane_observed_start and lane_observed_end and lane_observed_end >= lane_observed_start:
                 # This wave has already entered the shared lane.  Its own
@@ -12358,25 +12079,25 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             observed_basis = "prediction"
             if lane_observed_start and lane_observed_end and lane_observed_end >= lane_observed_start:
                 duration_seconds = max(1, int((lane_observed_end - lane_observed_start).total_seconds()))
-                observed_virtual_start, observed_virtual_end = lane_observed_start, lane_observed_end
+                observed_start, observed_end = lane_observed_start, lane_observed_end
                 observed_basis = "observed continuous lane segments"
             # Compatibility only: older CONTROL evidence may predate the
             # transfer-lane table entirely.  Once a lane segment exists the
             # branch above is mandatory, because summing object work is not a
             # measurement of a saturated, autoscaled shared lane.
-            elif simulated and wave.source.simulation_fidelity == "CONTROL" and elapsed_sum:
+            elif False and elapsed_sum:
                 duration_seconds = max(
                     1,
                     math.ceil(max(float(elapsed_max or 0), float(elapsed_sum) / RAIJU_MIN_WORKERS)),
                 )
-                observed_basis = "legacy simulated logical transfer duration"
-            elif observed_virtual_start and observed_virtual_end and observed_virtual_end >= observed_virtual_start:
-                duration_seconds = max(1, int((observed_virtual_end - observed_virtual_start).total_seconds()))
-                observed_basis = "observed simulated virtual milestones"
+                observed_basis = "legacy logical transfer duration"
+            elif observed_start and observed_end and observed_end >= observed_start:
+                duration_seconds = max(1, int((observed_end - observed_start).total_seconds()))
+                observed_basis = "observed transfer milestones"
             elif actual_start and actual_end and actual_end >= actual_start:
                 duration_seconds = max(1, int((actual_end - actual_start).total_seconds()))
                 observed_basis = "observed transfer timestamps"
-            elif not observed_virtual_start and not actual_start:
+            elif not observed_start and not actual_start:
                 # A restore submission is immutable, but its future delivery
                 # estimate is not.  Reforecast it from the aggregate lane
                 # contract so a former per-object/worker model cannot keep
@@ -12387,7 +12108,7 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                 duration_seconds = max(1, math.ceil(predicted_continuous_lane_seconds(
                     wave_bytes, 0, settings, lane_profile,
                 )))
-                if (simulated or materially_changed_duration(
+                if (use_observed_timeline or materially_changed_duration(
                         wave.predicted_transfer_seconds, duration_seconds)):
                     prior_duration = int(wave.predicted_transfer_seconds or 0)
                     wave.predicted_transfer_seconds = duration_seconds
@@ -12416,25 +12137,25 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             # A planned restore has not been sent to AWS.  Its transfer slot
             # therefore cannot be earlier than a new request made now plus
             # the public tier window and the configured safety reserve.  This
-            # is deliberately independent of Fujin: the scheduler must be
+            # is deliberately independent of local test backend: the scheduler must be
             # correct against real S3 even when local acceptance is faster.
             restore_lead = restore_submission_lead_seconds(wave, run, settings)
             is_unsubmitted_restore = not has_batch_task and wave.status == "RESTORE_SCHEDULED"
             restore_requested_at = (
-                wave.restore_requested_virtual_at
-                if simulated else real_restore_requested_at.get(wave.id)
+                wave.restore_observed_at
+                if use_observed_timeline else real_restore_requested_at.get(wave.id)
             )
-            # Once a simulated wave begins, its virtual timestamp is the
+            # Once a wave begins, its effective timestamp is the
             # authoritative lane position.  For a submitted restore that has
             # not produced an object yet, the only defensible transfer floor
             # is its real request plus the tier service window.  A stale plan
             # must never push that work out by days.
-            if observed_virtual_start:
-                lane_start = observed_virtual_start
-            elif wave.first_restore_available_virtual_at:
-                lane_start = wave.first_restore_available_virtual_at
+            if observed_start:
+                lane_start = observed_start
+            elif wave.first_restore_available_at:
+                lane_start = wave.first_restore_available_at
             elif restore_requested_at:
-                # The public tier reference is deliberately stable.  Fujin
+                # The public tier reference is deliberately stable.  local test backend
                 # timing remains observed evidence, never a completion promise
                 # used to place a later restore on the calendar.
                 restore_complete_seconds = restore_service_window_seconds(wave.restore_tier)
@@ -12465,9 +12186,9 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
             constrained_by_prior_wave = bool(cursor and cursor > lane_start)
             decision_basis = cursor_basis if constrained_by_prior_wave else observed_basis
             start = max(lane_start, cursor) if cursor else lane_start
-            if observed_virtual_end:
-                cursor = max(start, observed_virtual_end)
-            elif observed_basis == "legacy simulated logical transfer duration" and actual_end:
+            if observed_end:
+                cursor = max(start, observed_end)
+            elif observed_basis == "legacy logical transfer duration" and actual_end:
                 cursor = start + timedelta(seconds=duration_seconds)
             elif actual_end:
                 cursor = max(start, actual_end)
@@ -12491,7 +12212,7 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                 # eligibility instants are due, retaining the old value makes
                 # routine governance cycles idempotent. The actual submission
                 # remains independently recorded by restore_requested_at.
-                restore_target = simulated_restore_slot_floor or scheduler_now
+                restore_target = restore_slot_floor or scheduler_now
                 prior_eligibility = wave.planned_restore_at
                 if (prior_eligibility is not None and prior_eligibility.tzinfo is None
                         and scheduler_now.tzinfo is not None):
@@ -12551,7 +12272,7 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                 abs((utc_timestamp(wave.planned_transfer_start_at) - utc_timestamp(
                     persisted_transfer_start
                 )).total_seconds()) >= 60
-                if simulated and wave.planned_transfer_start_at else
+                if use_observed_timeline and wave.planned_transfer_start_at else
                 materially_changed_schedule(
                     wave.planned_transfer_start_at,
                     persisted_transfer_start,
@@ -12565,7 +12286,7 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
                     abs((utc_timestamp(wave.planned_restore_at) - utc_timestamp(
                         new_restore_at
                     )).total_seconds()) >= 60
-                    if simulated and wave.planned_restore_at else
+                    if use_observed_timeline and wave.planned_restore_at else
                     materially_changed_schedule(
                         wave.planned_restore_at,
                         new_restore_at,
@@ -12943,24 +12664,10 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
         func.coalesce(func.sum(ObjectRecord.transfer_elapsed_seconds), 0)
     ).where(ObjectRecord.wave_id == wave_id)) or 0)
     transfer_time_basis = "WALL_CLOCK"
-    # Fujin finishes logical payload operations quickly in wall-clock time.
+    # local test backend finishes logical payload operations quickly in wall-clock time.
     # The durable wave milestones and lane segments are the only truthful
-    # calendar for a simulated migration.  Never compare physical object
-    # timestamps with restore timestamps from the virtual clock.
-    if runtime_context.is_simulation and wave.transfer_started_virtual_at:
-        transfer_time_basis = "VIRTUAL_LANE"
-        transfer_started_at = wave.transfer_started_virtual_at
-        transfer_completed_at = wave.transfer_completed_virtual_at
-        if transfer_completed_at is None and wave.source.simulation_execution_id:
-            try:
-                transfer_completed_at = cloud_backend.clock(
-                    wave.source.simulation_execution_id
-                ).effective_now
-            except (OSError, TimeoutError, ValueError):
-                latest_segment_end = session.scalar(select(func.max(TransferLaneSegment.completed_at)).where(
-                    TransferLaneSegment.wave_id == wave_id
-                ))
-                transfer_completed_at = latest_segment_end or transfer_started_at
+    # calendar for a migration.  Never compare physical object
+    # timestamps with restore timestamps from the effective clock.
     transfer_elapsed_seconds = max(0, int(((transfer_completed_at or now) - transfer_started_at).total_seconds())) if transfer_started_at else None
     failed_tasks = sum(1 for task in tasks if task.state == TaskState.FAILED)
     timing = restore_timing(session, wave_id)
@@ -13171,13 +12878,7 @@ def source_deep_audit_candidates(session: Session, source: Source) -> list[Wave]
 
 
 def require_deep_audit_content_access(source: Source) -> None:
-    """A CONTROL simulation has no replayable bytes for a SHA-256 reread."""
-    if runtime_context.is_simulation and source.simulation_fidelity != "DATA":
-        raise HTTPException(status_code=409, detail=(
-            "Deep SHA-256 audit requires a DATA simulation; CONTROL validates logical state only"
-        ))
-
-
+    """A CONTROL test execution has no replayable bytes for a SHA-256 reread."""
 @app.get("/api/sources/{source_id}/deep-audit-preview")
 def source_deep_audit_preview(source_id: int, session: Session = Depends(get_session)) -> dict:
     source = source_or_404(session, source_id)

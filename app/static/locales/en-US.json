@@ -216,7 +216,7 @@
   "Fonte / wave": "Source / wave",
   "Fontes": "Sources",
   "Fontes e inventário": "Sources and inventory",
-  "Fujin — simulação": "Fujin — simulation",
+  "separado — execução antiga": "separado — execução antiga",
   "Ganho marginal mínimo da lane": "Lane minimum marginal gain",
   "Gates obrigatórios": "Required gates",
   "Habilitar": "Enable",
@@ -488,7 +488,7 @@
   "Versão": "Version",
   "Visão final da source. “Realizado” mede tempo de calendário: operações paralelas são unificadas, não somadas.": "Final source view. “Actual” measures elapsed calendar time: parallel operations are unified, not added.",
   "Worker AWS/OCI real": "Real AWS/OCI worker",
-  "Worker de": "Simulation",
+  "Worker de": "Execução antiga",
   "Workers de": "Workers",
   "Workers de transferência": "Transfer workers",
   "aceitos": "accepted",
@@ -568,7 +568,7 @@
   "retenção:": "retention:",
   "sem evidência.": "without evidence.",
   "sem objetos": "no objects",
-  "simulação": "worker",
+  "execução antiga": "worker",
   "solicitados": "requested",
   "submissão AWS:": "AWS submission:",
   "tamanho divergente": "size mismatch",
@@ -849,7 +849,7 @@
   ,"Tipo": "Level"
   ,"Todos os tipos": "All levels"
   ,"Versão": "Version"
-  ,"FUJIN simula AWS S3, OCI Object Storage, rede e tempo por contrato versionado, permitindo que os workers reais do RAIJIN sejam validados sem chamadas aos provedores.": "FUJIN simulates AWS S3, OCI Object Storage, networking, and time through a versioned contract, allowing real RAIJIN workers to be validated without calls to providers."
+  ,"SEPARADO simula AWS S3, OCI Object Storage, rede e tempo por contrato versionado, permitindo que os workers reais do RAIJIN sejam validados sem chamadas aos provedores.": "SEPARADO simulates AWS S3, OCI Object Storage, networking, and time through a versioned contract, allowing real RAIJIN workers to be validated without calls to providers."
   ,"Inspirado em Fūjin, a divindade japonesa do vento, ele cria cenários determinísticos, preserva evidências operacionais e reproduz falhas para validar o comportamento da migração com segurança.": "Inspired by Fūjin, the Japanese deity of wind, it creates deterministic scenarios, preserves operational evidence, and reproduces failures to validate migration behavior safely."
   ,"Presença anônima na console": "Anonymous console presence"
   ,"A contagem mostra consoles que enviaram um heartbeat nos últimos dois minutos. Cada navegador usa somente um identificador aleatório local; várias abas do mesmo navegador compartilham a mesma presença.": "The count shows consoles that sent a heartbeat in the last two minutes. Each browser uses only a local random identifier; multiple tabs in the same browser share the same presence."
@@ -867,6 +867,6 @@
   ,"Integridade comprovada": "Verified integrity"
   ,"A cópia registra evidências SHA-256; auditoria profunda fica disponível sob demanda.": "The copy records SHA-256 evidence; deep auditing is available on demand."
   ,"Emblema detalhado do RAIJIN": "Detailed RAIJIN emblem"
-  ,"Emblema detalhado do FUJIN": "Detailed FUJIN emblem"
-  ,"RAIJIN e FUJIN integrados em uma simulação cloud": "RAIJIN and FUJIN integrated in a cloud simulation"
+  ,"Emblema detalhado do SEPARADO": "Detailed SEPARADO emblem"
+  ,"RAIJIN e SEPARADO integrados em uma execução antiga cloud": "RAIJIN and SEPARADO integrated in a cloud execução antiga"
 }

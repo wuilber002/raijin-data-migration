@@ -13,13 +13,6 @@ mkdir -p "$backup_root"
 podman exec raijin-postgres pg_dump -U migration -d migration --format=custom \
   >"$backup_root/migration-$timestamp.dump"
 
-if podman exec raijin-postgres psql -U migration -d migration -tAc \
-  "SELECT 1 FROM pg_database WHERE datname = 'migration_simulation'" | grep -q 1; then
-  podman exec raijin-postgres pg_dump -U migration -d migration_simulation --format=custom \
-    >"$backup_root/migration-simulation-$timestamp.dump"
-fi
-
-# The 35-day default covers the simulator's 30-day lifecycle quarantine with
-# operational margin. Boot-volume backup remains the recovery layer for the
-# complete machine and its PostgreSQL WAL directory.
+# Boot-volume backup remains the recovery layer for the complete machine and
+# its PostgreSQL WAL directory.
 find "$backup_root" -type f -name 'migration-*.dump' -mtime +"$retention_days" -delete

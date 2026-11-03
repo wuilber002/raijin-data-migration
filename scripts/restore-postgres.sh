@@ -16,7 +16,6 @@ raijin_load_web_bind
 usage() {
   cat <<'EOF'
 Usage: raijin-restore-postgres --backup /var/lib/raijin-data-migration/backups/migration-<timestamp>.dump --confirm-restore
-       raijin-restore-postgres --backup /var/lib/raijin-data-migration/backups/migration-simulation-<timestamp>.dump --confirm-restore
 
 Restores one logical PostgreSQL backup into the Raijin control plane. The
 current database is backed up immediately before replacement. This operation
@@ -49,14 +48,7 @@ if [[ "$(podman inspect --format '{{.State.Running}}' raijin-postgres 2>/dev/nul
   exit 1
 fi
 
-target_database=migration
-target_owner=migration
 writers=(raijin-app raijin-governance-worker raijin-raikou-shin raijin-raikou-sei raijin-raikou-ko raijin-raikou-kai raijin-transfer-worker)
-if [[ "$(basename "$backup_file_real")" == migration-simulation-* ]]; then
-  target_database=migration_simulation
-  target_owner=migration_simulation
-  writers=(raijin-fujin-local raijin-fujin-local-materializer)
-fi
 
 # Quiesce only processes that can write to the selected database. Stopping the
 # platform unit would invoke ExecStop, remove PostgreSQL itself and make the
@@ -88,9 +80,9 @@ trap finish_restore EXIT
 # Recreate only the selected logical database. Restoring with --clean into an
 # evolved schema can fail when newly added foreign keys depend on constraints
 # that did not exist in the older dump.
-podman exec raijin-postgres dropdb -U migration --force "$target_database"
-podman exec raijin-postgres createdb -U migration -O "$target_owner" "$target_database"
-podman exec -i raijin-postgres pg_restore -U migration -d "$target_database" \
+podman exec raijin-postgres dropdb -U migration --force migration
+podman exec raijin-postgres createdb -U migration -O migration migration
+podman exec -i raijin-postgres pg_restore -U migration -d migration \
   --no-owner --exit-on-error <"$backup_file_real"
 
 restore_succeeded=true

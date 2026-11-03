@@ -344,7 +344,7 @@ apply_database_migration() {
   fi
   write_result DEPLOYING "Applying approved expand-only database migrations." "$(revision HEAD)" "$revision" "" 60
   podman run --rm --network raijin-data-migration \
-    -e RAIJIN_OPERATION_MODE=REAL \
+ \
     -e DATABASE_URL=postgresql+psycopg://migration@postgres:5432/migration \
     -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
     -v /etc/raijin-data-migration/secrets/postgres_password:/run/secrets/postgres_password:ro,z \

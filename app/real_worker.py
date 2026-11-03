@@ -37,23 +37,6 @@ from botocore.exceptions import ClientError
 from botocore.session import get_session as get_botocore_session
 from sqlalchemy import and_, case, delete, func, or_, select, update
 
-from app.backend_contracts import (
-    DescribeRestoreBatchRequest,
-    ExecutionContext,
-    HeadObjectRequest,
-    RestoreAvailabilityRequest,
-    ListObjectsRequest,
-    LogicalTransferRequest,
-    MultipartCommitRequest,
-    MultipartCreateRequest,
-    MultipartPartEvidence,
-    MultipartPartRequest,
-    ObjectDescriptor,
-    ObjectIdentity,
-    PutObjectRequest,
-    ReadRangeRequest,
-    SubmitRestoreBatchRequest,
-)
 from app.duration_format import format_duration
 from app.main import (
     AwsConnection, DiscoveryJob, Event, MigrationProject, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, RuntimeLaneControlState, RuntimeLaneMeasurement, TransferQueueItem, TransferQueueState, merge_discovery_rows, source_key_in_scope, source_prefix_values,
@@ -110,7 +93,6 @@ ARCHIVE_CLASSES = {"GLACIER", "DEEP_ARCHIVE", "INTELLIGENT_TIERING_ARCHIVE_ACCES
 # A lane hold protects virtual restore-retention time while Raiju owns durable
 # work. Rechecking the same restore every second does not make that work
 # faster; it only churns the governance queue and event history.
-SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS = 30
 # A Python thread blocked inside an SDK call cannot be cancelled safely. Do
 # not let its process heartbeat hide the failure forever: after this interval
 # without a durable object checkpoint the Raiju process exits and Podman
@@ -271,7 +253,7 @@ class LaneConcurrencyController:
             1.0, float(state.decision_ceiling_mbps or self.link_mbps)
         )
         # SQLite intentionally returns ``DateTime(timezone=True)`` columns
-        # without tzinfo.  The local Fujin acceptance path therefore needs
+        # without tzinfo.  The local provider path therefore needs
         # the same UTC normalization as PostgreSQL-backed production paths.
         self._experiment_started_at = (
             _utc_timestamp(state.experiment_started_at)
@@ -720,7 +702,6 @@ def event(session, kind: str, message: str, source_id: int | None = None, wave_i
 
 def connection_values(connection: AwsConnection) -> dict[str, str]:
     """Read the current connection payload; credentials never enter PostgreSQL."""
-    runtime_context.require_real_cloud("read OCI Secret for AWS connection")
     signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
     bundle = oci.secrets.SecretsClient({}, signer=signer).get_secret_bundle(connection.secret_ocid).data
     values = parse_aws_connection_payload(base64.b64decode(bundle.secret_bundle_content.content).decode("utf-8").strip())
@@ -775,7 +756,7 @@ def aws_clients(settings, region: str, source: Source):
 
         Continuous lanes routinely outlive the one-hour STS session. Static
         credentials let an otherwise healthy lane collapse into repeated 403
-        responses after that hour, both against AWS and Fujin LOCAL. Botocore
+        responses after that hour, both against AWS endpoints. Botocore
         serializes refreshes and renews these credentials before expiration
         while every S3 client keeps the same thread-safe session provider.
         """
@@ -986,7 +967,7 @@ def ensure_transfer_task(session, wave: Wave, settings=None) -> bool:
     if live_lane is not None:
         return False
     # Leases and retry delays are wall-clock concerns.  Deadline scoring uses
-    # the source clock, which may be virtual for a Fujin execution.
+    # the source clock, used by a source execution.
     refresh_transfer_queue_priorities(session, source.id, now=_continuous_source_now(source))
     now = utcnow()
     item = session.scalar(select(TransferQueueItem).join(Wave).join(Source).where(
@@ -1198,236 +1179,7 @@ def discover(session, source: Source, settings, job: DiscoveryJob | None = None)
     source.status, source.discovery_error = "DISCOVERING", None
     source.discovery_started_at = utcnow()
     session.commit()
-    if runtime_context.is_simulation:
-        SimulatorAdminClient(runtime_context.simulator_base_url).set_execution_state(
-            source.simulation_execution_id, "RUNNING"
-        )
     remote_discover(session, source, settings, job)
-
-
-def simulation_execution_context(source: Source) -> ExecutionContext:
-    required = {
-        "execution": source.simulation_execution_id,
-        "correlation": source.simulation_correlation_id,
-        "tenant": source.simulation_tenant_id,
-        "project": source.simulation_project_id,
-    }
-    missing = [name for name, value in required.items() if not value]
-    if source.backend_kind != "SIMULATED" or missing:
-        raise RuntimeError(
-            "Simulated source has incomplete execution context: " + ", ".join(missing)
-        )
-    return ExecutionContext(
-        execution_id=UUID(required["execution"]),
-        correlation_id=UUID(required["correlation"]),
-        tenant_id=UUID(required["tenant"]),
-        project_id=UUID(required["project"]),
-    )
-
-
-def simulation_virtual_now(source: Source) -> datetime:
-    """Read the source-owned virtual clock as a durable phase timestamp."""
-    payload = SimulatorAdminClient(runtime_context.simulator_base_url).clock_status(
-        source.simulation_execution_id
-    )
-    value = datetime.fromisoformat(str(payload["virtual_now"]).replace("Z", "+00:00"))
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-
-
-@contextmanager
-def simulation_phase_clock_hold(source: Source, phase: str):
-    """Prevent accelerated virtual time from consuming retention during work.
-
-    PostgreSQL task leases and retry delays remain on wall-clock time.  Only
-    the virtual AWS/OCI behavior is paused, so a long local streaming pass or
-    many HeadObject calls cannot artificially expire a restored object.
-    """
-    if not runtime_context.is_simulation:
-        yield
-        return
-    admin = SimulatorAdminClient(runtime_context.simulator_base_url)
-    admin.control_clock(source.simulation_execution_id, "HOLD")
-    try:
-        yield
-    finally:
-        admin.control_clock(source.simulation_execution_id, "RELEASE")
-
-
-def retain_simulation_clock_for_transfer(session, wave: Wave) -> None:
-    """Keep virtual time frozen across the queue hand-off to transfer.
-
-    The availability poll itself holds the accelerated clock.  Taking one
-    additional durable hold before that poll releases closes the otherwise
-    unavoidable gap until the continuous Raiju dispatcher is claimed.
-    """
-    if not runtime_context.is_simulation or wave.simulation_transfer_clock_held:
-        return
-    SimulatorAdminClient(runtime_context.simulator_base_url).control_clock(
-        wave.source.simulation_execution_id, "HOLD"
-    )
-    wave.simulation_transfer_clock_held = True
-    session.flush()
-
-
-def release_simulation_clock_after_transfer(session, wave: Wave) -> None:
-    if not runtime_context.is_simulation or not wave.simulation_transfer_clock_held:
-        return
-    try:
-        SimulatorAdminClient(runtime_context.simulator_base_url).control_clock(
-            wave.source.simulation_execution_id, "RELEASE"
-        )
-    finally:
-        wave.simulation_transfer_clock_held = False
-        session.flush()
-
-
-def advance_simulation_clock(session, source: Source, seconds: float, reason: str,
-                             wave: Wave | None = None) -> float:
-    """Advance isolated cloud time only through a durable simulator decision.
-
-    Simulation must never consume a restore-retention window merely because a
-    real worker is processing a large manifest or waiting for its next lease.
-    This helper is the sole path used by worker phases to move virtual time.
-    """
-    if not runtime_context.is_simulation or seconds <= 0:
-        return 0
-    bounded = max(0.0, float(seconds))
-    SimulatorAdminClient(runtime_context.simulator_base_url).control_clock(
-        source.simulation_execution_id, "ADVANCE", bounded
-    )
-    event(
-        session,
-        "SIMULATION_CLOCK_ADVANCED",
-        f"Virtual clock advanced {format_duration(bounded)} for {reason}",
-        source_id=source.id,
-        wave_id=wave.id if wave else None,
-    )
-    return bounded
-
-
-def simulation_source_lane_has_committed_work(session, source: Source) -> bool:
-    """Whether simulation time must wait for durable lane work on a source.
-
-    A dispatcher is short-lived: it may finish one batch while leases, a
-    retry, or the next READY batch still represent lane work. Looking only at
-    its ``RUNNING`` instant let restore polling fast-forward Fujin between
-    batches and age restored data without a corresponding lane interval.
-    """
-    if not runtime_context.is_simulation or source.backend_kind != "SIMULATED":
-        return False
-    return session.scalar(select(TransferQueueItem.id).where(
-        TransferQueueItem.source_id == source.id,
-        TransferQueueItem.state.in_([
-            TransferQueueState.AVAILABLE, TransferQueueState.READY,
-            TransferQueueState.LEASED, TransferQueueState.MULTIPART_RESUME,
-            TransferQueueState.RETRY_WAIT,
-        ]),
-    ).limit(1)) is not None
-
-
-def simulation_transfer_task_active(session, wave: Wave) -> bool:
-    """Whether a Raiju owns, or has durably committed, this source's lane."""
-    dispatcher_running = session.scalar(select(Task.id).join(Wave).where(
-        Wave.source_id == wave.source_id,
-        Task.kind == "TRANSFER_CONTINUOUS",
-        # A READY dispatcher has not started I/O.  Treating it as active
-        # freezes the virtual clock before any transfer takes place and can
-        # stall the restore scheduler indefinitely.
-        Task.state == TaskState.RUNNING,
-    ).limit(1)) is not None
-    return dispatcher_running or simulation_source_lane_has_committed_work(session, wave.source)
-
-
-def release_simulation_source_lane_holds_if_idle(session, source: Source) -> None:
-    """Release hand-off holds only after the source lane is durably empty."""
-    if not runtime_context.is_simulation or simulation_source_lane_has_committed_work(session, source):
-        return
-    for held_wave in session.scalars(select(Wave).where(
-        Wave.source_id == source.id,
-        Wave.simulation_transfer_clock_held.is_(True),
-    )):
-        release_simulation_clock_after_transfer(session, held_wave)
-
-
-def simulation_restore_poll_clock_leader(session, task: Task, wave: Wave) -> bool:
-    """Whether this poll owns the next advance of its source virtual clock.
-
-    Several restore waves share one FUJIN clock.  They may all observe their
-    own availability at that clock instant, but only one due poll can advance
-    it; otherwise two concurrent waves incorrectly consume two polling
-    intervals of the *same* source timeline.  This helper is intentionally
-    simulation-only.  REAL uses no virtual clock and keeps independent AWS
-    availability polling for every wave.
-    """
-    if not runtime_context.is_simulation or wave.source.backend_kind != "SIMULATED":
-        return False
-    leader_id = session.scalar(
-        select(Task.id)
-        .join(Wave)
-        .join(Source)
-        .where(
-            Task.kind == "POLL_RESTORE",
-            Wave.source_id == wave.source_id,
-            Task.state.in_([TaskState.READY, TaskState.RUNNING]),
-            Wave.status != "PAUSED",
-            Source.archived_at.is_(None),
-        )
-        # Do not order by ``available_at``.  A leader queues its next poll at
-        # +1s after advancing the clock while a peer still carries its older
-        # original due time; ordering by due time would let the peer become a
-        # second leader in the same virtual cycle.
-        .order_by(Task.id)
-        .limit(1)
-    )
-    return leader_id == task.id
-
-
-def synchronize_simulation_source_clocks(session) -> int:
-    """Keep every source-owned virtual clock stopped between explicit ticks.
-
-    Clock acceleration is a *planning/display* property, not permission for
-    wall-clock worker time to burn through S3 restore retention.  Restore
-    polling and the dynamic scheduler advance their own clock in durable,
-    bounded increments via :func:`advance_simulation_clock`.
-    """
-    if not runtime_context.is_simulation:
-        return 0
-    admin = SimulatorAdminClient(runtime_context.simulator_base_url)
-    changed = 0
-    sources = list(session.scalars(select(Source).where(Source.backend_kind == "SIMULATED")))
-    for source in sources:
-        if not source.simulation_execution_id:
-            continue
-        try:
-            clock = admin.clock_status(source.simulation_execution_id)
-            if not clock.get("paused"):
-                admin.control_clock(source.simulation_execution_id, "PAUSE")
-                changed += 1
-        except Exception:
-            # A simulator status request is observability/control only.  The
-            # durable task must retain its normal retry/error behavior.
-            continue
-    return changed
-
-
-def simulation_restore_expiry_confirmed(session, wave: Wave, source: Source) -> bool:
-    """Confirm expiry from durable evidence before asking for a paid restore.
-
-    A simulated 409 by itself is not enough: a backend restart or clock-state
-    mismatch must be diagnosed as a simulator defect, never presented to an
-    operator as a new billable restore.  The retained expiry timestamps are
-    observed from the same per-object ``HeadObject`` evidence used by the
-    regular migration path.
-    """
-    if not runtime_context.is_simulation:
-        return True
-    now = simulation_virtual_now(source)
-    expiries = list(session.scalars(select(ObjectRecord.restore_expires_at).where(
-        ObjectRecord.wave_id == wave.id,
-        ObjectRecord.state.in_([ObjectState.RESTORED, ObjectState.TRANSFERRING]),
-        ObjectRecord.restore_expires_at.is_not(None),
-    )))
-    return bool(expiries) and now >= min(expiries)
 
 
 def restore_reapproval_is_required(wave: Wave) -> bool:
@@ -1573,14 +1325,7 @@ def import_s3_inventory_manifest(session, source: Source, settings, job: Discove
 
 
 def remote_discover(session, source: Source, settings, job: DiscoveryJob | None = None) -> None:
-    simulated_port = (
-        SimulatedSourcePort(runtime_context.simulator_base_url)
-        if runtime_context.is_simulation and runtime_context.simulator_base_url
-        else None
-    )
-    s3 = None
-    if simulated_port is None:
-        s3, _, _ = aws_clients(settings, source.aws_region, source)
+    s3, _, _ = aws_clients(settings, source.aws_region, source)
     inserted = 0
     continuation_token = source.discovery_continuation_token
     prefixes = source_prefix_values(source)
@@ -1590,11 +1335,7 @@ def remote_discover(session, source: Source, settings, job: DiscoveryJob | None 
     pending_token = continuation_token
     next_request_at = 0.0
     connection = source.aws_connection
-    request_interval = (
-        0.0
-        if simulated_port
-        else 1.0 / max(1, int(getattr(connection, "discovery_requests_per_second", 10) or 10))
-    )
+    request_interval = 1.0 / max(1, int(getattr(connection, "discovery_requests_per_second", 10) or 10))
 
     def checkpoint_batch() -> None:
         """Atomically persist a bounded discovery batch and its S3 cursor."""
@@ -1633,31 +1374,7 @@ def remote_discover(session, source: Source, settings, job: DiscoveryJob | None 
             if wait > 0:
                 time.sleep(wait)
             try:
-                if simulated_port:
-                    simulated_page = simulated_port.list_objects(
-                        ListObjectsRequest(
-                            context=simulation_execution_context(source),
-                            bucket=source.s3_bucket,
-                            prefix=prefixes[prefix_index],
-                            continuation_token=continuation_token,
-                            max_keys=DISCOVERY_MAX_KEYS,
-                        )
-                    )
-                    page = {
-                        "Contents": [
-                            {
-                                "Key": item.key,
-                                "Size": item.size_bytes,
-                                "ETag": item.etag,
-                                "StorageClass": item.storage_class,
-                                "LastModified": item.last_modified,
-                            }
-                            for item in simulated_page.objects
-                        ],
-                        "NextContinuationToken": simulated_page.next_continuation_token,
-                    }
-                else:
-                    page = s3.list_objects_v2(**request)
+                page = s3.list_objects_v2(**request)
                 next_request_at = time.monotonic() + request_interval
                 break
             except ClientError as error:
@@ -1958,9 +1675,6 @@ def submit_restore(session, task: Task, settings) -> None:
         ensure_transfer_task(session, wave, settings)
         succeed(session, task)
         return
-    if runtime_context.is_simulation:
-        submit_restore_simulated(session, task, wave, source, archives)
-        return
     operation = aws_operation_config(source, settings)
     if not operation["control_bucket"] or not operation["batch_role_arn"]:
         raise RuntimeError("AWS control bucket and Batch Operations role ARN must be configured")
@@ -2013,388 +1727,10 @@ def submit_restore(session, task: Task, settings) -> None:
     succeed(session, task, "POLL_RESTORE")
 
 
-def simulated_manifest_line(obj: ObjectRecord) -> bytes:
-    return (
-        json.dumps(
-            {"key": obj.object_key, "version_id": obj.version_id},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        + b"\n"
-    )
-
-
-def submit_restore_simulated(
-    session, task: Task, wave: Wave, source: Source, archives: list[ObjectRecord]
-) -> None:
-    context = simulation_execution_context(source)
-    port = SimulatedSourcePort(runtime_context.simulator_base_url)
-    attempt = RestoreAttempt(
-        wave_id=wave.id,
-        aws_region=source.aws_region,
-        expected_objects=len(archives),
-    )
-    session.add(attempt)
-    session.flush()
-    manifest_sha = hashlib.sha256()
-    for obj in archives:
-        manifest_sha.update(simulated_manifest_line(obj))
-    # Idempotency belongs to a durable submission task, not to the wave
-    # forever.  Retrying this task remains safe, while a later explicit
-    # reprocess has a distinct task id and may submit its new manifest.
-    idempotency_key = uuid5(
-        NAMESPACE_URL, f"odmt:simulation:restore:wave:{wave.id}:task:{task.id}"
-    )
-    response = port.submit_restore_batch(
-        SubmitRestoreBatchRequest(
-            context=context,
-            bucket=source.s3_bucket,
-            tier=wave.restore_tier,
-            retention_days=wave.restore_days,
-            object_count=len(archives),
-            manifest_sha256=manifest_sha.hexdigest(),
-            idempotency_key=idempotency_key,
-        ),
-        (simulated_manifest_line(obj) for obj in archives),
-    )
-    manifest_key = f"simulated://restore-manifests/wave-{wave.id}/attempt-{attempt.id}"
-    attempt.job_id = response.job_id
-    attempt.job_status = response.status
-    attempt.manifest_key = manifest_key
-    attempt.manifest_etag = manifest_sha.hexdigest()
-    wave.batch_job_id = response.job_id
-    wave.batch_job_status = response.status
-    wave.manifest_key = manifest_key
-    wave.manifest_etag = manifest_sha.hexdigest()
-    wave.status = "RESTORE_REQUESTED"
-    wave.restore_requested_virtual_at = wave.restore_requested_virtual_at or simulation_virtual_now(source)
-    requested_at = utcnow()
-    for obj in archives:
-        obj.state = ObjectState.RESTORE_REQUESTED
-        obj.restore_requested_at = requested_at
-        obj.restore_attempt_id = attempt.id
-        session.add(RestoreObjectResult(attempt_id=attempt.id, object_id=obj.id))
-    event(
-        session,
-        "SIMULATED_BATCH_RESTORE_SUBMITTED",
-        f"SIMULATED Batch job {response.job_id} accepted manifest with {len(archives)} object(s)",
-        source_id=source.id,
-        wave_id=wave.id,
-    )
-    succeed(session, task, "POLL_RESTORE")
-
-
-def poll_restore_simulated(
-    session, task: Task, settings, wave: Wave, source: Source
-) -> None:
-    if restore_reapproval_is_required(wave):
-        finish_superseded_restore_poll(session, task, wave)
-        return
-    context = simulation_execution_context(source)
-    port = SimulatedSourcePort(runtime_context.simulator_base_url)
-    attempt = restore_attempt_for_job(session, wave, source)
-    objects = list(
-        session.scalars(select(ObjectRecord).where(ObjectRecord.wave_id == wave.id))
-    )
-    if attempt.completed_at is None:
-        by_key = {(obj.object_key, obj.version_id or ""): obj for obj in objects}
-        token = None
-        status = "PROCESSING"
-        accepted = failed = 0
-        while True:
-            page = port.describe_restore_batch(
-                DescribeRestoreBatchRequest(
-                    context=context,
-                    job_id=wave.batch_job_id,
-                    continuation_token=token,
-                    max_results=1000,
-                )
-            )
-            status = page.status
-            accepted, failed = page.accepted_count, page.failed_count
-            for result in page.results:
-                obj = by_key.get((result.key, result.version_id or ""))
-                if obj is None:
-                    continue
-                outcome = session.scalar(
-                    select(RestoreObjectResult).where(
-                        RestoreObjectResult.attempt_id == attempt.id,
-                        RestoreObjectResult.object_id == obj.id,
-                    )
-                )
-                if outcome is None:
-                    outcome = RestoreObjectResult(attempt_id=attempt.id, object_id=obj.id)
-                    session.add(outcome)
-                outcome.task_status = "SUCCEEDED" if result.accepted else "FAILED"
-                outcome.http_status = 200 if result.accepted else 409
-                outcome.error_code = result.error_code
-                outcome.error_message = result.error_message
-                outcome.report_key = f"simulated://restore-jobs/{page.job_id}/results"
-            token = page.next_continuation_token
-            if not token:
-                break
-        attempt.batch_describe_requests = int(attempt.batch_describe_requests or 0) + 1
-        attempt.job_status = wave.batch_job_status = status
-        attempt.succeeded_objects = accepted
-        attempt.failed_objects = failed
-        if status != "COMPLETE":
-            if status == "FAILED":
-                fail_restore_attempt(
-                    session, task, wave, attempt, f"SIMULATED Batch job {wave.batch_job_id} failed"
-                )
-                return
-            wave.status = "RESTORING"
-            session.commit()
-            retry(session, task, f"SIMULATED Batch job status is {status}", 60)
-            return
-        if failed:
-            attempt.report_manifest_key = f"simulated://restore-jobs/{wave.batch_job_id}/results"
-            fail_restore_attempt(
-                session,
-                task,
-                wave,
-                attempt,
-                f"SIMULATED Batch restore rejected {failed} of {len(objects)} object(s)",
-            )
-            return
-        attempt.report_manifest_key = f"simulated://restore-jobs/{wave.batch_job_id}/results"
-        attempt.completed_at = utcnow()
-        attempt.failure_summary = None
-        for obj in objects:
-            if obj.storage_class in ARCHIVE_CLASSES and obj.state in {
-                ObjectState.RESTORE_REQUESTED,
-                ObjectState.RESTORING,
-            }:
-                obj.state = ObjectState.RESTORE_REQUEST_ACCEPTED
-        wave.status = "RESTORE_REQUEST_ACCEPTED"
-        event(
-            session,
-            "SIMULATED_RESTORE_REQUEST_ACCEPTED",
-            f"SIMULATED Batch job {wave.batch_job_id}: all {len(objects)} object(s) have individual acceptance evidence",
-            source_id=source.id,
-            wave_id=wave.id,
-        )
-        session.commit()
-
-    pending_archives = [
-        obj
-        for obj in objects
-        if obj.storage_class in ARCHIVE_CLASSES
-        and obj.state
-        in {
-            ObjectState.RESTORE_REQUESTED,
-            ObjectState.RESTORE_REQUEST_ACCEPTED,
-            ObjectState.RESTORING,
-        }
-    ]
-    ready_expiries: dict[int, datetime | None] = {}
-    recommended_real_delays: list[float] = []
-    started = time.monotonic()
-    # FUJIN exposes this bounded, wave-scoped bulk probe only in simulation.
-    # It evaluates the exact same per-object restore/expiry predicates as the
-    # old HeadObject loop, but avoids one HTTP request and DB transaction per
-    # object.  REAL mode intentionally remains below with its AWS-safe
-    # per-object HeadObject polling, rate limiter and retry handling.
-    object_by_identity = {(obj.object_key, obj.version_id): obj for obj in pending_archives}
-    for start in range(0, len(pending_archives), RESTORE_POLL_HEAD_BATCH_SIZE):
-        slice_objects = pending_archives[start:start + RESTORE_POLL_HEAD_BATCH_SIZE]
-        result = port.restore_availability(
-            RestoreAvailabilityRequest(
-                context=context,
-                bucket=source.s3_bucket,
-                objects=[ObjectIdentity(
-                    bucket=source.s3_bucket,
-                    key=obj.object_key,
-                    version_id=obj.version_id,
-                ) for obj in slice_objects],
-            )
-        )
-        for ready in result.ready:
-            obj = object_by_identity.get((ready.key, ready.version_id))
-            if obj is not None:
-                ready_expiries[obj.id] = ready.restore_expires_at
-        if result.simulator_recommended_real_poll_seconds is not None:
-            recommended_real_delays.append(result.simulator_recommended_real_poll_seconds)
-        task.lease_expires_at = utcnow() + timedelta(seconds=settings.task_lease_seconds)
-        session.commit()
-    poll_elapsed = time.monotonic() - started
-    # A transfer worker can discover a genuine expiry while this polling
-    # worker is collecting per-object evidence. Refresh the wave before any
-    # status mutation so this stale session cannot resurrect it as RESTORING.
-    session.refresh(wave)
-    if restore_reapproval_is_required(wave):
-        finish_superseded_restore_poll(session, task, wave)
-        return
-    persist_restore_poll_metrics(
-        wave,
-        {
-            "requests": math.ceil(len(pending_archives) / RESTORE_POLL_HEAD_BATCH_SIZE),
-            "throttle_retries": 0,
-            "elapsed_seconds": poll_elapsed,
-        },
-    )
-    wave.last_availability_poll_objects = len(pending_archives)
-    wave.last_availability_poll_seconds = poll_elapsed
-    availability_observed_at = utcnow()
-    availability_virtual_at = simulation_virtual_now(source)
-    for obj in objects:
-        if obj.storage_class not in ARCHIVE_CLASSES or obj.id in ready_expiries:
-            if obj.state in {
-                ObjectState.RESTORE_REQUESTED,
-                ObjectState.RESTORE_REQUEST_ACCEPTED,
-                ObjectState.RESTORING,
-                ObjectState.WAVE_ASSIGNED,
-            }:
-                obj.state = ObjectState.RESTORED
-                obj.restored_at = obj.restored_at or availability_observed_at
-                if obj.storage_class in ARCHIVE_CLASSES:
-                    obj.restore_expires_at = ready_expiries.get(obj.id)
-        elif obj.state in {ObjectState.RESTORE_REQUESTED, ObjectState.RESTORE_REQUEST_ACCEPTED}:
-            obj.state = ObjectState.RESTORING
-    pending = int(
-        session.scalar(
-            select(func.count(ObjectRecord.id)).where(
-                ObjectRecord.wave_id == wave.id,
-                ObjectRecord.state.in_(
-                    [
-                        ObjectState.RESTORE_REQUESTED,
-                        ObjectState.RESTORE_REQUEST_ACCEPTED,
-                        ObjectState.RESTORING,
-                    ]
-                ),
-            )
-        )
-        or 0
-    )
-    wave.last_poll_at, wave.poll_count = utcnow(), wave.poll_count + 1
-    if pending:
-        # An early-release source can be polling remaining objects while a
-        # transfer batch owns the same wave. Do not overwrite the primary
-        # visible TRANSFERRING state during that overlap.
-        if not simulation_transfer_task_active(session, wave):
-            wave.status = "RESTORING"
-        ready_for_transfer = int(
-            session.scalar(
-                select(func.count(ObjectRecord.id)).where(
-                    ObjectRecord.wave_id == wave.id,
-                    ObjectRecord.state == ObjectState.RESTORED,
-                )
-            )
-            or 0
-        )
-        if ready_for_transfer:
-            wave.first_restore_available_virtual_at = (
-                wave.first_restore_available_virtual_at or availability_virtual_at
-            )
-        released = (
-            enqueue_available_transfer_objects(session, wave, availability_virtual_at)
-            if wave.transfer_release_policy == "AS_OBJECTS_AVAILABLE" else 0
-        )
-        if released:
-            # Freeze the source clock before the first ready object leaves
-            # polling. The lane later advances this same clock by its durable
-            # simulated occupancy, rather than by worker turnaround time.
-            retain_simulation_clock_for_transfer(session, wave)
-            ensure_transfer_task(session, wave, settings)
-            event(
-                session,
-                "SIMULATED_RESTORE_OBJECTS_RELEASED",
-                f"SIMULATED: {released} object(s) released immediately to the continuous transfer lane; {pending} remain unavailable.",
-                source_id=source.id,
-                wave_id=wave.id,
-            )
-        session.commit()
-        delay = restore_availability_poll_delay_seconds(
-            attempt.completed_at,
-            utcnow(),
-            wave.restore_tier,
-            partial_availability=bool(ready_for_transfer),
-            transfer_strategy=wave.transfer_release_policy,
-            pending_objects=pending,
-            predicted_first_seconds=wave.predicted_restore_first_seconds,
-        )
-        # The polling policy is expressed in operational (virtual) time. The
-        # simulator clock is paused between durable decisions, so move it by
-        # one bounded polling interval rather than letting a 3,600x wall-clock
-        # race consume days of retention while the worker performs HeadObject
-        # calls.  Never advance it while a Raiju transfer hold is active: that
-        # would consume a temporary restore window while actual copy work is
-        # still running.
-        if wave.simulation_transfer_clock_held or simulation_source_lane_has_committed_work(session, source):
-            retry(
-                session,
-                task,
-                "SIMULATED: availability polling deferred while transfer retains the virtual restore window",
-                SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS,
-            )
-            return
-        if not simulation_restore_poll_clock_leader(session, task, wave):
-            retry(
-                session,
-                task,
-                "SIMULATED: availability observed at the source clock; waiting for the source poll leader to advance it",
-                1,
-            )
-            return
-        virtual_delay = delay
-        try:
-            clock = SimulatorAdminClient(runtime_context.simulator_base_url).clock_status(
-                source.simulation_execution_id
-            )
-            acceleration = max(1.0, float(clock.get("acceleration") or 1.0))
-            if recommended_real_delays:
-                virtual_delay = min(
-                    virtual_delay,
-                    max(1, math.ceil(min(recommended_real_delays) * acceleration)),
-                )
-        except Exception:
-            # Retain the conservative policy interval if the status endpoint
-            # has a transient issue; no free-running fallback is allowed.
-            virtual_delay = delay
-        advance_simulation_clock(
-            session,
-            source,
-            virtual_delay,
-            "restore availability polling interval",
-            wave,
-        )
-        # The next durable poll is intentionally soon in real time; virtual
-        # time has already advanced by the controlled interval above.
-        delay = 1
-        delay_label = f"{format_duration(virtual_delay)} virtual"
-        retry(
-            session,
-            task,
-            f"SIMULATED: {pending} object(s) still unavailable; next poll in {delay_label}",
-            delay,
-        )
-        return
-    wave.status = "RESTORED"
-    wave.first_restore_available_virtual_at = wave.first_restore_available_virtual_at or availability_virtual_at
-    wave.last_restore_available_virtual_at = availability_virtual_at
-    event(
-        session,
-        "SIMULATED_RESTORE_AVAILABLE",
-        "SIMULATED: all wave objects are available for transfer",
-        source_id=source.id,
-        wave_id=wave.id,
-    )
-    # Keep a second hold beyond the polling context.  It is released only by
-    # the transfer worker, preventing a 3,600x virtual clock from expiring a
-    # freshly available object in the durable-queue hand-off.
-    enqueue_available_transfer_objects(session, wave, availability_virtual_at)
-    ensure_transfer_task(session, wave, settings)
-    succeed(session, task)
-
-
 def poll_restore(session, task: Task, settings) -> None:
     wave, source = session.get(Wave, task.wave_id), session.get(Wave, task.wave_id).source
     if restore_reapproval_is_required(wave):
         finish_superseded_restore_poll(session, task, wave)
-        return
-    if runtime_context.is_simulation:
-        with simulation_phase_clock_hold(source, "restore availability polling"):
-            poll_restore_simulated(session, task, settings, wave, source)
         return
     # Keep the control-bucket layout in sync with submission.  The completion
     # report lives under the source-specific Raijin prefix, not the legacy
@@ -2580,7 +1916,7 @@ def multipart_parts_on_oci(client, namespace: str, bucket: str, key: str, upload
         if page:
             kwargs["page"] = page
         response = client.list_multipart_upload_parts(namespace, bucket, key, upload_id, **kwargs)
-        # OCI's SDK commonly returns a bare list, while Fujin's compatible
+        # OCI's SDK commonly returns a bare list,
         # JSON endpoint is decoded by the SDK as ``{"parts": [...]}``.  Both
         # are legitimate transport shapes and must reconcile to the exact
         # same durable checkpoint.
@@ -2702,7 +2038,7 @@ def transfer_object(s3, namespace: str, source_bucket: str, destination_bucket: 
         if obj.last_modified:
             metadata["raijin-source-last-modified"] = obj.last_modified.isoformat()
         # This immutable provenance marks multipart sessions originated by
-        # Raiju.  It lets Fujin's maintenance tool distinguish future
+        # Raiju.  It lets operational diagnostics distinguish future
         # migration remnants from any independent OCI-compatible client.
         metadata["raijin-object-id"] = str(obj.id)
         tags_json = json.dumps({tag["Key"]: tag["Value"] for tag in tags}, separators=(",", ":"), ensure_ascii=False)
@@ -2739,7 +2075,7 @@ def transfer_object(s3, namespace: str, source_bucket: str, destination_bucket: 
         def read_part(part_body, limit: int) -> bytes:
             """Read one source payload at the lane's assigned pace.
 
-            A Raiju formerly consumed an entire multipart part from Fujin as
+            A Raiju formerly consumed an entire multipart part before checkpointing, which
             fast as the local disk allowed and slept only after its local OCI
             upload. Concurrent Raijus therefore produced repeated disk bursts
             well above the configured lane rate, starving the web host. Pace
@@ -2941,303 +2277,7 @@ def transfer_object(s3, namespace: str, source_bucket: str, destination_bucket: 
         worker_session.commit()
 
 
-def transfer_object_simulated(
-    object_id: int,
-    rate_bytes_per_second: float,
-    active_workers: int,
-    configured_multipart_part_size: int = DEFAULT_MULTIPART_PART_SIZE,
-    rate_resolver=None,
-) -> None:
-    """Run the production object state machine against typed simulator ports.
-
-    The main database remains the authority for leases and checkpoints.  The
-    simulator receives the same byte ranges the real worker would upload, then
-    independently regenerates the expected source bytes, validates them and
-    discards the payload.  No simulated object body is persisted.
-    """
-    with SessionLocal() as worker_session:
-        obj = worker_session.get(ObjectRecord, object_id)
-        if not obj or obj.state not in {ObjectState.RESTORED, ObjectState.TRANSFERRING}:
-            return
-        source = obj.wave.source
-        context = simulation_execution_context(source)
-        source_port = SimulatedSourcePort(runtime_context.simulator_base_url)
-        destination_port = SimulatedDestinationPort(runtime_context.simulator_base_url)
-        if obj.state != ObjectState.TRANSFERRING:
-            obj.transfer_elapsed_seconds = 0
-        obj.state, obj.transfer_started_at = ObjectState.TRANSFERRING, utcnow()
-        obj.transfer_progress_bytes, obj.transfer_progress_at, obj.transfer_rate_mbps = (
-            0,
-            utcnow(),
-            0,
-        )
-        worker_session.commit()
-        elapsed_baseline = time.monotonic()
-        progress_bytes = 0
-
-        def throttle(size: int, started: float) -> None:
-            effective_rate = float(rate_resolver(object_id) if rate_resolver else rate_bytes_per_second)
-            if effective_rate <= 0:
-                return
-            delay = size / effective_rate - (time.monotonic() - started)
-            if delay > 0:
-                time.sleep(delay)
-
-        def persist_progress(completed: int) -> None:
-            nonlocal progress_bytes, elapsed_baseline
-            now = time.monotonic()
-            elapsed = max(now - elapsed_baseline, 0)
-            delta = max(0, completed - progress_bytes)
-            obj.transfer_elapsed_seconds += elapsed
-            obj.transfer_progress_bytes = completed
-            obj.transfer_progress_at = utcnow()
-            obj.transfer_rate_mbps = (
-                round(delta * 8 / max(elapsed, 0.001) / 1_000_000, 2) if delta else 0
-            )
-            progress_bytes, elapsed_baseline = completed, now
-            worker_session.commit()
-
-        identity = ObjectIdentity(
-            bucket=source.s3_bucket,
-            key=obj.object_key,
-            version_id=obj.version_id,
-        )
-        destination_identity = ObjectIdentity(
-            bucket=source.destination_bucket,
-            key=object_destination_key(obj),
-            version_id=obj.version_id,
-        )
-        if source.simulation_fidelity == "CONTROL":
-            result = destination_port.transfer_logically(
-                LogicalTransferRequest(
-                    context=context,
-                    source=identity,
-                    destination_bucket=source.destination_bucket,
-                    size_bytes=obj.size_bytes,
-                    allocated_rate_mbps=rate_bytes_per_second * 8 / 1_000_000,
-                    active_workers=active_workers,
-                    network_operation_key=f"wave:{obj.wave_id}",
-                    idempotency_key=uuid5(
-                        NAMESPACE_URL,
-                        f"raijin:simulation:logical-transfer:{context.execution_id}:{obj.id}",
-                    ),
-                )
-            )
-            obj.transfer_elapsed_seconds += result.simulated_elapsed_seconds
-            obj.transfer_progress_bytes = obj.size_bytes
-            obj.transfer_progress_at = utcnow()
-            obj.transfer_rate_mbps = (
-                round(obj.size_bytes * 8 / result.simulated_elapsed_seconds / 1_000_000, 2)
-                if result.simulated_elapsed_seconds > 0
-                else 0
-            )
-            obj.source_checksum = None
-            obj.destination_checksum = None
-            obj.checksum_algorithm = "SIMULATED_LOGICAL_EVIDENCE"
-            obj.delivery_integrity_algorithm = "SIMULATED_LOGICAL_EVIDENCE"
-            obj.delivery_integrity_checksum = result.evidence.checksum_sha256
-            obj.delivery_integrity_status = "OCI_ACCEPTED"
-            obj.delivery_integrity_verified_at = utcnow()
-            obj.state, obj.transferred_at = ObjectState.TRANSFERRED, utcnow()
-            worker_session.commit()
-            return
-
-        def read_range(offset: int, length: int) -> bytes:
-            if length == 0:
-                return b""
-            payload = b"".join(
-                source_port.read_range(
-                    ReadRangeRequest(
-                        context=context,
-                        object=identity,
-                        offset=offset,
-                        length=length,
-                    )
-                )
-            )
-            if len(payload) != length:
-                raise RuntimeError(
-                    f"Simulated source range ended early: expected {length}, received {len(payload)}"
-                )
-            return payload
-
-        descriptor = ObjectDescriptor(
-            bucket=source.destination_bucket,
-            key=destination_identity.key,
-            version_id=obj.version_id,
-            size_bytes=obj.size_bytes,
-            storage_class="STANDARD",
-            etag=obj.etag,
-            last_modified=obj.last_modified,
-            metadata=json.loads(obj.metadata_json or "{}"),
-            tags=json.loads(obj.tags_json or "{}"),
-        )
-        full_digest = hashlib.sha256()
-        resumed = False
-        if obj.size_bytes <= DIRECT_SHA_LIMIT:
-            payload = read_range(0, obj.size_bytes)
-            full_digest.update(payload)
-            checksum = base64.b64encode(full_digest.digest()).decode("ascii")
-            started = time.monotonic()
-            evidence = destination_port.put_object(
-                PutObjectRequest(
-                    context=context,
-                    object=descriptor,
-                    source_checksum_sha256=checksum,
-                    idempotency_key=uuid5(
-                        NAMESPACE_URL,
-                        f"raijin:simulation:put:{context.execution_id}:{obj.id}",
-                    ),
-                ),
-                iter((payload,)),
-            )
-            throttle(len(payload), started)
-            persist_progress(len(payload))
-            delivery_algorithm, delivery_checksum = "SHA256", evidence.checksum_sha256
-            checksum_algorithm, source_checksum = "SHA256", checksum
-        else:
-            part_size = int(
-                obj.multipart_part_size
-                or effective_multipart_part_size(
-                    obj.size_bytes, configured_multipart_part_size
-                )
-            )
-            upload_id = obj.multipart_upload_id
-            persisted_parts = {
-                str(row.part_number): {
-                    "etag": row.etag, "size": row.size_bytes,
-                    "sha256": row.checksum_sha256,
-                }
-                for row in worker_session.scalars(select(MultipartCheckpointPart).where(
-                    MultipartCheckpointPart.object_id == obj.id
-                ))
-            }
-            if not persisted_parts:
-                persisted_parts = json.loads(obj.multipart_parts_json or "{}")
-            if not upload_id:
-                upload_id = destination_port.create_multipart(
-                    MultipartCreateRequest(
-                        context=context,
-                        object=descriptor,
-                        part_size_bytes=part_size,
-                        idempotency_key=uuid5(
-                            NAMESPACE_URL,
-                            f"raijin:simulation:multipart:{context.execution_id}:{obj.id}",
-                        ),
-                    )
-                )
-                obj.multipart_upload_id = upload_id
-                obj.multipart_part_size = part_size
-                obj.multipart_parts_json = "{}"
-                obj.multipart_updated_at = utcnow()
-                worker_session.execute(delete(MultipartCheckpointPart).where(
-                    MultipartCheckpointPart.object_id == obj.id
-                ))
-                worker_session.commit()
-            total_parts = (obj.size_bytes + part_size - 1) // part_size
-            completed_bytes = 0
-            parts: list[MultipartPartEvidence] = []
-            for part_number in range(1, total_parts + 1):
-                expected_size = expected_part_size(obj.size_bytes, part_number, part_size)
-                prior = persisted_parts.get(str(part_number))
-                if prior and prior.get("size") == expected_size and prior.get("sha256"):
-                    resumed = True
-                    completed_bytes += expected_size
-                    parts.append(
-                        MultipartPartEvidence(
-                            part_number=part_number,
-                            size_bytes=expected_size,
-                            checksum_sha256=prior["sha256"],
-                            etag=prior["etag"],
-                        )
-                    )
-                    continue
-                offset = (part_number - 1) * part_size
-                payload = read_range(offset, expected_size)
-                digest = sha256_b64(payload)
-                full_digest.update(payload)
-                started = time.monotonic()
-                part = destination_port.upload_part(
-                    MultipartPartRequest(
-                        context=context,
-                        upload_id=upload_id,
-                        object=destination_identity,
-                        part_number=part_number,
-                        size_bytes=expected_size,
-                        checksum_sha256=digest,
-                        idempotency_key=uuid5(
-                            NAMESPACE_URL,
-                            f"raijin:simulation:part:{upload_id}:{part_number}",
-                        ),
-                    ),
-                    iter((payload,)),
-                )
-                throttle(len(payload), started)
-                completed_bytes += len(payload)
-                parts.append(part)
-                persisted_parts[str(part_number)] = {
-                    "etag": part.etag,
-                    "size": part.size_bytes,
-                    "sha256": part.checksum_sha256,
-                }
-                worker_session.merge(MultipartCheckpointPart(
-                    object_id=obj.id, part_number=part_number, etag=part.etag,
-                    size_bytes=part.size_bytes,
-                    checksum_sha256=part.checksum_sha256, updated_at=utcnow(),
-                ))
-                obj.multipart_updated_at = utcnow()
-                persist_progress(completed_bytes)
-            evidence = destination_port.commit_multipart(
-                MultipartCommitRequest(
-                    context=context,
-                    upload_id=upload_id,
-                    object=destination_identity,
-                    parts=parts,
-                    full_checksum_sha256=(
-                        None
-                        if resumed
-                        else base64.b64encode(full_digest.digest()).decode("ascii")
-                    ),
-                    idempotency_key=uuid5(
-                        NAMESPACE_URL,
-                        f"raijin:simulation:commit:{upload_id}",
-                    ),
-                )
-            )
-            obj.multipart_upload_id, obj.multipart_updated_at = None, utcnow()
-            obj.multipart_parts_json = json.dumps(persisted_parts, separators=(",", ":"))
-            worker_session.execute(delete(MultipartCheckpointPart).where(
-                MultipartCheckpointPart.object_id == obj.id
-            ))
-            persist_progress(obj.size_bytes)
-            delivery_algorithm = "SHA256_MULTIPART_PARTS"
-            delivery_checksum = evidence.checksum_sha256
-            checksum_algorithm = "SHA256_MULTIPART_PARTS"
-            source_checksum = (
-                None if resumed else base64.b64encode(full_digest.digest()).decode("ascii")
-            )
-
-        obj.source_checksum, obj.destination_checksum = source_checksum, None
-        obj.checksum_algorithm = checksum_algorithm
-        obj.integrity_verified_at, obj.integrity_error = None, None
-        obj.delivery_integrity_algorithm = delivery_algorithm
-        obj.delivery_integrity_checksum = delivery_checksum
-        obj.delivery_integrity_status = "OCI_ACCEPTED"
-        obj.delivery_integrity_verified_at = utcnow()
-        obj.transfer_elapsed_seconds += max(0, time.monotonic() - elapsed_baseline)
-        obj.state, obj.transferred_at = ObjectState.TRANSFERRED, utcnow()
-        obj.transfer_progress_bytes, obj.transfer_progress_at, obj.transfer_rate_mbps = (
-            obj.size_bytes,
-            utcnow(),
-            0,
-        )
-        worker_session.commit()
-
-
 def _continuous_source_now(source: Source) -> datetime:
-    """Use the source-owned clock when a Fujin execution owns the source."""
-    if runtime_context.is_simulation and source.backend_kind == "SIMULATED":
-        return simulation_virtual_now(source)
     return utcnow()
 
 
@@ -3274,7 +2314,7 @@ def _raiju_host_capacity(multipart_part_size: int = DEFAULT_MULTIPART_PART_SIZE)
     """Return an enforceable host/database admission budget.
 
     A Raiju can retain a multipart part plus Python/SDK/socket overhead.  The
-    estimate is intentionally pessimistic; it protects Fujin, PostgreSQL and
+    estimate is intentionally pessimistic; it protects PostgreSQL and
     the OS before the lane can turn available memory into swap pressure.
     """
     cpu_count = max(1, os.cpu_count() or 1)
@@ -3469,7 +2509,7 @@ def _continuous_aggregate_rate_sample(session, state: RuntimeLaneControlState,
         state.sample_at = now
         state.sample_progress_json = json.dumps(current, separators=(",", ":"))
         return previous_rate, False
-    # The local Fujin control-plane database is SQLite, which drops the UTC
+    # The local control-plane database is SQLite, which drops the UTC
     # offset on a committed ``DateTime(timezone=True)`` value.  Never mix that
     # reloaded value with the source-owned UTC clock used by the lane.
     sample_at = _utc_timestamp(state.sample_at)
@@ -3814,7 +2854,7 @@ def recover_expired_continuous_lane_leases(session, settings) -> int:
     object is an expired lease. Sweep those sources independently of the
     task queue, return the item to its resumable state, and enqueue one
     source-scoped dispatcher. This is safe for REAL too: leases use wall
-    clock time and no simulator clock is advanced by this recovery.
+    clock time and this recovery uses wall-clock time.
     """
     now = utcnow()
     source_ids = list(session.scalars(select(TransferQueueItem.source_id)
@@ -4178,8 +3218,6 @@ def reconcile_continuous_source_waves(session, source: Source) -> None:
             )) or 0)
             if wave.status != terminal_status:
                 wave.status = terminal_status
-                if runtime_context.is_simulation:
-                    wave.transfer_completed_virtual_at = _continuous_source_now(source)
                 if terminal_status == "COMPLETED":
                     event(session, "CONTINUOUS_WAVE_COMPLETED", "All wave objects reached OCI through the continuous lane.", source_id=source.id, wave_id=wave.id)
             if recovered_failures and not session.scalar(select(Event.id).where(
@@ -4202,30 +3240,6 @@ def reconcile_continuous_source_waves(session, source: Source) -> None:
 
     reconcile_completed_continuous_task_anchors(session, source)
 
-    # Fujin executions are source-scoped.  The previous wave-exclusive
-    # executor closed the execution itself; preserve that lifecycle contract
-    # after moving delivery ownership to the continuous lane.
-    if runtime_context.is_simulation and source.simulation_execution_id:
-        total, unfinished = session.execute(
-            select(
-                func.count(ObjectRecord.id),
-                func.count(ObjectRecord.id).filter(
-                    ObjectRecord.state.notin_([ObjectState.TRANSFERRED, ObjectState.VERIFIED])
-                ),
-            ).where(ObjectRecord.source_id == source.id)
-        ).one()
-        if total and not unfinished:
-            SimulatorAdminClient(runtime_context.simulator_base_url).set_execution_state(
-                source.simulation_execution_id, "SUCCEEDED"
-            )
-            event(
-                session,
-                "SIMULATION_EXECUTION_SUCCEEDED",
-                f"Fujin execution completed after all {total} source object(s) reached the simulated destination.",
-                source_id=source.id,
-            )
-
-
 def transfer_continuous(session, task: Task, settings) -> None:
     """Move one durable, deadline-aware batch from the continuous lane.
 
@@ -4245,660 +3259,432 @@ def transfer_continuous(session, task: Task, settings) -> None:
         task.error = "Source is no longer eligible"
         session.commit()
         return
-    with simulation_phase_clock_hold(source, "continuous-transfer"):
-        normal_concurrency: LaneConcurrencyController | None = None
-        autoscale_state = _runtime_lane_control_state(session)
-        # A fully drained lane is a genuine new capacity epoch. Preserve
-        # approved knowledge, but permit one fresh experiment for work that
-        # arrives after all prior Raijus settled. A process restart with live
-        # leases does not take this branch and therefore keeps its guardrail.
-        live_leases = _continuous_global_leased_count(session)
-        if not live_leases and autoscale_state.growth_blocked:
-            autoscale_state.growth_blocked = False
-            autoscale_state.baseline_mbps = 0
-            autoscale_state.experiment_target = None
-            autoscale_state.experiment_started_at = None
-            autoscale_state.experiment_samples_json = "[]"
-            autoscale_state.sample_history_json = "[]"
-            autoscale_state.cooldown_until = None
-            autoscale_state.marginal_gain_mbps = 0
-            autoscale_state.decision_reason = "new drained-lane epoch; prior growth block cleared"
+    normal_concurrency: LaneConcurrencyController | None = None
+    autoscale_state = _runtime_lane_control_state(session)
+    # A fully drained lane is a genuine new capacity epoch. Preserve
+    # approved knowledge, but permit one fresh experiment for work that
+    # arrives after all prior Raijus settled. A process restart with live
+    # leases does not take this branch and therefore keeps its guardrail.
+    live_leases = _continuous_global_leased_count(session)
+    if not live_leases and autoscale_state.growth_blocked:
+        autoscale_state.growth_blocked = False
+        autoscale_state.baseline_mbps = 0
+        autoscale_state.experiment_target = None
+        autoscale_state.experiment_started_at = None
+        autoscale_state.experiment_samples_json = "[]"
+        autoscale_state.sample_history_json = "[]"
+        autoscale_state.cooldown_until = None
+        autoscale_state.marginal_gain_mbps = 0
+        autoscale_state.decision_reason = "new drained-lane epoch; prior growth block cleared"
 
-        def record_allocation(batch: TransferDispatchBatch | None, allocation: dict) -> None:
-            """Persist the exact Raikou decision with its capacity evidence."""
-            if batch is None:
-                return
-            batch.worker_target = int(allocation["target"])
-            batch.active_workers = int(allocation.get("active_workers", 0) or 0)
-            batch.effective_worker_cap = int(allocation.get("effective_worker_cap", allocation["target"]) or 0)
-            batch.observed_lane_mbps = float(allocation["observed_lane_mbps"])
-            batch.observed_per_raiju_mbps = float(allocation["observed_per_raiju_mbps"])
-            # The batch may repeat the last UI/controller rate while the
-            # 20-second measurement window is still open. Preserve that
-            # diagnostic value, but stamp it only when this decision received
-            # a new byte-delta sample; forecasting consumes stamped samples.
-            if allocation.get("sample_is_new"):
-                batch.observed_at = allocation.get("observed_at") or utcnow()
-            batch.host_capacity_factor = float(allocation["host_capacity_factor"])
-            batch.host_capacity_reason = str(allocation["host_capacity_reason"])
-            batch.marginal_gain_mbps = float(allocation["marginal_gain_mbps"])
-            batch.autoscale_reason = str(allocation["reason"])
+    def record_allocation(batch: TransferDispatchBatch | None, allocation: dict) -> None:
+        """Persist the exact Raikou decision with its capacity evidence."""
+        if batch is None:
+            return
+        batch.worker_target = int(allocation["target"])
+        batch.active_workers = int(allocation.get("active_workers", 0) or 0)
+        batch.effective_worker_cap = int(allocation.get("effective_worker_cap", allocation["target"]) or 0)
+        batch.observed_lane_mbps = float(allocation["observed_lane_mbps"])
+        batch.observed_per_raiju_mbps = float(allocation["observed_per_raiju_mbps"])
+        # The batch may repeat the last UI/controller rate while the
+        # 20-second measurement window is still open. Preserve that
+        # diagnostic value, but stamp it only when this decision received
+        # a new byte-delta sample; forecasting consumes stamped samples.
+        if allocation.get("sample_is_new"):
+            batch.observed_at = allocation.get("observed_at") or utcnow()
+        batch.host_capacity_factor = float(allocation["host_capacity_factor"])
+        batch.host_capacity_reason = str(allocation["host_capacity_reason"])
+        batch.marginal_gain_mbps = float(allocation["marginal_gain_mbps"])
+        batch.autoscale_reason = str(allocation["reason"])
 
-        initial = claim_continuous_transfer_batch(session, source, settings, task)
-        if not initial:
-            reconcile_continuous_source_waves(session, source)
-            succeed(session, task)
-            ensure_transfer_task(session, anchor, settings)
+    initial = claim_continuous_transfer_batch(session, source, settings, task)
+    if not initial:
+        reconcile_continuous_source_waves(session, source)
+        succeed(session, task)
+        ensure_transfer_task(session, anchor, settings)
+        session.commit()
+        return
+
+    # A batch is a durable selection boundary, not a barrier.  Only the
+    # Raiju slots that can start immediately retain a lease; every other
+    # selected object goes back to READY so a newly-restored critical item
+    # can take the next free slot without interrupting active I/O.
+    # The first durable claim can contain only one object when its size
+    # already reaches the batch byte ceiling.  It must not make Raikou
+    # conclude that only one slot is useful while thousands of READY
+    # objects are still behind it in the same lane.
+    ready_after_initial_claim = _continuous_ready_item_count(session, source.id, utcnow())
+    global_ready_after_initial_claim = _continuous_global_ready_item_count(session, utcnow())
+    # ``initial`` was just moved from READY to LEASED.  It is already
+    # removed from the READY count, while ``live_leases`` was measured
+    # immediately before this claim.  Count the newly reserved entries
+    # explicitly; otherwise a one-object lane computes zero eligible
+    # work, returns its only item to READY, and endlessly recreates an
+    # empty dispatcher without ever starting Raiju I/O.
+    allocation = _continuous_raiju_worker_count(
+        session, source, live_leases + len(initial) + global_ready_after_initial_claim,
+        int(settings.max_throughput_mbps), settings=settings, details=True,
+    )
+    normal_concurrency = LaneConcurrencyController(
+        allocation["target"], min(RAIJU_MIN_WORKERS, live_leases + global_ready_after_initial_claim),
+        float(settings.max_throughput_mbps),
+        float(getattr(settings, "continuous_transfer_min_marginal_gain_mbps", 5) or 0),
+    )
+    normal_concurrency.restore(autoscale_state)
+    # A persisted target is evidence only after it has passed the current
+    # host/database ceiling. A restarted process cannot revive a formerly
+    # inflated target just because it was durable.
+    normal_concurrency.target = min(allocation["target"], allocation["effective_worker_cap"])
+    normal_concurrency.approved_target = min(
+        normal_concurrency.target, allocation["effective_worker_cap"]
+    )
+    # Some leases can belong to another source dispatcher.  This process
+    # may only fill capacity still available in the one physical lane.
+    worker_ceiling = max(0, allocation["target"] - max(0, live_leases - len(initial)))
+    for batch_id in {item.dispatch_batch_id for item in initial if item.dispatch_batch_id}:
+        batch = session.get(TransferDispatchBatch, batch_id)
+        record_allocation(batch, allocation)
+    active, deferred = initial[:worker_ceiling], initial[worker_ceiling:]
+    _return_unstarted_queue_items(session, deferred, "returned before execution; next priority evaluation")
+    cycle_dispatched_items = 0
+    multipart_part_size = int(settings.multipart_part_size_mib) * 1024 * 1024
+    s3, _, _ = aws_clients(settings, source.aws_region, source)
+    namespace = read_oci_runtime_config().get("object_storage_namespace", "").strip()
+    if not namespace:
+        raise RuntimeError("OCI Object Storage namespace is absent from runtime configuration")
+
+    # Future metadata carries the rate allocated when it was dispatched.
+    # This permits adaptive Raiju expansion at the next free slot while
+    # keeping the aggregate stream rate at or below the configured link.
+    futures: dict[object, tuple[int, int, int, float]] = {}
+    segments: dict[int, TransferLaneSegment] = {}
+    active_wave_counts: dict[int, int] = {}
+    # target item id -> (reserved critical item id, Raiju slot).  The
+    # successor is leased durably but is not submitted to the executor
+    # until the selected normal Raiju reaches its safe object boundary.
+    pending_handoffs: dict[int, tuple[int, int]] = {}
+    total_rate = float(settings.max_throughput_mbps) * 125000
+    bandwidth_plan = ContinuousBandwidthPlan(
+        total_rate, int(settings.continuous_transfer_critical_priority)
+    )
+    last_critical_objects: set[int] = set()
+
+    def apply_critical_concurrency(allocation: dict) -> dict:
+        """Apply one source-wide autoscale policy in normal or critical mode."""
+        critical = _continuous_critical_work_exists(
+            session, source.id, int(settings.continuous_transfer_critical_priority)
+        )
+        active_ids = [entry[0] for entry in futures.values()]
+        sample_now = utcnow()
+        observed_mbps, sample_is_new = _continuous_aggregate_rate_sample(
+            session, autoscale_state, active_ids, now=sample_now
+        )
+        global_active_workers = _continuous_global_leased_count(session)
+        available_objects = global_active_workers + _continuous_global_ready_item_count(session, utcnow())
+        # Refresh capacity on every admission decision; unlike the former
+        # implementation, the guard is an actual ceiling here.
+        capacity = _raiju_host_capacity(int(settings.multipart_part_size_mib) * 1024 * 1024)
+        effective_cap = min(available_objects, capacity.effective_cap)
+        operational_ceiling, ceiling_samples = _continuous_operational_ceiling_mbps(
+            session, float(settings.max_throughput_mbps), now=sample_now
+        )
+        target, reason = normal_concurrency.desired_workers(
+            available_objects, active_workers=global_active_workers, observed_mbps=observed_mbps,
+            sample_is_new=sample_is_new, effective_cap=effective_cap,
+            operational_ceiling_mbps=operational_ceiling, now=sample_now,
+        )
+        policy_reason = reason or (
+            "awaiting an independent aggregate-byte sample"
+            if not sample_is_new else "measured aggregate lane utilization is stable"
+        )
+        if critical:
+            policy_reason = f"critical expiry mode; {policy_reason}"
+        result = {
+            **allocation,
+            "target": target,
+            "active_workers": global_active_workers,
+            "observed_lane_mbps": observed_mbps,
+            "observed_per_raiju_mbps": observed_mbps / max(1, len(futures)),
+            "sample_is_new": sample_is_new,
+            "observed_at": sample_now if sample_is_new else None,
+            "marginal_gain_mbps": float(normal_concurrency.last_marginal_gain_mbps),
+            "host_capacity_factor": capacity.factor,
+            "host_capacity_reason": capacity.reason,
+            "effective_worker_cap": effective_cap,
+            "decision_ceiling_mbps": operational_ceiling,
+            "decision_ceiling_samples": ceiling_samples,
+            "reason": policy_reason,
+        }
+        if reason:
+            event(
+                session, "CONTINUOUS_TRANSFER_LANE_CONCURRENCY_CHANGED",
+                f"Raikou {policy_reason}; observed aggregate lane rate {observed_mbps:.2f} Mbps.",
+                source_id=source.id,
+                wave_id=anchor.id,
+            )
+        # The local dispatcher uses only capacity not already leased by a
+        # competing source. The persisted target remains the global lane
+        # target so the next fair source inherits the same controller.
+        result["local_target"] = max(0, target - max(0, global_active_workers - len(futures)))
+        normal_concurrency.persist(
+            autoscale_state, active_workers=global_active_workers, effective_cap=effective_cap,
+            observed_mbps=observed_mbps, sample_is_new=sample_is_new,
+            capacity_reason=capacity.reason,
+            reason=policy_reason,
+        )
+        return result
+
+    def active_critical_count() -> int:
+        item_ids = [entry[0] for entry in futures.values()]
+        if not item_ids:
+            return 0
+        return int(session.scalar(select(func.count(TransferQueueItem.id)).where(
+            TransferQueueItem.id.in_(item_ids),
+            TransferQueueItem.priority_score >= int(settings.continuous_transfer_critical_priority),
+        )) or 0)
+
+    def refresh_active_bandwidth_priorities() -> None:
+        """Promote in-flight objects when their remaining slack collapses."""
+        nonlocal last_critical_objects
+        current_critical: set[int] = set()
+        fair_rate = max(1.0, total_rate / max(1, len(futures)))
+        for item_id, _wave_id, _slot, _initial_rate in futures.values():
+            item = session.get(TransferQueueItem, item_id)
+            obj = session.get(ObjectRecord, item.object_id) if item else None
+            if not item or not obj:
+                continue
+            remaining_bytes = max(0, int(obj.size_bytes) - int(obj.transfer_progress_bytes or 0))
+            # Classify every active item against the same fair-share
+            # baseline. Using the allocation being calculated here made
+            # criticality oscillate every heartbeat.
+            predicted = remaining_bytes / fair_rate
+            score, band, reason, details = transfer_priority(
+                item.restore_expires_at, predicted, settings,
+                now=_continuous_source_now(source), size_bytes=remaining_bytes,
+                source_business_priority=source.business_priority,
+            )
+            item.priority_score, item.priority_band = score, band
+            item.predicted_transfer_seconds = predicted
+            item.priority_details_json = json.dumps(details, separators=(",", ":"))
+            item.decision_reason = reason
+            bandwidth_plan.update(obj.id, score)
+            if score >= bandwidth_plan.critical_priority:
+                current_critical.add(obj.id)
+        if bool(current_critical) != bool(last_critical_objects):
+            if current_critical and not last_critical_objects:
+                event(
+                    session,
+                    "CONTINUOUS_TRANSFER_BANDWIDTH_PRIORITIZED",
+                    f"Raikou assigned maximum viable lane priority to {len(current_critical)} expiring object(s); ordinary streams retain only the liveness floor.",
+                    source_id=source.id,
+                )
+            elif last_critical_objects and not current_critical:
+                event(
+                    session,
+                    "CONTINUOUS_TRANSFER_BANDWIDTH_NORMALIZED",
+                    "Raikou returned the lane to fair sharing after critical expiry risk cleared.",
+                    source_id=source.id,
+                )
+        last_critical_objects = current_critical
+
+    def mark_wave_worker(wave_id: int, delta: int) -> None:
+        active_wave_counts[wave_id] = max(0, active_wave_counts.get(wave_id, 0) + delta)
+        wave = session.get(Wave, wave_id)
+        if wave:
+            wave.active_transfer_workers = active_wave_counts[wave_id]
+
+    def submit(executor, item: TransferQueueItem, slot: int, rate: float, active_workers: int) -> None:
+        nonlocal cycle_dispatched_items
+        item.last_dispatched_at = utcnow()
+        segment_started_at = _continuous_source_now(source)
+        segment = TransferLaneSegment(
+            source_id=source.id, wave_id=item.wave_id, queue_item_id=item.id,
+            worker_slot=slot, started_at=segment_started_at,
+            entry_reason=item.decision_reason or "continuous lane dispatch",
+            nearest_expiry_at=item.restore_expires_at,
+        )
+        session.add(segment)
+        segments[item.id] = segment
+        mark_wave_worker(item.wave_id, 1)
+        bandwidth_plan.register(item.object_id, item.priority_score)
+        future = executor.submit(
+            transfer_object, s3, namespace, source.s3_bucket, source.destination_bucket,
+            item.object_id, rate, settings.preserve_s3_tags, multipart_part_size,
+            bandwidth_plan.rate_for,
+        )
+        futures[future] = (item.id, item.wave_id, slot, rate)
+        cycle_dispatched_items += 1
+
+    def settle(item_id: int, error: Exception | None) -> None:
+        session.expire_all()
+        item = session.get(TransferQueueItem, item_id)
+        if not item:
+            return
+        obj = session.get(ObjectRecord, item.object_id)
+        bandwidth_plan.unregister(item.object_id)
+        item.lease_token = item.lease_owner = None
+        item.lease_expires_at = None
+        segment = segments.get(item_id)
+        if segment:
+            segment.completed_at = _continuous_source_now(source)
+            segment.bytes_transferred = int(obj.size_bytes if error is None and obj else 0)
+        if error is None and obj and obj.state == ObjectState.TRANSFERRED:
+            item.state, item.transferred_at = TransferQueueState.TRANSFERRED, utcnow()
+            item.decision_reason = "OCI delivery accepted with cryptographic evidence"
+            if segment:
+                segment.exit_reason = "OCI delivery accepted with cryptographic evidence"
+        elif error and restored_object_is_unavailable(error):
+            wave = session.get(Wave, item.wave_id)
+            reason = f"restored copy unavailable: {type(error).__name__}: {error}"[:8000]
+            mark_restore_reapproval_required(session, item, reason)
+            _remember_transfer_error(item, item.decision_reason)
+            if segment:
+                segment.exit_reason = "restored copy unavailable; explicit new restore approval required"
+        else:
+            item.state = TransferQueueState.RETRY_WAIT
+            item.retry_at = utcnow() + timedelta(seconds=min(1800, 60 * max(1, int(item.attempts))))
+            item.decision_reason = f"retry after transfer error: {type(error).__name__ if error else 'incomplete'}: {error or ''}"[:8000]
+            _remember_transfer_error(item, item.decision_reason)
+            if obj and obj.state == ObjectState.TRANSFERRING:
+                obj.state = ObjectState.RESTORED
+            if segment:
+                segment.exit_reason = "transient transfer error; returned to retry queue"
+        if item.dispatch_batch_id:
+            batch = session.get(TransferDispatchBatch, item.dispatch_batch_id)
+            if batch:
+                remaining = session.scalar(select(func.count(TransferQueueItem.id)).where(
+                    TransferQueueItem.dispatch_batch_id == batch.id,
+                    TransferQueueItem.state == TransferQueueState.LEASED,
+                )) or 0
+                if not remaining:
+                    batch.state, batch.completed_at = "COMPLETED", utcnow()
+
+    def renew_lane_leases() -> None:
+        """Keep active and reserved handoff items recoverable, not stale."""
+        expiry = utcnow() + timedelta(seconds=int(settings.task_lease_seconds))
+        protected = [item_id for item_id, _, _, _ in futures.values()]
+        protected.extend(successor_id for successor_id, _slot in pending_handoffs.values())
+        if protected:
+            session.execute(
+                update(TransferQueueItem)
+                .where(
+                    TransferQueueItem.id.in_(protected),
+                    TransferQueueItem.state == TransferQueueState.LEASED,
+                )
+                .values(lease_expires_at=expiry)
+            )
+        task.lease_expires_at = expiry
+
+    def reserve_critical_handoff() -> bool:
+        """Reserve a critical item for the shortest safe running Raiju.
+
+        This is invoked while every active slot is occupied.  It is the
+        durable part of cooperative preemption: the normal object is not
+        interrupted, but its next slot is committed to the critical item.
+        """
+        if pending_handoffs or not futures:
+            return False
+        critical_priority = int(settings.continuous_transfer_critical_priority)
+        reserved = claim_continuous_transfer_batch(
+            session, source, settings, task, max_items=1,
+            minimum_priority=critical_priority,
+        )
+        if not reserved:
+            return False
+        critical_item = reserved[0]
+        target = choose_cooperative_preemption_target(
+            session,
+            source.id,
+            [item_id for item_id, _, _, _ in futures.values()],
+            critical_item,
+            critical_priority,
+        )
+        if target is None:
+            _return_unstarted_queue_items(
+                session, reserved,
+                "critical item remains ready; no safe Raiju handoff target is available",
+            )
+            return False
+        slot = next(
+            entry[2] for entry in futures.values() if entry[0] == target.id
+        )
+        # Claiming deliberately marks the object TRANSFERRING. It is not
+        # streaming yet, so return its inventory state to RESTORED while
+        # retaining the queue lease as the durable reservation fence.
+        critical_object = session.get(ObjectRecord, critical_item.object_id)
+        if critical_object and critical_object.state == ObjectState.TRANSFERRING:
+            critical_object.state = ObjectState.RESTORED
+        critical_item.decision_reason = (
+            f"critical cooperative handoff reserved for Raiju slot {slot} "
+            f"after normal item {target.id} reaches an object boundary"
+        )
+        pending_handoffs[target.id] = (critical_item.id, slot)
+        batch = session.get(TransferDispatchBatch, critical_item.dispatch_batch_id)
+        if batch:
+            batch.preempted_batch_id = target.dispatch_batch_id
+        event(
+            session,
+            "CONTINUOUS_TRANSFER_COOPERATIVE_PREEMPTION_RESERVED",
+            (
+                f"Raikou reserved critical item {critical_item.id} for Raiju slot {slot}; "
+                f"normal item {target.id} will finish without interruption before handoff."
+            ),
+            source_id=source.id,
+            wave_id=critical_item.wave_id,
+        )
+        return True
+
+    with ThreadPoolExecutor(max_workers=RAIJU_MAX_WORKERS, thread_name_prefix="raiju-lane") as executor:
+        if worker_shutdown_requested():
+            _return_unstarted_queue_items(session, active, "Raiju graceful shutdown before object execution")
+            task.state, task.lease_expires_at = TaskState.READY, None
+            task.available_at = utcnow()
+            task.error = "Raiju graceful shutdown before object execution"
+            event(session, "CONTINUOUS_TRANSFER_GRACEFUL_SHUTDOWN",
+                  "Raiju stopped before starting a new object; claimed work returned to the queue.",
+                  source_id=source.id, wave_id=anchor.id)
             session.commit()
             return
-
-        # A batch is a durable selection boundary, not a barrier.  Only the
-        # Raiju slots that can start immediately retain a lease; every other
-        # selected object goes back to READY so a newly-restored critical item
-        # can take the next free slot without interrupting active I/O.
-        # The first durable claim can contain only one object when its size
-        # already reaches the batch byte ceiling.  It must not make Raikou
-        # conclude that only one slot is useful while thousands of READY
-        # objects are still behind it in the same lane.
-        ready_after_initial_claim = _continuous_ready_item_count(session, source.id, utcnow())
-        global_ready_after_initial_claim = _continuous_global_ready_item_count(session, utcnow())
-        # ``initial`` was just moved from READY to LEASED.  It is already
-        # removed from the READY count, while ``live_leases`` was measured
-        # immediately before this claim.  Count the newly reserved entries
-        # explicitly; otherwise a one-object lane computes zero eligible
-        # work, returns its only item to READY, and endlessly recreates an
-        # empty dispatcher without ever starting Raiju I/O.
-        allocation = _continuous_raiju_worker_count(
-            session, source, live_leases + len(initial) + global_ready_after_initial_claim,
-            int(settings.max_throughput_mbps), settings=settings, details=True,
-        )
-        normal_concurrency = LaneConcurrencyController(
-            allocation["target"], min(RAIJU_MIN_WORKERS, live_leases + global_ready_after_initial_claim),
-            float(settings.max_throughput_mbps),
-            float(getattr(settings, "continuous_transfer_min_marginal_gain_mbps", 5) or 0),
-        )
-        normal_concurrency.restore(autoscale_state)
-        # A persisted target is evidence only after it has passed the current
-        # host/database ceiling. A restarted process cannot revive a formerly
-        # inflated target just because it was durable.
-        normal_concurrency.target = min(allocation["target"], allocation["effective_worker_cap"])
-        normal_concurrency.approved_target = min(
-            normal_concurrency.target, allocation["effective_worker_cap"]
-        )
-        # Some leases can belong to another source dispatcher.  This process
-        # may only fill capacity still available in the one physical lane.
-        worker_ceiling = max(0, allocation["target"] - max(0, live_leases - len(initial)))
-        # The isolated contract runtime may use SQLite for the Raijin control
-        # database. SQLite has one writer and cannot safely accept concurrent
-        # progress commits from several simulated Raijus. Serialize that
-        # specific test/development backend; deployed REAL and SIMULATION
-        # runtimes use PostgreSQL and retain the calculated concurrency.
-        serialized_simulation_sqlite = bool(
-            runtime_context.is_simulation
-            and session.get_bind().dialect.name == "sqlite"
-        )
-        if serialized_simulation_sqlite:
-            allocation = {
-                **allocation,
-                "target": 1,
-                "effective_worker_cap": 1,
-                "host_capacity_reason": (
-                    "Simulation SQLite uses one serialized writer; PostgreSQL and REAL "
-                    "backends retain the calculated concurrency"
-                ),
-                "reason": "Serialized Simulation SQLite execution",
-            }
-            normal_concurrency.target = 1
-            normal_concurrency.approved_target = 1
-            worker_ceiling = min(1, worker_ceiling)
-        for batch_id in {item.dispatch_batch_id for item in initial if item.dispatch_batch_id}:
-            batch = session.get(TransferDispatchBatch, batch_id)
-            record_allocation(batch, allocation)
-        active, deferred = initial[:worker_ceiling], initial[worker_ceiling:]
-        _return_unstarted_queue_items(session, deferred, "returned before execution; next priority evaluation")
-        # In SIMULATION, one bounded Raiju fill is the maximum clock-hold
-        # interval.  The previous endless replenishment loop could keep a
-        # source clock frozen for thousands of locally fast CONTROL calls.
-        # A one-object initial batch may however be caused solely by the
-        # byte ceiling, so permit enough subsequent one-object claims to fill
-        # the already selected capacity.  Every segment in that finite
-        # makespan has persisted destination evidence before virtual time is
-        # advanced; REAL keeps the original continuous replenishment behavior.
-        simulation_cycle_item_limit = (
-            1 if serialized_simulation_sqlite else
-            max(len(initial), worker_ceiling) if runtime_context.is_simulation else None
-        )
-        cycle_dispatched_items = 0
-        multipart_part_size = int(settings.multipart_part_size_mib) * 1024 * 1024
-        if runtime_context.is_real:
-            s3, _, _ = aws_clients(settings, source.aws_region, source)
-            namespace = read_oci_runtime_config().get("object_storage_namespace", "").strip()
-            if not namespace:
-                raise RuntimeError("OCI Object Storage namespace is absent from runtime configuration")
         else:
-            s3, namespace = None, "simulated"
-
-        # Future metadata carries the rate allocated when it was dispatched.
-        # This permits adaptive Raiju expansion at the next free slot while
-        # keeping the aggregate stream rate at or below the configured link.
-        futures: dict[object, tuple[int, int, int, float]] = {}
-        segments: dict[int, TransferLaneSegment] = {}
-        # CONTROL calls complete in milliseconds, but represent hours of WAN
-        # occupancy.  Keep a virtual availability cursor per Raiju slot so
-        # their persisted segments form the same bounded shared lane that a
-        # real transfer would occupy.  The source clock remains held while
-        # I/O is decided, then advances by the lane makespan below.
-        virtual_lane_origin = _continuous_source_now(source) if runtime_context.is_simulation else None
-        virtual_slot_available: dict[int, datetime] = {}
-        active_wave_counts: dict[int, int] = {}
-        # Several Raijus can observe the same deterministic outage in one
-        # dispatch cycle.  Advance the source clock once, by the longest
-        # recovery hint, rather than multiplying that outage by the number of
-        # parallel failures.
-        network_recovery_seconds = 0
-        # target item id -> (reserved critical item id, Raiju slot).  The
-        # successor is leased durably but is not submitted to the executor
-        # until the selected normal Raiju reaches its safe object boundary.
-        pending_handoffs: dict[int, tuple[int, int]] = {}
-        total_rate = float(settings.max_throughput_mbps) * 125000
-        bandwidth_plan = ContinuousBandwidthPlan(
-            total_rate, int(settings.continuous_transfer_critical_priority)
-        )
-        last_critical_objects: set[int] = set()
-
-        def apply_critical_concurrency(allocation: dict) -> dict:
-            """Apply one source-wide autoscale policy in normal or critical mode."""
-            critical = _continuous_critical_work_exists(
-                session, source.id, int(settings.continuous_transfer_critical_priority)
-            )
-            active_ids = [entry[0] for entry in futures.values()]
-            sample_now = utcnow()
-            observed_mbps, sample_is_new = _continuous_aggregate_rate_sample(
-                session, autoscale_state, active_ids, now=sample_now
-            )
-            global_active_workers = _continuous_global_leased_count(session)
-            available_objects = global_active_workers + _continuous_global_ready_item_count(session, utcnow())
-            # Refresh capacity on every admission decision; unlike the former
-            # implementation, the guard is an actual ceiling here.
-            capacity = _raiju_host_capacity(int(settings.multipart_part_size_mib) * 1024 * 1024)
-            effective_cap = min(available_objects, capacity.effective_cap)
-            operational_ceiling, ceiling_samples = _continuous_operational_ceiling_mbps(
-                session, float(settings.max_throughput_mbps), now=sample_now
-            )
-            target, reason = normal_concurrency.desired_workers(
-                available_objects, active_workers=global_active_workers, observed_mbps=observed_mbps,
-                sample_is_new=sample_is_new, effective_cap=effective_cap,
-                operational_ceiling_mbps=operational_ceiling, now=sample_now,
-            )
-            policy_reason = reason or (
-                "awaiting an independent aggregate-byte sample"
-                if not sample_is_new else "measured aggregate lane utilization is stable"
-            )
-            if critical:
-                policy_reason = f"critical expiry mode; {policy_reason}"
-            result = {
-                **allocation,
-                "target": target,
-                "active_workers": global_active_workers,
-                "observed_lane_mbps": observed_mbps,
-                "observed_per_raiju_mbps": observed_mbps / max(1, len(futures)),
-                "sample_is_new": sample_is_new,
-                "observed_at": sample_now if sample_is_new else None,
-                "marginal_gain_mbps": float(normal_concurrency.last_marginal_gain_mbps),
-                "host_capacity_factor": capacity.factor,
-                "host_capacity_reason": capacity.reason,
-                "effective_worker_cap": effective_cap,
-                "decision_ceiling_mbps": operational_ceiling,
-                "decision_ceiling_samples": ceiling_samples,
-                "reason": policy_reason,
-            }
-            if reason:
-                event(
-                    session, "CONTINUOUS_TRANSFER_LANE_CONCURRENCY_CHANGED",
-                    f"Raikou {policy_reason}; observed aggregate lane rate {observed_mbps:.2f} Mbps.",
-                    source_id=source.id,
-                    wave_id=anchor.id,
-                )
-            # The local dispatcher uses only capacity not already leased by a
-            # competing source. The persisted target remains the global lane
-            # target so the next fair source inherits the same controller.
-            result["local_target"] = max(0, target - max(0, global_active_workers - len(futures)))
-            normal_concurrency.persist(
-                autoscale_state, active_workers=global_active_workers, effective_cap=effective_cap,
-                observed_mbps=observed_mbps, sample_is_new=sample_is_new,
-                capacity_reason=capacity.reason,
-                reason=policy_reason,
-            )
-            return result
-
-        def active_critical_count() -> int:
-            item_ids = [entry[0] for entry in futures.values()]
-            if not item_ids:
-                return 0
-            return int(session.scalar(select(func.count(TransferQueueItem.id)).where(
-                TransferQueueItem.id.in_(item_ids),
-                TransferQueueItem.priority_score >= int(settings.continuous_transfer_critical_priority),
-            )) or 0)
-
-        def refresh_active_bandwidth_priorities() -> None:
-            """Promote in-flight objects when their remaining slack collapses."""
-            nonlocal last_critical_objects
-            current_critical: set[int] = set()
-            fair_rate = max(1.0, total_rate / max(1, len(futures)))
-            for item_id, _wave_id, _slot, _initial_rate in futures.values():
-                item = session.get(TransferQueueItem, item_id)
-                obj = session.get(ObjectRecord, item.object_id) if item else None
-                if not item or not obj:
-                    continue
-                remaining_bytes = max(0, int(obj.size_bytes) - int(obj.transfer_progress_bytes or 0))
-                # Classify every active item against the same fair-share
-                # baseline. Using the allocation being calculated here made
-                # criticality oscillate every heartbeat.
-                predicted = remaining_bytes / fair_rate
-                score, band, reason, details = transfer_priority(
-                    item.restore_expires_at, predicted, settings,
-                    now=_continuous_source_now(source), size_bytes=remaining_bytes,
-                    source_business_priority=source.business_priority,
-                )
-                item.priority_score, item.priority_band = score, band
-                item.predicted_transfer_seconds = predicted
-                item.priority_details_json = json.dumps(details, separators=(",", ":"))
-                item.decision_reason = reason
-                bandwidth_plan.update(obj.id, score)
-                if score >= bandwidth_plan.critical_priority:
-                    current_critical.add(obj.id)
-            if bool(current_critical) != bool(last_critical_objects):
-                if current_critical and not last_critical_objects:
-                    event(
-                        session,
-                        "CONTINUOUS_TRANSFER_BANDWIDTH_PRIORITIZED",
-                        f"Raikou assigned maximum viable lane priority to {len(current_critical)} expiring object(s); ordinary streams retain only the liveness floor.",
-                        source_id=source.id,
-                    )
-                elif last_critical_objects and not current_critical:
-                    event(
-                        session,
-                        "CONTINUOUS_TRANSFER_BANDWIDTH_NORMALIZED",
-                        "Raikou returned the lane to fair sharing after critical expiry risk cleared.",
-                        source_id=source.id,
-                    )
-            last_critical_objects = current_critical
-
-        def mark_wave_worker(wave_id: int, delta: int) -> None:
-            active_wave_counts[wave_id] = max(0, active_wave_counts.get(wave_id, 0) + delta)
-            wave = session.get(Wave, wave_id)
-            if wave:
-                wave.active_transfer_workers = active_wave_counts[wave_id]
-                if delta > 0 and runtime_context.is_simulation:
-                    wave.transfer_started_virtual_at = wave.transfer_started_virtual_at or _continuous_source_now(source)
-
-        def submit(executor, item: TransferQueueItem, slot: int, rate: float, active_workers: int) -> None:
-            nonlocal cycle_dispatched_items
-            item.last_dispatched_at = utcnow()
-            segment_started_at = (
-                virtual_slot_available.get(slot, virtual_lane_origin)
-                if runtime_context.is_simulation else _continuous_source_now(source)
-            )
-            segment = TransferLaneSegment(
-                source_id=source.id, wave_id=item.wave_id, queue_item_id=item.id,
-                worker_slot=slot, started_at=segment_started_at,
-                entry_reason=item.decision_reason or "continuous lane dispatch",
-                nearest_expiry_at=item.restore_expires_at,
-            )
-            session.add(segment)
-            segments[item.id] = segment
-            mark_wave_worker(item.wave_id, 1)
-            bandwidth_plan.register(item.object_id, item.priority_score)
-            if runtime_context.is_simulation:
-                future = executor.submit(
-                    transfer_object_simulated, item.object_id, rate, active_workers,
-                    multipart_part_size,
-                )
-            else:
-                future = executor.submit(
-                    transfer_object, s3, namespace, source.s3_bucket, source.destination_bucket,
-                    item.object_id, rate, settings.preserve_s3_tags, multipart_part_size,
-                    bandwidth_plan.rate_for,
-                )
-            futures[future] = (item.id, item.wave_id, slot, rate)
-            cycle_dispatched_items += 1
-
-        def simulation_cycle_has_capacity() -> bool:
-            return (
-                simulation_cycle_item_limit is None
-                or cycle_dispatched_items < simulation_cycle_item_limit
-            )
-
-        def settle(item_id: int, error: Exception | None) -> None:
-            nonlocal network_recovery_seconds
-            session.expire_all()
-            item = session.get(TransferQueueItem, item_id)
-            if not item:
-                return
-            obj = session.get(ObjectRecord, item.object_id)
-            bandwidth_plan.unregister(item.object_id)
-            item.lease_token = item.lease_owner = None
-            item.lease_expires_at = None
-            segment = segments.get(item_id)
-            if segment:
-                # CONTROL transfer calls return a logical duration while the
-                # worker itself completes in milliseconds.  Persist that
-                # duration on the lane segment instead of writing a zero-width
-                # interval; the board and adaptive scheduler must see the
-                # period the Raiju actually occupied in the virtual world.
-                logical_elapsed = float(obj.transfer_elapsed_seconds or 0) if obj else 0
-                if runtime_context.is_simulation and logical_elapsed > 0:
-                    segment.completed_at = _utc_timestamp(segment.started_at) + timedelta(seconds=logical_elapsed)
-                    virtual_slot_available[segment.worker_slot] = segment.completed_at
-                else:
-                    segment.completed_at = _continuous_source_now(source)
-                segment.bytes_transferred = int(obj.size_bytes if error is None and obj else 0)
-            if error is None and obj and obj.state == ObjectState.TRANSFERRED:
-                item.state, item.transferred_at = TransferQueueState.TRANSFERRED, utcnow()
-                item.decision_reason = "OCI delivery accepted with cryptographic evidence"
-                if segment:
-                    segment.exit_reason = "OCI delivery accepted with cryptographic evidence"
-            elif error and runtime_context.is_simulation and (retry_after := simulated_network_retry_after(error)) is not None:
-                network_recovery_seconds = max(network_recovery_seconds, retry_after)
-                item.state = TransferQueueState.RETRY_WAIT
-                # The virtual delay is advanced immediately below.  A tiny
-                # wall-clock delay yields the worker fairly without allowing
-                # a stopped virtual clock to pin the item forever.
-                item.retry_at = utcnow() + timedelta(seconds=1)
-                item.decision_reason = (
-                    "simulated network outage; awaiting durable virtual recovery "
-                    f"advance of {format_duration(retry_after)}"
-                )
-                _remember_transfer_error(item, item.decision_reason)
-                if obj and obj.state == ObjectState.TRANSFERRING:
-                    obj.state = ObjectState.RESTORED
-                if segment:
-                    segment.exit_reason = "simulated network outage; queued after virtual recovery advance"
-            elif error and restored_object_is_unavailable(error):
-                wave = session.get(Wave, item.wave_id)
-                if runtime_context.is_simulation and wave and not simulation_restore_expiry_confirmed(session, wave, source):
-                    # A simulator 409 before the locally observed expiry is a
-                    # contract violation, not a paid restore situation. Keep
-                    # the durable item retryable and expose the exact defect.
-                    item.state = TransferQueueState.RETRY_WAIT
-                    item.retry_at = utcnow() + timedelta(seconds=60)
-                    item.decision_reason = "SIMULATOR_RESTORE_STATE_MISMATCH: simulated object unavailable before observed restore expiry"
-                    _remember_transfer_error(item, item.decision_reason)
-                    if obj and obj.state == ObjectState.TRANSFERRING:
-                        obj.state = ObjectState.RESTORED
-                    if segment:
-                        segment.exit_reason = "simulator restore-state mismatch; retained for retry after backend correction"
-                    event(
-                        session,
-                        "SIMULATOR_RESTORE_STATE_MISMATCH",
-                        "Simulator reported an archived object unavailable before durable restore expiry; no new restore approval was requested.",
-                        source_id=source.id,
-                        wave_id=item.wave_id,
-                    )
-                    if item.dispatch_batch_id:
-                        batch = session.get(TransferDispatchBatch, item.dispatch_batch_id)
-                        if batch:
-                            batch.state, batch.completed_at = "COMPLETED", utcnow()
-                    return
-                reason = f"restored copy unavailable: {type(error).__name__}: {error}"[:8000]
-                mark_restore_reapproval_required(session, item, reason)
-                _remember_transfer_error(item, item.decision_reason)
-                if segment:
-                    segment.exit_reason = "restored copy unavailable; explicit new restore approval required"
-            else:
-                item.state = TransferQueueState.RETRY_WAIT
-                item.retry_at = utcnow() + timedelta(seconds=min(1800, 60 * max(1, int(item.attempts))))
-                item.decision_reason = f"retry after transfer error: {type(error).__name__ if error else 'incomplete'}: {error or ''}"[:8000]
-                _remember_transfer_error(item, item.decision_reason)
-                if obj and obj.state == ObjectState.TRANSFERRING:
-                    obj.state = ObjectState.RESTORED
-                if segment:
-                    segment.exit_reason = "transient transfer error; returned to retry queue"
-            if item.dispatch_batch_id:
-                batch = session.get(TransferDispatchBatch, item.dispatch_batch_id)
-                if batch:
-                    remaining = session.scalar(select(func.count(TransferQueueItem.id)).where(
-                        TransferQueueItem.dispatch_batch_id == batch.id,
-                        TransferQueueItem.state == TransferQueueState.LEASED,
-                    )) or 0
-                    if not remaining:
-                        batch.state, batch.completed_at = "COMPLETED", utcnow()
-
-        def renew_lane_leases() -> None:
-            """Keep active and reserved handoff items recoverable, not stale."""
-            expiry = utcnow() + timedelta(seconds=int(settings.task_lease_seconds))
-            protected = [item_id for item_id, _, _, _ in futures.values()]
-            protected.extend(successor_id for successor_id, _slot in pending_handoffs.values())
-            if protected:
-                session.execute(
-                    update(TransferQueueItem)
-                    .where(
-                        TransferQueueItem.id.in_(protected),
-                        TransferQueueItem.state == TransferQueueState.LEASED,
-                    )
-                    .values(lease_expires_at=expiry)
-                )
-            task.lease_expires_at = expiry
-
-        def reserve_critical_handoff() -> bool:
-            """Reserve a critical item for the shortest safe running Raiju.
-
-            This is invoked while every active slot is occupied.  It is the
-            durable part of cooperative preemption: the normal object is not
-            interrupted, but its next slot is committed to the critical item.
-            """
-            if pending_handoffs or not futures:
-                return False
-            critical_priority = int(settings.continuous_transfer_critical_priority)
-            reserved = claim_continuous_transfer_batch(
-                session, source, settings, task, max_items=1,
-                minimum_priority=critical_priority,
-            )
-            if not reserved:
-                return False
-            critical_item = reserved[0]
-            target = choose_cooperative_preemption_target(
-                session,
-                source.id,
-                [item_id for item_id, _, _, _ in futures.values()],
-                critical_item,
-                critical_priority,
-            )
-            if target is None:
-                _return_unstarted_queue_items(
-                    session, reserved,
-                    "critical item remains ready; no safe Raiju handoff target is available",
-                )
-                return False
-            slot = next(
-                entry[2] for entry in futures.values() if entry[0] == target.id
-            )
-            # Claiming deliberately marks the object TRANSFERRING. It is not
-            # streaming yet, so return its inventory state to RESTORED while
-            # retaining the queue lease as the durable reservation fence.
-            critical_object = session.get(ObjectRecord, critical_item.object_id)
-            if critical_object and critical_object.state == ObjectState.TRANSFERRING:
-                critical_object.state = ObjectState.RESTORED
-            critical_item.decision_reason = (
-                f"critical cooperative handoff reserved for Raiju slot {slot} "
-                f"after normal item {target.id} reaches an object boundary"
-            )
-            pending_handoffs[target.id] = (critical_item.id, slot)
-            batch = session.get(TransferDispatchBatch, critical_item.dispatch_batch_id)
-            if batch:
-                batch.preempted_batch_id = target.dispatch_batch_id
-            event(
-                session,
-                "CONTINUOUS_TRANSFER_COOPERATIVE_PREEMPTION_RESERVED",
-                (
-                    f"Raikou reserved critical item {critical_item.id} for Raiju slot {slot}; "
-                    f"normal item {target.id} will finish without interruption before handoff."
-                ),
-                source_id=source.id,
-                wave_id=critical_item.wave_id,
-            )
-            return True
-
-        with ThreadPoolExecutor(max_workers=RAIJU_MAX_WORKERS, thread_name_prefix="raiju-lane") as executor:
-            if worker_shutdown_requested():
-                _return_unstarted_queue_items(session, active, "Raiju graceful shutdown before object execution")
-                task.state, task.lease_expires_at = TaskState.READY, None
-                task.available_at = utcnow()
-                task.error = "Raiju graceful shutdown before object execution"
-                event(session, "CONTINUOUS_TRANSFER_GRACEFUL_SHUTDOWN",
-                      "Raiju stopped before starting a new object; claimed work returned to the queue.",
-                      source_id=source.id, wave_id=anchor.id)
-                session.commit()
-                return
-            else:
-                for slot, item in enumerate(active, start=1):
-                    rate = _continuous_new_stream_rate(total_rate, worker_ceiling)
-                    submit(executor, item, slot, rate, worker_ceiling)
-            session.commit()
-            while futures:
-                # Do not wait indefinitely for a large object: newly restored
-                # critical work must be able to reserve a safe future slot and
-                # spare Raiju capacity must be filled without waiting for an
-                # unrelated transfer to finish.
-                done, _ = wait(tuple(futures), timeout=5, return_when=FIRST_COMPLETED)
-                if not done:
-                    if worker_shutdown_requested():
-                        renew_lane_leases()
-                        session.commit()
-                        continue
-                    stalled_item_ids = stalled_transfer_future_item_ids(
-                        session, [entry[0] for entry in futures.values()]
-                    )
-                    if stalled_item_ids:
-                        event(
-                            session,
-                            "CONTINUOUS_TRANSFER_PROCESS_RECYCLE_REQUIRED",
-                            (
-                                "Raiju detected executor-owned transfer(s) without a durable "
-                                f"checkpoint for {format_duration(TRANSFER_FUTURE_STALL_SECONDS)}: "
-                                + ", ".join(str(item_id) for item_id in stalled_item_ids)
-                                + ". The process will restart and recover their multipart checkpoints."
-                            ),
-                            source_id=source.id,
-                            wave_id=anchor.id,
-                        )
-                        session.commit()
-                        # ThreadPoolExecutor cannot interrupt a blocked SDK
-                        # call and its context manager would wait forever.
-                        # Exit the worker process; the container restart policy
-                        # provides the safe cancellation boundary.
-                        os._exit(70)
-                    refresh_transfer_queue_priorities(session, source.id, now=_continuous_source_now(source))
-                    refresh_active_bandwidth_priorities()
-                    ready_count = _continuous_ready_item_count(session, source.id, utcnow())
-                    allocation = _continuous_raiju_worker_count(
-                        session, source, len(futures) + ready_count, int(settings.max_throughput_mbps), settings=settings
-                        , details=True
-                    )
-                    allocation = apply_critical_concurrency(allocation)
-                    desired_workers = allocation.get("local_target", allocation["target"])
-                    occupied_slots = {entry[2] for entry in futures.values()}
-                    free_slots = [slot for slot in range(1, desired_workers + 1) if slot not in occupied_slots]
-                    # Finish the cohort already admitted by Raikou, but do
-                    # not let one source replenish forever while another has
-                    # durable eligible work. A competing source never blocks
-                    # free slots before this cohort is full.
-                    if global_lane_should_yield_after_fill(
-                            session, source.id, cycle_dispatched_items,
-                            desired_workers, active_workers=len(futures)):
-                        free_slots = []
-                    # Prefer ordinary immediate admission when capacity exists.
-                    for slot in free_slots:
-                        if not simulation_cycle_has_capacity():
-                            break
-                        replacement = claim_continuous_transfer_batch(session, source, settings, task, max_items=1)
-                        if not replacement:
-                            break
-                        item = replacement[0]
-                        record_allocation(session.get(TransferDispatchBatch, item.dispatch_batch_id), allocation)
-                        occupied_rates = [entry[3] for entry in futures.values()]
-                        rate = _continuous_new_stream_rate(total_rate, desired_workers, occupied_rates)
-                        submit(executor, item, slot, rate, max(desired_workers, len(futures) + 1))
-                    if (not free_slots and simulation_cycle_has_capacity()
-                            and active_critical_count() == 0):
-                        reserve_critical_handoff()
+            for slot, item in enumerate(active, start=1):
+                rate = _continuous_new_stream_rate(total_rate, worker_ceiling)
+                submit(executor, item, slot, rate, worker_ceiling)
+        session.commit()
+        while futures:
+            # Do not wait indefinitely for a large object: newly restored
+            # critical work must be able to reserve a safe future slot and
+            # spare Raiju capacity must be filled without waiting for an
+            # unrelated transfer to finish.
+            done, _ = wait(tuple(futures), timeout=5, return_when=FIRST_COMPLETED)
+            if not done:
+                if worker_shutdown_requested():
                     renew_lane_leases()
                     session.commit()
                     continue
-                released_slots: list[int] = []
-                handoff_starts: list[tuple[int, int]] = []
-                for future in done:
-                    item_id, wave_id, slot, _rate = futures.pop(future)
-                    try:
-                        error = None
-                        future.result()
-                    except Exception as caught:
-                        error = caught
-                    settle(item_id, error)
-                    mark_wave_worker(wave_id, -1)
-                    released_slots.append(slot)
-                    successor = pending_handoffs.pop(item_id, None)
-                    if successor is not None:
-                        handoff_starts.append(successor)
-                if network_recovery_seconds:
-                    advance_simulation_clock(
-                        session, source, network_recovery_seconds,
-                        "simulated network outage recovery", anchor,
-                    )
+                stalled_item_ids = stalled_transfer_future_item_ids(
+                    session, [entry[0] for entry in futures.values()]
+                )
+                if stalled_item_ids:
                     event(
                         session,
-                        "SIMULATED_NETWORK_RECOVERY_ADVANCED",
+                        "CONTINUOUS_TRANSFER_PROCESS_RECYCLE_REQUIRED",
                         (
-                            "Advanced the source virtual clock once by "
-                            f"{format_duration(network_recovery_seconds)} after a deterministic network outage."
+                            "Raiju detected executor-owned transfer(s) without a durable "
+                            f"checkpoint for {format_duration(TRANSFER_FUTURE_STALL_SECONDS)}: "
+                            + ", ".join(str(item_id) for item_id in stalled_item_ids)
+                            + ". The process will restart and recover their multipart checkpoints."
                         ),
                         source_id=source.id,
                         wave_id=anchor.id,
                     )
-                    network_recovery_seconds = 0
+                    session.commit()
+                    # ThreadPoolExecutor cannot interrupt a blocked SDK
+                    # call and its context manager would wait forever.
+                    # Exit the worker process; the container restart policy
+                    # provides the safe cancellation boundary.
+                    os._exit(70)
                 refresh_transfer_queue_priorities(session, source.id, now=_continuous_source_now(source))
                 refresh_active_bandwidth_priorities()
-                # REAL wall time is already authoritative here. Simulation
-                # closes waves only after its shared virtual lane clock is
-                # advanced at the end of the bounded cycle.
-                if runtime_context.is_real:
-                    reconcile_continuous_source_waves(session, source)
-                renew_lane_leases()
-                session.commit()
-
-                # All active transfer functions observe SIGTERM only at a
-                # safe object/part checkpoint.  Until they settle, retain
-                # their leases; afterwards return this dispatch task to the
-                # durable queue without admitting replacement work.
-                if worker_shutdown_requested():
-                    if futures:
-                        continue
-                    _return_unstarted_queue_items(
-                        session,
-                        [session.get(TransferQueueItem, successor_id)
-                         for successor_id, _slot in pending_handoffs.values()
-                         if session.get(TransferQueueItem, successor_id)],
-                        "Raiju graceful shutdown before reserved handoff",
-                    )
-                    pending_handoffs.clear()
-                    task.state, task.lease_expires_at = TaskState.READY, None
-                    task.available_at = utcnow()
-                    task.error = "Raiju graceful shutdown; durable checkpoints preserved"
-                    event(
-                        session,
-                        "CONTINUOUS_TRANSFER_GRACEFUL_SHUTDOWN",
-                        "Raiju stopped after durable object/part boundaries; no new transfer was admitted.",
-                        source_id=source.id,
-                        wave_id=anchor.id,
-                    )
-                    session.commit()
-                    return
-
-                # Re-evaluate Raiju capacity after every completed object.
-                # Existing streams retain their budget; only the remainder of
-                # the configured link is allocated to newly admitted slots.
-                # That makes expansion safe without interrupting an object or
-                # a multipart part already in progress.
                 ready_count = _continuous_ready_item_count(session, source.id, utcnow())
                 allocation = _continuous_raiju_worker_count(
                     session, source, len(futures) + ready_count, int(settings.max_throughput_mbps), settings=settings
@@ -4906,72 +3692,143 @@ def transfer_continuous(session, task: Task, settings) -> None:
                 )
                 allocation = apply_critical_concurrency(allocation)
                 desired_workers = allocation.get("local_target", allocation["target"])
-                # A reserved critical successor owns the selected normal
-                # Raiju's newly released slot. Start it first; this is the
-                # actual handoff rather than an advisory preemption event.
-                occupied_handoff_slots: set[int] = set()
-                for successor_id, slot in handoff_starts:
-                    if not simulation_cycle_has_capacity():
-                        break
-                    successor = session.get(TransferQueueItem, successor_id)
-                    if successor is None or successor.state != TransferQueueState.LEASED:
-                        continue
-                    batch = session.get(TransferDispatchBatch, successor.dispatch_batch_id)
-                    record_allocation(batch, {**allocation, "target": max(desired_workers, len(futures) + 1)})
-                    occupied_rates = [entry[3] for entry in futures.values()]
-                    rate = _continuous_new_stream_rate(total_rate, desired_workers, occupied_rates)
-                    submit(executor, successor, slot, rate, max(desired_workers, len(futures) + 1))
-                    occupied_handoff_slots.add(slot)
-                    event(
-                        session,
-                        "CONTINUOUS_TRANSFER_COOPERATIVE_PREEMPTION_EXECUTED",
-                        f"Raiju slot {slot} accepted reserved critical item {successor.id} after safe object boundary.",
-                        source_id=source.id,
-                        wave_id=successor.wave_id,
-                    )
-                free_slots = [slot for slot in released_slots if slot not in occupied_handoff_slots] + [
-                    slot for slot in range(1, RAIJU_MAX_WORKERS + 1)
-                    if slot not in {entry[2] for entry in futures.values()} and slot not in released_slots
-                ]
+                occupied_slots = {entry[2] for entry in futures.values()}
+                free_slots = [slot for slot in range(1, desired_workers + 1) if slot not in occupied_slots]
+                # Finish the cohort already admitted by Raikou, but do
+                # not let one source replenish forever while another has
+                # durable eligible work. A competing source never blocks
+                # free slots before this cohort is full.
                 if global_lane_should_yield_after_fill(
                         session, source.id, cycle_dispatched_items,
                         desired_workers, active_workers=len(futures)):
                     free_slots = []
-                starts = min(len(free_slots), max(0, desired_workers - len(futures)), ready_count)
-                for slot in free_slots[:starts]:
-                    if not simulation_cycle_has_capacity():
-                        break
+                # Prefer ordinary immediate admission when capacity exists.
+                for slot in free_slots:
                     replacement = claim_continuous_transfer_batch(session, source, settings, task, max_items=1)
                     if not replacement:
-                        continue
+                        break
                     item = replacement[0]
-                    batch = session.get(TransferDispatchBatch, item.dispatch_batch_id)
-                    record_allocation(batch, allocation)
-                    remaining_starts = max(1, starts - free_slots.index(slot))
+                    record_allocation(session.get(TransferDispatchBatch, item.dispatch_batch_id), allocation)
                     occupied_rates = [entry[3] for entry in futures.values()]
-                    rate = _continuous_new_stream_rate(
-                        total_rate, desired_workers, occupied_rates, remaining_starts
-                    )
-                    submit(executor, item, slot, rate, desired_workers)
-                    session.commit()
-        for wave_id in list(active_wave_counts):
-            wave = session.get(Wave, wave_id)
-            if wave:
-                wave.active_transfer_workers = 0
-        if runtime_context.is_simulation and virtual_lane_origin and virtual_slot_available:
-            virtual_lane_end = max(virtual_slot_available.values())
-            virtual_elapsed = max(0.0, (virtual_lane_end - virtual_lane_origin).total_seconds())
-            # Transfer consumes retention in Fujin exactly as it does on the
-            # WAN.  This replaces the former zero-time CONTROL illusion while
-            # still preventing wall-clock worker overhead from aging objects.
-            advance_simulation_clock(
-                session, source, virtual_elapsed,
-                "continuous transfer lane occupancy", anchor,
+                    rate = _continuous_new_stream_rate(total_rate, desired_workers, occupied_rates)
+                    submit(executor, item, slot, rate, max(desired_workers, len(futures) + 1))
+                if not free_slots and active_critical_count() == 0:
+                    reserve_critical_handoff()
+                renew_lane_leases()
+                session.commit()
+                continue
+            released_slots: list[int] = []
+            handoff_starts: list[tuple[int, int]] = []
+            for future in done:
+                item_id, wave_id, slot, _rate = futures.pop(future)
+                try:
+                    error = None
+                    future.result()
+                except Exception as caught:
+                    error = caught
+                settle(item_id, error)
+                mark_wave_worker(wave_id, -1)
+                released_slots.append(slot)
+                successor = pending_handoffs.pop(item_id, None)
+                if successor is not None:
+                    handoff_starts.append(successor)
+            refresh_transfer_queue_priorities(session, source.id, now=_continuous_source_now(source))
+            refresh_active_bandwidth_priorities()
+            reconcile_continuous_source_waves(session, source)
+            renew_lane_leases()
+            session.commit()
+
+            # All active transfer functions observe SIGTERM only at a
+            # safe object/part checkpoint.  Until they settle, retain
+            # their leases; afterwards return this dispatch task to the
+            # durable queue without admitting replacement work.
+            if worker_shutdown_requested():
+                if futures:
+                    continue
+                _return_unstarted_queue_items(
+                    session,
+                    [session.get(TransferQueueItem, successor_id)
+                     for successor_id, _slot in pending_handoffs.values()
+                     if session.get(TransferQueueItem, successor_id)],
+                    "Raiju graceful shutdown before reserved handoff",
+                )
+                pending_handoffs.clear()
+                task.state, task.lease_expires_at = TaskState.READY, None
+                task.available_at = utcnow()
+                task.error = "Raiju graceful shutdown; durable checkpoints preserved"
+                event(
+                    session,
+                    "CONTINUOUS_TRANSFER_GRACEFUL_SHUTDOWN",
+                    "Raiju stopped after durable object/part boundaries; no new transfer was admitted.",
+                    source_id=source.id,
+                    wave_id=anchor.id,
+                )
+                session.commit()
+                return
+
+            # Re-evaluate Raiju capacity after every completed object.
+            # Existing streams retain their budget; only the remainder of
+            # the configured link is allocated to newly admitted slots.
+            # That makes expansion safe without interrupting an object or
+            # a multipart part already in progress.
+            ready_count = _continuous_ready_item_count(session, source.id, utcnow())
+            allocation = _continuous_raiju_worker_count(
+                session, source, len(futures) + ready_count, int(settings.max_throughput_mbps), settings=settings
+                , details=True
             )
-        reconcile_continuous_source_waves(session, source)
-        refresh_transfer_queue_priorities(session, source.id, now=_continuous_source_now(source))
-        release_simulation_source_lane_holds_if_idle(session, source)
-        session.commit()
+            allocation = apply_critical_concurrency(allocation)
+            desired_workers = allocation.get("local_target", allocation["target"])
+            # A reserved critical successor owns the selected normal
+            # Raiju's newly released slot. Start it first; this is the
+            # actual handoff rather than an advisory preemption event.
+            occupied_handoff_slots: set[int] = set()
+            for successor_id, slot in handoff_starts:
+                successor = session.get(TransferQueueItem, successor_id)
+                if successor is None or successor.state != TransferQueueState.LEASED:
+                    continue
+                batch = session.get(TransferDispatchBatch, successor.dispatch_batch_id)
+                record_allocation(batch, {**allocation, "target": max(desired_workers, len(futures) + 1)})
+                occupied_rates = [entry[3] for entry in futures.values()]
+                rate = _continuous_new_stream_rate(total_rate, desired_workers, occupied_rates)
+                submit(executor, successor, slot, rate, max(desired_workers, len(futures) + 1))
+                occupied_handoff_slots.add(slot)
+                event(
+                    session,
+                    "CONTINUOUS_TRANSFER_COOPERATIVE_PREEMPTION_EXECUTED",
+                    f"Raiju slot {slot} accepted reserved critical item {successor.id} after safe object boundary.",
+                    source_id=source.id,
+                    wave_id=successor.wave_id,
+                )
+            free_slots = [slot for slot in released_slots if slot not in occupied_handoff_slots] + [
+                slot for slot in range(1, RAIJU_MAX_WORKERS + 1)
+                if slot not in {entry[2] for entry in futures.values()} and slot not in released_slots
+            ]
+            if global_lane_should_yield_after_fill(
+                    session, source.id, cycle_dispatched_items,
+                    desired_workers, active_workers=len(futures)):
+                free_slots = []
+            starts = min(len(free_slots), max(0, desired_workers - len(futures)), ready_count)
+            for slot in free_slots[:starts]:
+                replacement = claim_continuous_transfer_batch(session, source, settings, task, max_items=1)
+                if not replacement:
+                    continue
+                item = replacement[0]
+                batch = session.get(TransferDispatchBatch, item.dispatch_batch_id)
+                record_allocation(batch, allocation)
+                remaining_starts = max(1, starts - free_slots.index(slot))
+                occupied_rates = [entry[3] for entry in futures.values()]
+                rate = _continuous_new_stream_rate(
+                    total_rate, desired_workers, occupied_rates, remaining_starts
+                )
+                submit(executor, item, slot, rate, desired_workers)
+                session.commit()
+    for wave_id in list(active_wave_counts):
+        wave = session.get(Wave, wave_id)
+        if wave:
+            wave.active_transfer_workers = 0
+    reconcile_continuous_source_waves(session, source)
+    refresh_transfer_queue_priorities(session, source.id, now=_continuous_source_now(source))
+    session.commit()
     # Mark this dispatch cycle complete *before* asking Raikou for the next
     # one; a new durable task is then immediately eligible if backlog exists.
     succeed(session, task)
@@ -4991,9 +3848,6 @@ def verify_wave(session, task: Task) -> None:
     """Read OCI objects and compare them to the SHA-256 evidence from S3."""
     wave = session.get(Wave, task.wave_id)
     source = wave.source
-    if runtime_context.is_simulation:
-        verify_wave_simulated(session, task, wave, source)
-        return
     namespace = read_oci_runtime_config().get("object_storage_namespace", "").strip()
     if not namespace:
         raise RuntimeError("OCI Object Storage namespace is absent from runtime configuration")
@@ -5085,113 +3939,6 @@ def verify_wave(session, task: Task) -> None:
     succeed(session, task)
 
 
-def verify_wave_simulated(session, task: Task, wave: Wave, source: Source) -> None:
-    """Deep-audit discarded destination payload using deterministic replay."""
-    if source.simulation_fidelity != "DATA":
-        raise RuntimeError(
-            "Deep SHA-256 audit requires a DATA simulation; CONTROL validates logical state only"
-        )
-    context = simulation_execution_context(source)
-    source_port = SimulatedSourcePort(runtime_context.simulator_base_url)
-    destination_port = SimulatedDestinationPort(runtime_context.simulator_base_url)
-    objects = list(
-        session.scalars(
-            select(ObjectRecord)
-            .where(
-                ObjectRecord.wave_id == wave.id,
-                ObjectRecord.state == ObjectState.TRANSFERRED,
-            )
-            .order_by(ObjectRecord.id)
-        )
-    )
-    failed = 0
-    for obj in objects:
-        if worker_shutdown_requested():
-            raise GracefulWorkerShutdown(
-                "Raikou shutdown requested before the next simulated Deep Audit object"
-            )
-        obj.audit_started_at, obj.audit_progress_bytes = utcnow(), 0
-        obj.audit_progress_at, obj.audit_rate_mbps = utcnow(), 0
-        session.commit()
-        source_digest, destination_digest = hashlib.sha256(), hashlib.sha256()
-        try:
-            for offset in range(0, obj.size_bytes, COPY_CHUNK_SIZE):
-                if worker_shutdown_requested():
-                    raise GracefulWorkerShutdown(
-                        "Raikou shutdown requested at a simulated Deep Audit read boundary"
-                    )
-                length = min(COPY_CHUNK_SIZE, obj.size_bytes - offset)
-                source_request = ReadRangeRequest(
-                    context=context,
-                    object=ObjectIdentity(
-                        bucket=source.s3_bucket,
-                        key=obj.object_key,
-                        version_id=obj.version_id,
-                    ),
-                    offset=offset,
-                    length=length,
-                    allow_archived_for_audit=True,
-                )
-                destination_request = ReadRangeRequest(
-                    context=context,
-                    object=ObjectIdentity(
-                        bucket=source.destination_bucket,
-                        key=object_destination_key(obj),
-                        version_id=obj.version_id,
-                    ),
-                    offset=offset,
-                    length=length,
-                )
-                source_payload = b"".join(source_port.read_range(source_request))
-                destination_payload = b"".join(
-                    destination_port.read_range(destination_request)
-                )
-                if len(source_payload) != length or len(destination_payload) != length:
-                    raise RuntimeError("Simulated audit range ended early")
-                source_digest.update(source_payload)
-                destination_digest.update(destination_payload)
-                obj.audit_progress_bytes = offset + length
-                obj.audit_progress_at = utcnow()
-                session.commit()
-            obj.source_checksum = base64.b64encode(source_digest.digest()).decode("ascii")
-            obj.destination_checksum = base64.b64encode(
-                destination_digest.digest()
-            ).decode("ascii")
-            if obj.source_checksum != obj.destination_checksum:
-                raise RuntimeError("SHA-256 source/destination mismatch")
-            obj.integrity_error = None
-            obj.integrity_verified_at = utcnow()
-            obj.state = ObjectState.VERIFIED
-        except GracefulWorkerShutdown:
-            obj.audit_progress_at, obj.audit_rate_mbps = utcnow(), 0
-            session.commit()
-            raise
-        except Exception as error:
-            obj.integrity_error = f"Simulated deep audit failed: {type(error).__name__}: {error}"
-            obj.state = ObjectState.FAILED
-            failed += 1
-        obj.audit_progress_at, obj.audit_rate_mbps = utcnow(), 0
-        session.commit()
-    remaining = int(
-        session.scalar(
-            select(func.count(ObjectRecord.id)).where(
-                ObjectRecord.wave_id == wave.id,
-                ObjectRecord.state != ObjectState.VERIFIED,
-            )
-        )
-        or 0
-    )
-    wave.status = "VERIFIED" if not remaining else "VERIFICATION_FAILED"
-    event(
-        session,
-        "SIMULATED_INTEGRITY_VERIFICATION_COMPLETED",
-        f"SIMULATED deep audit completed; {failed} failed and {remaining} remain pending",
-        source_id=source.id,
-        wave_id=wave.id,
-    )
-    succeed(session, task)
-
-
 def task_kinds_for_role(role: str) -> frozenset[str] | None:
     if role == "raikou-shin":
         # The controller plans and releases durable work but never owns a
@@ -5215,36 +3962,11 @@ def task_kinds_for_role(role: str) -> frozenset[str] | None:
 
 
 def worker_loop_sleep_seconds(role: str = WORKER_ROLE) -> float:
-    """Keep simulation responsive without turning an idle worker into DB spin.
-
-    A ready simulated task is checked once per second.  With no due task, the
-    normal five-second idle cadence is retained.  REAL workers always retain
-    their established cadence; AWS polling schedules are unchanged.
-    """
-    if not runtime_context.is_simulation:
-        return 5.0
-    allowed_kinds = task_kinds_for_role(role)
-    with SessionLocal() as session:
-        due = (Task.state == TaskState.READY) & (Task.available_at <= utcnow() + timedelta(seconds=1))
-        query = select(Task.id).join(Wave).join(Source).outerjoin(
-            MigrationProject, Source.migration_project_id == MigrationProject.id
-        ).where(
-            due, Wave.status != "PAUSED", Source.archived_at.is_(None),
-            or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"),
-        )
-        if allowed_kinds is not None:
-            query = query.where(Task.kind.in_(allowed_kinds))
-        return 1.0 if session.scalar(query.limit(1)) is not None else 5.0
+    """Use a stable idle cadence for the production workers."""
+    return 5.0
 
 
 def run_once(role: str = WORKER_ROLE) -> None:
-    from app.runtime_context import mode_switch_requested
-    if mode_switch_requested():
-        return
-    if runtime_context.is_simulation:
-        # Fail before touching the isolated control-plane schema unless the
-        # simulator contract and all currently advertised operations are live.
-        cloud_backend.readiness(require_operations=True)
     with SessionLocal() as session:
         settings = runtime_settings(session)
         allowed_task_kinds = task_kinds_for_role(role)
@@ -5260,21 +3982,13 @@ def run_once(role: str = WORKER_ROLE) -> None:
             if reconciled:
                 session.commit()
         if role in RAIKOU_CONTROLLER_ROLES:
-            if runtime_context.is_simulation:
-                # Stop any clock created by an earlier release before planner
-                # work can observe it. New releases create paused clocks, but
-                # this safely migrates active scenarios without resetting
-                # their virtual timeline.
-                synchronize_simulation_source_clocks(session)
-                session.commit()
             # Sources archived by an earlier release can still have READY
             # polling tasks. Reconcile them before any planner/claim action.
             if reconcile_archived_source_work(session):
                 session.commit()
             # A source can have no queued dispatcher precisely because its
             # final remaining object is an expired lease. Sweep that durable
-            # state before the planner so it cannot keep the lane and the
-            # simulator clock held indefinitely.
+            # state before the planner so it cannot keep the lane blocked.
             if recover_expired_continuous_lane_leases(session, settings):
                 session.commit()
             # Reconcile all non-archived sources even when their continuous
@@ -5286,8 +4000,7 @@ def run_once(role: str = WORKER_ROLE) -> None:
                 MigrationProject, Source.migration_project_id == MigrationProject.id
             ).where(Source.archived_at.is_(None), or_(MigrationProject.id.is_(None), MigrationProject.status != "PAUSED"))):
                 reconcile_continuous_source_waves(session, source)
-            if runtime_context.is_real:
-                refresh_due_global_aws_pricing(session)
+            refresh_due_global_aws_pricing(session)
             replan_dynamic_pipeline(session, settings)
             for run in session.scalars(select(DynamicPipelineRun).join(Source).outerjoin(
                 MigrationProject, Source.migration_project_id == MigrationProject.id
@@ -5365,23 +4078,8 @@ def run_once(role: str = WORKER_ROLE) -> None:
                 discovery_job.state, discovery_job.error, discovery_job.lease_expires_at, discovery_job.completed_at = TaskState.FAILED, source.discovery_error, None, finished_at
                 event(session, "DISCOVERY_FAILED", source.discovery_error, source_id=source.id); session.commit()
             return
-        if runtime_context.is_simulation:
-            simulation_kinds = frozenset(
-                {"SUBMIT_BATCH_RESTORE", "POLL_RESTORE", "TRANSFER_CONTINUOUS", "VERIFY_WAVE"}
-            )
-            allowed_task_kinds = (
-                simulation_kinds
-                if allowed_task_kinds is None
-                else frozenset(allowed_task_kinds & simulation_kinds)
-            )
-        if runtime_context.is_simulation and role in RAIKOU_CONTROLLER_ROLES:
-            synchronize_simulation_source_clocks(session)
-            session.commit()
         task = claim_task(session, settings.task_lease_seconds, allowed_task_kinds)
         if not task:
-            if runtime_context.is_simulation and role in RAIKOU_CONTROLLER_ROLES:
-                synchronize_simulation_source_clocks(session)
-                session.commit()
             return
         try:
             if task.kind == "SUBMIT_BATCH_RESTORE": submit_restore(session, task, settings)
@@ -5404,18 +4102,9 @@ def run_once(role: str = WORKER_ROLE) -> None:
         except Exception as error:
             disposition, summary = classify_task_error(error)
             if disposition == "retry":
-                retry(
-                    session,
-                    task,
-                    summary,
-                    seconds=1 if isinstance(error, SimulatedNetworkRecoveryPending) else None,
-                )
+                retry(session, task, summary)
             else:
                 fail_permanently(session, task, summary)
-        finally:
-            if runtime_context.is_simulation and role in RAIKOU_CONTROLLER_ROLES:
-                synchronize_simulation_source_clocks(session)
-                session.commit()
 
 
 if __name__ == "__main__":

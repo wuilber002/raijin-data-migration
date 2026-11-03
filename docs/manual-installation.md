@@ -2,7 +2,7 @@
 
 O instalador manual cria uma instalação limpa de **Raijin Data Migration** sem
 Terraform. Ele instala apenas a topologia de produção: PostgreSQL, API,
-Raikō::Shin, Raikō::Sei, Raikō::Kō, Raikō::Kai e Raiju. Fujin é um produto
+Raikō::Shin, Raikō::Sei, Raikō::Kō, Raikō::Kai e Raiju. separado é um produto
 separado e nunca é iniciado, atualizado ou parado por este procedimento.
 
 ## Pré-requisitos
@@ -41,5 +41,5 @@ com o namespace `raijin-data-migration`; isso inclui o banco local e seus
 backups. Preserve-os antes de usar essa opção.
 
 Depois da instalação, configure conexões AWS e OCI pela console. Para usar um
-Fujin de laboratório, cadastre seus endpoints privados como conexões AWS/OCI
-normais; não há perfil, volume nem processo Fujin dentro da instalação Raijin.
+separado de operação, cadastre seus endpoints privados como conexões AWS/OCI
+normais; não há perfil, volume nem processo separado dentro da instalação Raijin.
