@@ -1,4 +1,4 @@
-"""AWS S3 archive-restore time semantics shared by Fujin backends."""
+"""AWS S3 archive-restore time semantics used by Raijin."""
 
 from __future__ import annotations
 

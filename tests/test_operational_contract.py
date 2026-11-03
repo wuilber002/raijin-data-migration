@@ -24,11 +24,10 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 
 from datetime import datetime, timedelta, timezone
 
-from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MigrationProject, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, ProjectClosureIssueRequest, ProjectClosureReport, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, deep_audits, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, issue_project_closure_report, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, project_closure_readiness, project_closure_snapshot, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, repair_completed_deep_audit_statuses, replan_dynamic_pipeline, reprocess_preview, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, simulated_destination_provenance_matches, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, pause_deep_audit_queue, resume_deep_audit_queue, transfer_queue, wave_cost_estimate
+from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MigrationProject, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, ProjectClosureIssueRequest, ProjectClosureReport, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, deep_audits, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, issue_project_closure_report, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, project_closure_readiness, project_closure_snapshot, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, repair_completed_deep_audit_statuses, replan_dynamic_pipeline, reprocess_preview, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, pause_deep_audit_queue, resume_deep_audit_queue, transfer_queue, wave_cost_estimate
 from app.main import ConsolePresence, ConsolePresenceHeartbeat, console_presence_heartbeat
 from app.closure_report import build_artifacts, canonical_json, safe_csv_cell, sha256
-from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, RAIKOU_AUDIT_TASK_KINDS, RAIKOU_RESTORE_TASK_KINDS, RAIKOU_TASK_KINDS, TRANSFER_TASK_KINDS, SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, simulated_network_retry_after, simulation_restore_poll_clock_leader, simulation_source_lane_has_committed_work, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
-from app.simulator_ports import SimulatorTransportError
+from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, RAIKOU_AUDIT_TASK_KINDS, RAIKOU_RESTORE_TASK_KINDS, RAIKOU_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
 from app import real_worker
 from app.runtime_context import OperationMode, RuntimeContext
 
@@ -254,16 +253,7 @@ def test_migration_project_name_can_be_corrected_without_changing_its_identity()
         assert result["name"] == "Customer migration"
 
 
-@pytest.mark.parametrize(
-    ("mode", "expected_backup", "simulator_visible"),
-    [
-        (OperationMode.REAL, "/backups/migration-20260908.dump", False),
-        (OperationMode.SIMULATION, "/backups/migration-simulation-20260908.dump", True),
-    ],
-)
-def test_platform_status_exposes_only_the_active_runtime_domain(
-    tmp_path, monkeypatch, mode, expected_backup, simulator_visible
-):
+def test_platform_status_exposes_the_real_runtime_domain(tmp_path, monkeypatch):
     import json
     import app.main as main
 
@@ -281,26 +271,22 @@ def test_platform_status_exposes_only_the_active_runtime_domain(
             "raikou_ko_worker": "running",
             "raikou_kai_worker": "running",
             "transfer_worker": "running",
-            "simulator_container": "running",
             "postgres_backup_timer": "active",
             "platform_status_timer": "active",
         },
         "last_postgres_backups": {
             "REAL": {"path": "/backups/migration-20260908.dump"},
-            "SIMULATION": {"path": "/backups/migration-simulation-20260908.dump"},
         },
     }), encoding="utf-8")
     monkeypatch.setattr(main, "platform_status_file", str(snapshot))
     monkeypatch.setattr(main, "utcnow", lambda: generated_at)
-    monkeypatch.setattr(main, "runtime_context", RuntimeContext(
-        mode, "sqlite+pysqlite:///:memory:", "http://fujin" if mode is OperationMode.SIMULATION else None
-    ))
+    monkeypatch.setattr(main, "runtime_context", RuntimeContext(OperationMode.REAL, "sqlite+pysqlite:///:memory:"))
 
     result = main.platform_status()
 
-    assert result["operation_mode"] == mode.value
-    assert result["last_postgres_backup"]["path"] == expected_backup
-    assert ("simulator_container" in result["services"]) is simulator_visible
+    assert result["operation_mode"] == OperationMode.REAL.value
+    assert result["last_postgres_backup"]["path"] == "/backups/migration-20260908.dump"
+    assert "simulator_container" not in result["services"]
     assert "migration_systemd" not in result["services"]
     assert result["stale"] is False
     assert result["age_seconds"] == 60
@@ -411,42 +397,6 @@ def test_source_list_exposes_frozen_s3_transfer_endpoint_mode():
         session.add(source)
         session.commit()
         assert list_sources(session=session)[0]["s3_transfer_endpoint_mode"] == "PRIVATE"
-
-
-def test_transfer_queue_keeps_virtual_availability_separate_from_lease_clock():
-    assert "available_virtual_at" in TransferQueueItem.__table__.columns
-
-
-def test_simulated_network_retry_hint_is_parsed_for_a_single_virtual_advance():
-    outage = SimulatorTransportError(
-        'Simulator request failed: /v1/cloud/destination/logical-transfer: HTTP 503: '
-        '{"detail":{"code":"SIMULATED_NETWORK_UNAVAILABLE",'
-        '"retry_after_virtual_seconds":3563}}'
-    )
-    assert simulated_network_retry_after(outage) == 3563
-    assert simulated_network_retry_after(SimulatorTransportError("HTTP 503: unavailable")) is None
-
-
-def test_restore_forecast_uses_the_documented_bulk_reference_not_fujin_precision(monkeypatch):
-    import app.main as main
-    source = Source(name="forecast", s3_bucket="source", aws_region="us-east-1",
-                    destination_bucket="destination", backend_kind="SIMULATED")
-    monkeypatch.setattr(main, "_fujin_restore_profile", lambda _source: {
-        "bulk_restore_min_hours": 30, "bulk_restore_max_hours": 36,
-    })
-    first, complete = restore_forecast_seconds("BULK", source=source, object_count=2)
-    assert (first, complete) == (48 * 3600, 48 * 3600)
-
-
-def test_restore_forecast_is_not_rewritten_by_a_fujin_profile(monkeypatch):
-    import app.main as main
-    source = Source(name="forecast-tolerance", s3_bucket="source", aws_region="us-east-1",
-                    destination_bucket="destination", backend_kind="SIMULATED")
-    monkeypatch.setattr(main, "_fujin_restore_profile", lambda _source: {
-        "bulk_restore_min_hours": 30, "bulk_restore_max_hours": 36,
-    })
-    first, complete = restore_forecast_seconds("BULK", source=source, object_count=100)
-    assert (first, complete) == (48 * 3600, 48 * 3600)
 
 
 def test_bulk_restore_fallback_is_48_hours():
@@ -979,42 +929,6 @@ def test_real_aws_clients_use_refreshable_assume_role_credentials():
     assert 'method="sts-assume-role"' in function
     assert 'DurationSeconds=3600' in function
     assert "boto3.Session(botocore_session=botocore_session)" in function
-
-
-def test_runtime_clock_reports_simulator_timeout_without_a_500(monkeypatch):
-    """A busy Fujin must not break the browser heartbeat."""
-    import app.main as main
-    from app.runtime_context import OperationMode, RuntimeContext
-
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    with Session() as session:
-        source = Source(name="clock-timeout", s3_bucket="source", aws_region="us-east-1",
-                        destination_bucket="destination", backend_kind="SIMULATED",
-                        simulation_execution_id="execution")
-        session.add(source); session.flush()
-        monkeypatch.setattr(main, "runtime_context", RuntimeContext(
-            OperationMode.SIMULATION, "sqlite+pysqlite:///:memory:", "http://fujin"
-        ))
-        monkeypatch.setattr(main, "source_scheduler_clock", lambda _source: (_ for _ in ()).throw(TimeoutError()))
-        response = main.runtime_clock(source_id=source.id, session=session)
-    assert response["clock_available"] is False
-    assert response["virtual_now"] is None
-
-
-def test_simulated_destination_provenance_accepts_quoted_contract_etag():
-    class Descriptor:
-        etag = '"sim-content-identity"'
-        metadata = {"source": "archive"}
-
-    obj = ObjectRecord(
-        object_key="archive/file.bin", size_bytes=1, etag="sim-content-identity",
-        metadata_json='{"source":"archive"}',
-    )
-    assert simulated_destination_provenance_matches(obj, Descriptor())
-    Descriptor.metadata = {}
-    assert not simulated_destination_provenance_matches(obj, Descriptor())
 
 
 def test_completion_report_keeps_retry_evidence_without_repeated_payload():
@@ -2013,12 +1927,6 @@ def test_executor_owned_transfer_without_checkpoint_is_not_heartbeat_protected_f
         assert stalled_transfer_future_item_ids(
             session, [item.id for item in items], now=now
         ) == [items[0].id]
-
-
-def test_simulated_transfer_hold_defers_restore_polling_without_one_second_spin():
-    assert SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS >= 30
-    worker = Path("app/real_worker.py").read_text(encoding="utf-8")
-    assert "SIMULATION_TRANSFER_HOLD_POLL_DELAY_SECONDS" in worker
 
 
 def test_cooperative_preemption_targets_lowest_remaining_raiju_and_honors_cooldown():
@@ -3174,82 +3082,6 @@ def test_lane_forecast_marks_an_overrun_only_after_the_source_clock_passes_basel
     source = Path("app/main.py").read_text(encoding="utf-8")
     assert "source_now >= baseline_end" in source
     assert "prazo de referência já ultrapassado; backlog ainda pendente" in source
-
-
-def test_simulation_clock_advances_only_through_durable_decisions():
-    worker = Path("app/real_worker.py").read_text(encoding="utf-8")
-    store = Path("app/simulator_store.py").read_text(encoding="utf-8")
-    assert "def advance_simulation_clock" in worker
-    assert '"restore availability polling interval"' in worker
-    assert 'control_clock(source.simulation_execution_id, "RESUME")' not in worker
-    assert "paused=True" in store and "paused_virtual_at=datetime.now(timezone.utc)" in store
-    assert "Releasing an already-cleared hold is therefore a safe" in store
-
-
-def test_simulated_restore_polls_have_one_source_clock_leader(monkeypatch):
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    simulated = RuntimeContext(mode=OperationMode.SIMULATION, database_url="sqlite://")
-    monkeypatch.setattr(real_worker, "runtime_context", simulated)
-    with Session() as session:
-        source = Source(name="shared-clock", s3_bucket="source", aws_region="us-east-1",
-                        destination_bucket="destination", backend_kind="SIMULATED")
-        first = Wave(source=source, name="first", max_bytes=1, restore_days=1,
-                     restore_tier="BULK", status="RESTORING")
-        second = Wave(source=source, name="second", max_bytes=1, restore_days=1,
-                      restore_tier="BULK", status="RESTORING")
-        session.add_all([source, first, second]); session.flush()
-        now = datetime.now(timezone.utc)
-        first_task = Task(wave_id=first.id, kind="POLL_RESTORE", state=TaskState.RUNNING,
-                          available_at=now - timedelta(seconds=1))
-        second_task = Task(wave_id=second.id, kind="POLL_RESTORE", state=TaskState.READY,
-                           available_at=now + timedelta(seconds=1))
-        session.add_all([first_task, second_task]); session.commit()
-
-        assert simulation_restore_poll_clock_leader(session, first_task, first)
-        assert not simulation_restore_poll_clock_leader(session, second_task, second)
-
-        monkeypatch.setattr(real_worker, "runtime_context", RuntimeContext(
-            mode=OperationMode.REAL, database_url="sqlite://"
-        ))
-        assert not simulation_restore_poll_clock_leader(session, first_task, first)
-
-
-def test_simulated_restore_reapproval_requires_confirmed_expiry_evidence():
-    worker = Path("app/real_worker.py").read_text(encoding="utf-8")
-    assert "def simulation_restore_expiry_confirmed" in worker
-    assert "SIMULATOR_RESTORE_STATE_MISMATCH" in worker
-    assert "not simulation_restore_expiry_confirmed(session, wave, source)" in worker
-
-
-def test_simulated_clock_waits_for_durable_lane_work_on_its_own_source(monkeypatch):
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    monkeypatch.setattr(real_worker, "runtime_context", RuntimeContext(
-        mode=OperationMode.SIMULATION, database_url="sqlite://"
-    ))
-    with Session() as session:
-        source = Source(name="lane-clock", s3_bucket="source", aws_region="us-east-1",
-                        destination_bucket="destination", backend_kind="SIMULATED")
-        other = Source(name="other-clock", s3_bucket="other", aws_region="us-east-1",
-                       destination_bucket="other", backend_kind="SIMULATED")
-        wave = Wave(source=source, name="wave", max_bytes=1, restore_days=1,
-                    restore_tier="BULK", status="TRANSFERRING")
-        other_wave = Wave(source=other, name="other-wave", max_bytes=1, restore_days=1,
-                          restore_tier="BULK", status="RESTORING")
-        session.add_all([source, other, wave, other_wave]); session.flush()
-        obj = ObjectRecord(source_id=source.id, wave_id=wave.id, object_key="ready.bin",
-                           size_bytes=1, state=ObjectState.RESTORED)
-        session.add(obj); session.flush()
-        session.add(TransferQueueItem(source_id=source.id, wave_id=wave.id,
-                                      object_id=obj.id, size_bytes=1,
-                                      state=TransferQueueState.READY))
-        session.commit()
-
-        assert simulation_source_lane_has_committed_work(session, source)
-        assert not simulation_source_lane_has_committed_work(session, other)
 
 
 def test_continuous_lane_releases_each_observed_object_without_a_percent_threshold():

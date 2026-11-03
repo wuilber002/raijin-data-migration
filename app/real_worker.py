@@ -55,8 +55,6 @@ from app.backend_contracts import (
     SubmitRestoreBatchRequest,
 )
 from app.duration_format import format_duration
-from app.simulator_admin import SimulatorAdminClient, SimulatorAdminError
-from app.simulator_ports import SimulatedDestinationPort, SimulatedSourcePort, SimulatorTransportError
 from app.main import (
     AwsConnection, DiscoveryJob, Event, MigrationProject, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, RuntimeLaneControlState, RuntimeLaneMeasurement, TransferQueueItem, TransferQueueState, merge_discovery_rows, source_key_in_scope, source_prefix_values,
     DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, resolve_destination_object_key, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, select_global_transfer_lane_candidate, transfer_priority, utcnow,
@@ -581,28 +579,6 @@ class RestoreReapprovalRequired(RuntimeError):
     """A restored copy disappeared before transfer and a paid retry is required."""
 
 
-class SimulatedNetworkRecoveryPending(RuntimeError):
-    """Transfer is waiting for a deterministic simulated network recovery."""
-
-    def __init__(self, retry_after_virtual_seconds: int):
-        self.retry_after_virtual_seconds = max(1, int(retry_after_virtual_seconds))
-        super().__init__(
-            "Simulated network outage; advanced the isolated virtual clock "
-            f"by {format_duration(self.retry_after_virtual_seconds)} to its recovery point"
-        )
-
-
-def simulated_network_retry_after(error: Exception) -> int | None:
-    """Extract the versioned simulator outage hint from a typed 503 response."""
-    if not isinstance(error, SimulatorTransportError):
-        return None
-    text = str(error)
-    if "SIMULATED_NETWORK_UNAVAILABLE" not in text:
-        return None
-    match = re.search(r'"retry_after_virtual_seconds"\s*:\s*(\d+)', text)
-    return max(1, int(match.group(1))) if match else 1
-
-
 def stalled_transfer_future_item_ids(session, item_ids: list[int], now: datetime | None = None,
                                      stall_seconds: int = TRANSFER_FUTURE_STALL_SECONDS) -> list[int]:
     """Return executor-owned transfers with no durable progress checkpoint."""
@@ -701,25 +677,6 @@ def classify_task_error(error: Exception) -> tuple[str, str]:
     status, code = metadata.get("HTTPStatusCode"), details.get("Code")
     name = type(error).__name__
     summary = f"{name} ({status} {code})" if status or code else f"{name}: {str(error)[:500]}"
-    if isinstance(error, SimulatedNetworkRecoveryPending):
-        return "retry", str(error)
-    if isinstance(error, SimulatorTransportError):
-        # Contract/validation responses are deterministic and require a code
-        # or scenario correction.  Connection failures are retryable through
-        # the same durable task policy used for real provider interruptions.
-        return ("failed" if "HTTP 4" in str(error) else "retry"), summary
-    if isinstance(error, SimulatorAdminError):
-        # The administrative API owns the isolated virtual clock.  A restart
-        # can reset or refuse that localhost connection for a few seconds;
-        # that is transport pressure, not a wave defect.  Preserve only true
-        # deterministic client/contract responses as operator-actionable.
-        simulator_status = error.status_code
-        return (
-            "failed"
-            if isinstance(simulator_status, int) and 400 <= simulator_status < 500 and simulator_status not in {408, 429}
-            else "retry",
-            summary,
-        )
     if code in TRANSIENT_AWS_CODES or status in {429, 500, 502, 503, 504}:
         return "retry", summary
     if code in PERMANENT_AWS_CODES or (isinstance(status, int) and 400 <= status < 500):
@@ -727,18 +684,6 @@ def classify_task_error(error: Exception) -> tuple[str, str]:
     if isinstance(error, (ConnectionError, TimeoutError, socket.timeout)) or name in {
         "EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError", "ConnectionClosedError",
     }:
-        return "retry", summary
-    # Fujin LOCAL deliberately returns a small JSON diagnostic while its
-    # control catalogue is restarting. botocore expects an S3 XML error and
-    # raises ResponseParserError before it can attach an HTTP status to the
-    # exception. This is transport pressure, not an invalid transfer task.
-    # Keep the match deliberately narrow: an arbitrary malformed S3 response
-    # remains actionable instead of creating an endless retry loop.
-    parser_message = str(error).lower()
-    if name == "ResponseParserError" and (
-        "fujin local control catalogue" in parser_message
-        and ("unavailable" in parser_message or "retry" in parser_message)
-    ):
         return "retry", summary
     return "failed", summary
 
@@ -752,8 +697,6 @@ def restored_object_is_unavailable(error: Exception) -> bool:
     independently actionable and must never be misrepresented as a billable
     restore re-approval.
     """
-    if isinstance(error, SimulatorTransportError):
-        return "HTTP 409" in str(error)
     if isinstance(error, ClientError):
         code = ((error.response or {}).get("Error") or {}).get("Code")
         return code in {"InvalidObjectState", "RestoreNotAvailable"}

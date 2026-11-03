@@ -49,13 +49,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, relationship, sessionmaker
 
 from app.cloud_backends import backend_for
-from app.backend_contracts import ExecutionContext, ListObjectsRequest
 from app.closure_report import build_artifacts, canonical_json, safe_filename, sha256
 from app.duration_format import format_duration
-from app.runtime_context import RAIJIN_BUILD_REVISION, RAIJIN_SERVICE_VERSION, SIMULATOR_SERVICE_VERSION, load_runtime_context
+from app.runtime_context import RAIJIN_BUILD_REVISION, RAIJIN_SERVICE_VERSION, load_runtime_context
 from app.production_migrations import migrate as migrate_production_schema
-from app.simulator_admin import SimulatorAdminClient, SimulatorAdminError
-from app.simulator_ports import SimulatedSourcePort, SimulatorTransportError
 from app.web_auth import ConsoleRole, PasswordHasher, generate_csrf_token, generate_session_token, hash_opaque_token, load_web_auth_settings, normalize_username, read_password_file, validate_password
 
 RAIJU_MIN_WORKERS = 5
@@ -149,7 +146,7 @@ def source_scheduler_clock(source: "Source"):
     Durable queue leases, retry delays and task availability deliberately keep
     using the real system clock.  Only simulated cloud time is accelerated.
     """
-    return cloud_backend.clock(source.simulation_execution_id)
+    return cloud_backend.clock()
 
 
 def restore_availability_poll_delay_seconds(accepted_at: datetime | None, now: datetime,
@@ -299,8 +296,7 @@ class MigrationProject(Base):
     """Future operational aggregate for independent migration sources.
 
     The foundation intentionally owns no scheduler behaviour yet.  It keeps
-    the future operational project separate from ``simulation_project_id``,
-    which is an execution-scoping identifier with different semantics.
+    future operational project ownership separate from source configuration.
     """
     __tablename__ = "migration_projects"
 
@@ -379,6 +375,9 @@ class Source(Base):
     # The connection remains reusable, but data endpoints are frozen before
     # discovery so an administrative edit cannot redirect an executing source.
     aws_endpoint_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    # Deprecated execution metadata. It is retained only so pre-existing
+    # reporting rows can be read during the clean-install transition; Raijin
+    # creates and executes REAL sources exclusively.
     backend_kind: Mapped[str] = mapped_column(String(16), default="REAL", index=True)
     simulation_scenario_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     simulation_execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
@@ -694,17 +693,14 @@ class Wave(Base):
     # shows the lane will drain sooner.
     restore_submission_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     planned_transfer_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    # Observed milestones use the simulator virtual clock only for simulated
-    # sources.  Real sources retain their existing object-level wall-clock
-    # evidence.  Keeping both avoids mixing time domains in the flight board.
+    # Historical timing columns remain mapped while the reporting migration is
+    # simplified; production execution writes only the provider timestamps on
+    # ObjectRecord and TransferLaneSegment.
     restore_requested_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     first_restore_available_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_restore_available_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     transfer_started_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     transfer_completed_virtual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # A simulated transfer keeps one durable virtual-clock hold between the
-    # final availability poll and the worker claim.  Without it a fast
-    # simulation clock can expire the restored copy during that queue gap.
     simulation_transfer_clock_held: Mapped[bool] = mapped_column(Boolean, default=False)
     restore_reapproval_required: Mapped[bool] = mapped_column(Boolean, default=False)
     restore_reapproval_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1745,50 +1741,6 @@ class HistoricalSourceProjectAssociation(BaseModel):
     migration_project_id: int = Field(ge=1)
 
 
-class SimulationScenarioBootstrap(BaseModel):
-    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{1,127}$")
-    fidelity: str = Field(pattern="^(CONTROL|DATA)$")
-    seed: str = Field(min_length=1, max_length=255)
-    logical_size_bytes: int = Field(ge=0)
-    object_count: int = Field(gt=0, le=10_000_000)
-    physical_budget_bytes: int = Field(default=1_000_000_000_000, ge=0)
-    clock_acceleration: float = Field(default=3600.0, gt=0)
-    retention_days: int = Field(default=60, ge=0, le=3650)
-    quarantine_days: int = Field(default=30, ge=0, le=3650)
-    source_bucket: str = Field(min_length=1, max_length=255)
-    destination_bucket: str = Field(min_length=1, max_length=255)
-    region: str = Field(default="us-east-1", min_length=1, max_length=64)
-    prefixes: list[str] = Field(default_factory=lambda: ["simulation"], min_length=1, max_length=1000)
-    storage_class: str = Field(default="DEEP_ARCHIVE", max_length=64)
-    template_id: str | None = None
-    configuration: dict = Field(default_factory=dict)
-    fault_rules: list = Field(default_factory=list)
-
-
-class SimulationExecutionClone(BaseModel):
-    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{1,127}$")
-    fidelity: str | None = Field(default=None, pattern="^(CONTROL|DATA)$")
-    physical_budget_bytes: int | None = Field(default=None, ge=0)
-
-
-class SimulationScenarioPurge(BaseModel):
-    confirmation: str
-    reason: str = Field(min_length=10, max_length=2000)
-
-
-class SimulationTemplateWrite(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
-    description: str = Field(default="", max_length=4000)
-    fidelity: str = Field(pattern="^(CONTROL|DATA)$")
-    configuration: dict = Field(default_factory=dict)
-    fault_rules: list = Field(default_factory=list)
-
-
-class OperationModeSwitchRequest(BaseModel):
-    target_mode: str = Field(pattern="^(REAL|SIMULATION)$")
-    confirmed: bool = False
-
-
 class LegacySourceConnectionMigration(BaseModel):
     """One-way adoption of a pre-connection source without changing audit data."""
     aws_connection_id: int = Field(gt=0)
@@ -2034,43 +1986,7 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
 @app.middleware("http")
-async def simulation_foundation_guard(request: FastAPIRequest, call_next):
-    """Keep Simulation isolated while exposing the normal Raijin control plane.
-
-    Operational APIs work against the isolated simulation database and the
-    simulated cloud backend.  Endpoints whose only purpose is discovering or
-    configuring real AWS/OCI resources remain unavailable as defence in depth;
-    Simulation never receives cloud credentials in the first place.
-    """
-    from app.runtime_context import mode_switch_requested
-    if request.method not in {"GET", "HEAD", "OPTIONS"} and mode_switch_requested() and request.url.path != "/api/runtime/mode":
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "RAIJIN is draining for an operation-mode switch"},
-        )
-    if runtime_context.is_simulation:
-        path = request.url.path
-        real_cloud_only = (
-            path == "/api/readiness"
-            or path.startswith("/api/oci/")
-            or path.startswith("/api/aws-secrets")
-            or path.startswith("/api/aws-connections")
-        )
-        # The regular source form creates cloud-backed sources. Simulated
-        # sources are created from immutable scenarios on /simulation.
-        real_source_configuration = (
-            (path == "/api/sources" and request.method == "POST")
-            or (path.startswith("/api/sources/") and request.method == "PUT")
-            or path.endswith("/migrate-aws-connection")
-        )
-        if real_cloud_only or real_source_configuration:
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "detail": "This real-cloud configuration endpoint is unavailable in Simulation mode",
-                    "operation_mode": runtime_context.mode.value,
-                },
-            )
+async def console_cache_guard(request: FastAPIRequest, call_next):
     response = await call_next(request)
     # Sources, waves and tasks are operational state.  A browser must never
     # reuse an earlier /api/sources response after a scenario/source is
@@ -2153,8 +2069,6 @@ def auth_route_requirement(path: str, method: str) -> ConsoleRole | str | None:
         return ConsoleRole.VIEWER
     if path in {"/api/settings", "/api/activity-refresh-settings"}:
         return ConsoleRole.VIEWER if method in {"GET", "HEAD", "OPTIONS"} else ConsoleRole.ADMIN
-    if path == "/api/runtime/mode":
-        return ConsoleRole.ADMIN
     if path.startswith("/api/global-aws-pricing") and method in {"GET", "HEAD", "OPTIONS"}:
         return ConsoleRole.VIEWER
     if path.startswith(("/api/oci/", "/api/aws-secrets", "/api/aws-connections", "/api/global-aws-pricing", "/api/legacy-aws/")):
@@ -2163,7 +2077,7 @@ def auth_route_requirement(path: str, method: str) -> ConsoleRole | str | None:
         return ConsoleRole.ADMIN
     if path.startswith("/api/"):
         return ConsoleRole.VIEWER if method in {"GET", "HEAD", "OPTIONS"} else ConsoleRole.OPERATOR
-    if path in {"/", "/simulation"} or path.startswith("/static/"):
+    if path == "/" or path.startswith("/static/"):
         return ConsoleRole.VIEWER
     return "DENY"
 
@@ -5253,7 +5167,6 @@ def dashboard() -> HTMLResponse:
         content = (page.read()
                    .replace("{{RAIJIN_VERSION}}", RAIJIN_SERVICE_VERSION)
                    .replace("{{RAIJIN_BUILD_REVISION}}", RAIJIN_BUILD_REVISION)
-                   .replace("{{FUJIN_VERSION}}", SIMULATOR_SERVICE_VERSION)
                    # This asset is injected after the static page is read.
                    # Give it the deployed revision so a browser cannot retain
                    # an older auth/profile UI after a rolling update.
@@ -5261,638 +5174,6 @@ def dashboard() -> HTMLResponse:
     # The console carries its CSS and JavaScript inline.  A cached document
     # would otherwise mix an old UI with fresh API data after a rollout.
     return HTMLResponse(content=content, headers={"Cache-Control": "no-store"})
-
-
-@app.get("/simulation", response_class=HTMLResponse)
-def simulation_console() -> HTMLResponse:
-    if runtime_context.is_real:
-        raise HTTPException(status_code=404, detail="Simulation console is available only in Simulation mode")
-    with open("app/static/simulation.html", encoding="utf-8") as page:
-        return HTMLResponse(content=page.read(), headers={"Cache-Control": "no-store"})
-
-
-@app.get("/healthz")
-def healthcheck(session: Session = Depends(get_session)) -> dict:
-    session.execute(select(1))
-    readiness = cloud_backend.readiness(require_operations=False)
-    return {"status": "ok", "operation_mode": runtime_context.mode.value,
-            "backend_operations_enabled": readiness.operations_enabled,
-            "backend_contract_version": readiness.contract_version}
-
-
-@app.get("/api/runtime")
-def runtime_identity() -> dict:
-    readiness = cloud_backend.readiness(require_operations=False)
-    return {"operation_mode": runtime_context.mode.value,
-            "raijin_version": RAIJIN_SERVICE_VERSION,
-            "raijin_build_revision": RAIJIN_BUILD_REVISION,
-            "fujin_version": SIMULATOR_SERVICE_VERSION,
-            "backend_operations_enabled": readiness.operations_enabled,
-            "backend_contract_version": readiness.contract_version,
-            "backend_capabilities": list(readiness.capabilities)}
-
-
-@app.get("/api/runtime/clock")
-def runtime_clock(source_id: int | None = Query(default=None, ge=1),
-                  session: Session = Depends(get_session)) -> dict:
-    """Expose the real system clock and the active source's simulation clock."""
-    source = session.get(Source, source_id) if source_id else None
-    if source_id and source is None:
-        raise HTTPException(status_code=404, detail="Source not found")
-    if runtime_context.is_simulation and source is None:
-        source = session.scalar(
-            select(Source).join(DynamicPipelineRun, DynamicPipelineRun.source_id == Source.id).where(
-                Source.archived_at.is_(None),
-                DynamicPipelineRun.status.not_in(["COMPLETED", "HISTORICAL"]),
-            ).order_by(DynamicPipelineRun.created_at.desc(), DynamicPipelineRun.id.desc()).limit(1)
-        )
-    # The header clock is informational. Under an intentionally busy
-    # simulation backend it must never turn a transient simulator timeout into
-    # a failed page heartbeat or block the rest of the console from loading.
-    clock = None
-    clock_available = True
-    if source:
-        try:
-            clock = source_scheduler_clock(source)
-        except (OSError, TimeoutError, ValueError):
-            clock_available = False
-    # A simulated source uses a deliberately discrete clock.  Expose the
-    # active durable phase so the UI can distinguish a harmless polling hold
-    # from a transfer hold or a genuinely idle/paused execution.
-    active_task_kind = None
-    if source and runtime_context.is_simulation:
-        active_task_kind = session.scalar(
-            select(Task.kind)
-            .join(Wave, Wave.id == Task.wave_id)
-            .where(Wave.source_id == source.id, Task.state == TaskState.RUNNING)
-            .order_by(Task.created_at.desc(), Task.id.desc())
-            .limit(1)
-        )
-    system_now = clock.real_now if clock else utcnow()
-    return {
-        "operation_mode": runtime_context.mode.value,
-        "source_id": source.id if source else None,
-        "source_name": source.name if source else None,
-        "execution_id": source.simulation_execution_id if source else None,
-        "system_now": system_now,
-        # A simulator timeout is intentionally non-fatal for the header.  Do
-        # not dereference the absent clock while reporting that it is
-        # temporarily unavailable.
-        "virtual_now": clock.effective_now if runtime_context.is_simulation and clock else None,
-        "acceleration": clock.acceleration if clock else 1.0,
-        "paused": clock.paused if clock else False,
-        # A held clock is deliberately different from a manually paused one:
-        # it protects a source's restore-retention window while the real
-        # worker streams or polls objects.  The browser must not extrapolate
-        # it at the configured acceleration rate.
-        "held": clock.held if clock else False,
-        "activity": active_task_kind,
-        "clock_available": clock_available,
-    }
-
-
-@app.post("/api/runtime/mode", status_code=202)
-def request_operation_mode_switch(
-    payload: OperationModeSwitchRequest, session: Session = Depends(get_session)
-) -> dict:
-    """Request a host-mediated, fail-closed runtime switch.
-
-    The container receives no Podman or systemd privilege. It can only write a
-    target token to the dedicated request mount; the host-side command repeats
-    the durable queue audit before replacing any process.
-    """
-    if not payload.confirmed:
-        raise HTTPException(status_code=422, detail="Explicit mode-switch confirmation is required")
-    if payload.target_mode == runtime_context.mode.value:
-        raise HTTPException(status_code=409, detail=f"RAIJIN is already in {payload.target_mode} mode")
-    active_tasks = int(session.scalar(select(func.count(Task.id)).where(
-        Task.state.in_([TaskState.READY, TaskState.RUNNING])
-    )) or 0)
-    active_discoveries = int(session.scalar(select(func.count(DiscoveryJob.id)).where(
-        DiscoveryJob.state.in_([TaskState.READY, TaskState.RUNNING])
-    )) or 0)
-    if active_tasks or active_discoveries:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Mode switch blocked by {active_tasks} task(s) and {active_discoveries} discovery job(s)",
-        )
-    request_file = os.environ.get("RAIJIN_MODE_REQUEST_FILE", "/run/mode-control/request")
-    try:
-        temporary = f"{request_file}.{os.getpid()}.tmp"
-        with open(temporary, "w", encoding="ascii") as target:
-            target.write(payload.target_mode + "\n")
-        os.replace(temporary, request_file)
-    except OSError as error:
-        raise HTTPException(status_code=503, detail="Host mode-control channel is unavailable") from error
-    return {"accepted": True, "current_mode": runtime_context.mode.value,
-            "target_mode": payload.target_mode, "state": "DRAINING"}
-
-
-def require_simulation_mode() -> None:
-    if runtime_context.is_real or not runtime_context.simulator_base_url:
-        raise HTTPException(status_code=409, detail="This operation is available only in Simulation mode")
-
-
-@app.get("/api/simulation/scenarios")
-def simulation_scenarios() -> list[dict]:
-    require_simulation_mode()
-    cloud_backend.readiness(require_operations=True)
-    return SimulatorAdminClient(runtime_context.simulator_base_url).list_scenarios()
-
-
-@app.get("/api/simulation/templates")
-def simulation_templates() -> list[dict]:
-    require_simulation_mode()
-    cloud_backend.readiness(require_operations=True)
-    return SimulatorAdminClient(runtime_context.simulator_base_url).list_templates()
-
-
-@app.post("/api/simulation/templates", status_code=201)
-def create_simulation_template(payload: SimulationTemplateWrite) -> dict:
-    require_simulation_mode()
-    cloud_backend.readiness(require_operations=True)
-    return SimulatorAdminClient(runtime_context.simulator_base_url).create_template(
-        payload.model_dump()
-    )
-
-
-@app.put("/api/simulation/templates/{template_id}")
-def update_simulation_template(template_id: str, payload: SimulationTemplateWrite) -> dict:
-    require_simulation_mode()
-    cloud_backend.readiness(require_operations=True)
-    return SimulatorAdminClient(runtime_context.simulator_base_url).update_template(
-        template_id, payload.model_dump()
-    )
-
-
-def recover_orphaned_simulation_sources(session: Session, admin: SimulatorAdminClient | None = None) -> int:
-    """Bind completed Fujin executions left behind by an interrupted source insert.
-
-    Fujin owns immutable scenario/catalog creation while Raijin owns the
-    operational source row.  A database schema or transient control-plane
-    failure between those two commits must be recoverable, not consume a
-    scenario name forever.  Only materialized executions without an existing
-    source are adopted; no cloud state is changed.
-    """
-    if not runtime_context.is_simulation:
-        return 0
-    admin = admin or SimulatorAdminClient(runtime_context.simulator_base_url)
-    # A deleted simulator source keeps a small Raijin tombstone so an
-    # immutable Fujin scenario is never adopted again as an orphan.
-    existing_scenarios = set(session.scalars(select(Source.simulation_scenario_id).where(
-        Source.simulation_scenario_id.is_not(None)
-    )))
-    existing_names = set(session.scalars(select(Source.name)))
-    recovered = 0
-    for scenario in admin.list_scenarios():
-        scenario_id = scenario["id"]
-        if scenario_id in existing_scenarios or scenario["name"] in existing_names:
-            continue
-        executions = admin.list_scenario_executions(scenario_id)
-        if not executions:
-            continue
-        execution = executions[0]
-        snapshot = execution.get("snapshot") or {}
-        materialization = (snapshot.get("configuration") or {}).get("_materialization") or {}
-        if not materialization:
-            continue
-        prefixes = normalize_source_prefixes(materialization.get("prefixes") or [])
-        source = Source(
-            name=scenario["name"],
-            s3_bucket=materialization["source_bucket"],
-            s3_prefix=prefixes[0],
-            aws_region=materialization["region"],
-            aws_bucket_region=materialization["region"],
-            destination_bucket=materialization["destination_bucket"],
-            backend_kind="SIMULATED",
-            simulation_scenario_id=scenario_id,
-            simulation_execution_id=execution["id"],
-            simulation_correlation_id=execution["correlation_id"],
-            simulation_tenant_id=str(uuid.uuid4()),
-            simulation_project_id=str(uuid.uuid4()),
-            simulation_fidelity=scenario["fidelity"],
-        )
-        session.add(source)
-        session.flush()
-        session.add_all(SourcePrefix(source_id=source.id, prefix=prefix) for prefix in prefixes)
-        record_event(session, "SIMULATED_SOURCE_RECOVERED",
-                     f"Recovered Raijin source for existing Fujin scenario '{source.name}' after interrupted binding.",
-                     source_id=source.id)
-        existing_scenarios.add(scenario_id)
-        existing_names.add(source.name)
-        recovered += 1
-    if recovered:
-        session.commit()
-    return recovered
-
-
-@app.post("/api/simulation/scenarios", status_code=201)
-def create_simulation_scenario(
-    payload: SimulationScenarioBootstrap, session: Session = Depends(get_session)
-) -> dict:
-    """Create one immutable simulator execution and its isolated Raijin source."""
-    require_simulation_mode()
-    cloud_backend.readiness(require_operations=True)
-    if session.scalar(select(Source.id).where(Source.name == payload.name)):
-        raise HTTPException(status_code=409, detail="Simulation source name already exists")
-    prefixes = normalize_source_prefixes(payload.prefixes)
-    admin = SimulatorAdminClient(runtime_context.simulator_base_url, timeout_seconds=600)
-    try:
-        scenario = admin.create_scenario(
-            {
-                "name": payload.name,
-                "fidelity": payload.fidelity,
-                "seed": payload.seed,
-                "logical_size_bytes": payload.logical_size_bytes,
-                "physical_budget_bytes": payload.physical_budget_bytes,
-                "clock_acceleration": payload.clock_acceleration,
-                "retention_days": payload.retention_days,
-                "quarantine_days": payload.quarantine_days,
-                "configuration": payload.configuration,
-                "fault_rules": payload.fault_rules,
-                "template_id": payload.template_id,
-            }
-        )
-    except SimulatorAdminError as error:
-        status_code = error.status_code if error.status_code and 400 <= error.status_code < 500 else 502
-        raise HTTPException(status_code=status_code, detail=error.detail) from error
-    catalog = admin.materialize(
-        scenario["id"],
-        {
-            "source_bucket": payload.source_bucket,
-            "destination_bucket": payload.destination_bucket,
-            "region": payload.region,
-            "object_count": payload.object_count,
-            "logical_size_bytes": payload.logical_size_bytes,
-            "prefixes": prefixes,
-            "storage_class": payload.storage_class,
-        },
-    )
-    execution = admin.create_execution(scenario["id"])
-    # A source gets its own clock, but it does not start consuming virtual
-    # retention simply because it was created. The worker resumes it only
-    # when durable discovery or migration work is queued for this source.
-    admin.control_clock(execution["id"], "PAUSE")
-    source = Source(
-        name=payload.name,
-        s3_bucket=payload.source_bucket,
-        s3_prefix=prefixes[0],
-        aws_region=payload.region,
-        aws_bucket_region=payload.region,
-        aws_connection_id=None,
-        destination_bucket=payload.destination_bucket,
-        backend_kind="SIMULATED",
-        simulation_scenario_id=scenario["id"],
-        simulation_execution_id=execution["id"],
-        simulation_correlation_id=execution["correlation_id"],
-        simulation_tenant_id=str(uuid.uuid4()),
-        simulation_project_id=str(uuid.uuid4()),
-        simulation_fidelity=scenario["fidelity"],
-    )
-    session.add(source)
-    session.flush()
-    session.add_all(SourcePrefix(source_id=source.id, prefix=prefix) for prefix in prefixes)
-    record_event(
-        session,
-        "SIMULATED_SCENARIO_CREATED",
-        f"SIMULATED {payload.fidelity} scenario '{payload.name}' created with seed {payload.seed}",
-        source_id=source.id,
-    )
-    session.commit()
-    return {
-        "source_id": source.id,
-        "scenario": scenario,
-        "execution": execution,
-        "catalog": catalog,
-    }
-
-
-def simulation_source_or_404(session: Session, source_id: int) -> Source:
-    source = source_or_404(session, source_id)
-    if source.backend_kind != "SIMULATED":
-        raise HTTPException(status_code=409, detail="Source does not belong to Simulation mode")
-    return source
-
-
-@app.get("/api/simulation/sources")
-def simulation_sources(session: Session = Depends(get_session)) -> list[dict]:
-    require_simulation_mode()
-    admin = SimulatorAdminClient(runtime_context.simulator_base_url)
-    recover_orphaned_simulation_sources(session, admin)
-    rows = list(session.scalars(select(Source).where(
-        Source.backend_kind == "SIMULATED"
-    ).order_by(Source.archived_at.is_not(None), Source.id.desc())))
-    result = []
-    scenarios = {item["id"]: item for item in admin.list_scenarios()}
-    active_source_details = {item["id"]: item for item in list_sources(session)}
-    for source in rows:
-        objects, size = session.execute(select(
-            func.count(ObjectRecord.id), func.coalesce(func.sum(ObjectRecord.size_bytes), 0)
-        ).where(ObjectRecord.source_id == source.id)).one()
-        waves = int(session.scalar(select(func.count(Wave.id)).where(Wave.source_id == source.id)) or 0)
-        pending = int(session.scalar(select(func.count(Task.id)).join(Wave).where(
-            Wave.source_id == source.id, Task.state.in_([TaskState.READY, TaskState.RUNNING])
-        )) or 0)
-        clock = admin.clock_status(source.simulation_execution_id) if source.simulation_execution_id else None
-        execution = admin.get_execution(source.simulation_execution_id) if source.simulation_execution_id else None
-        scenario = scenarios.get(source.simulation_scenario_id, {})
-        active_detail = active_source_details.get(source.id, {})
-        result.append({
-            "id": source.id, "name": source.name, "status": source.status,
-            "fidelity": source.simulation_fidelity, "source_bucket": source.s3_bucket,
-            "destination_bucket": source.destination_bucket, "region": source.aws_region,
-            "objects": int(objects), "bytes": int(size), "waves": waves,
-            "pending_tasks": pending, "scenario_id": source.simulation_scenario_id,
-            "execution_id": source.simulation_execution_id, "clock": clock,
-            "execution_state": execution.get("state") if execution else None,
-            "physical_budget_bytes": execution.get("physical_budget_bytes") if execution else 0,
-            "physical_bytes_processed": execution.get("physical_bytes_processed") if execution else 0,
-            "scenario_state": scenario.get("state"),
-            "template_name": scenario.get("template_name") or "Custom scenario",
-            "operational_status": active_detail.get(
-                "operational_status", "ARCHIVED" if source.archived_at else "CONFIGURED"
-            ),
-            "can_delete": bool(active_detail.get("can_delete", False)),
-            "retention_days": scenario.get("retention_days"),
-            "quarantine_days": scenario.get("quarantine_days"),
-            "archived_at": source.archived_at,
-        })
-    return result
-
-
-@app.post("/api/simulation/housekeeping")
-def simulation_housekeeping() -> dict:
-    require_simulation_mode()
-    return SimulatorAdminClient(runtime_context.simulator_base_url).apply_housekeeping()
-
-
-@app.post("/api/simulation/scenarios/{scenario_id}/restore")
-def simulation_restore_scenario(scenario_id: str) -> dict:
-    require_simulation_mode()
-    return SimulatorAdminClient(runtime_context.simulator_base_url).restore_scenario(scenario_id)
-
-
-@app.post("/api/simulation/sources/{source_id}/purge")
-def simulation_purge_source(
-    source_id: int,
-    payload: SimulationScenarioPurge,
-    session: Session = Depends(get_session),
-) -> dict:
-    """Cross-database guard before irreversible simulator catalog deletion."""
-    require_simulation_mode()
-    source = simulation_source_or_404(session, source_id)
-    if payload.confirmation != "PURGE":
-        raise HTTPException(status_code=422, detail="Type PURGE to confirm physical deletion")
-    if source.archived_at is None:
-        raise HTTPException(status_code=409, detail="Archive the simulated source before purging its catalog")
-    active_tasks = int(session.scalar(select(func.count(Task.id)).join(Wave).where(
-        Wave.source_id == source.id,
-        Task.state.in_([TaskState.READY, TaskState.RUNNING]),
-    )) or 0)
-    active_discoveries = int(session.scalar(select(func.count(DiscoveryJob.id)).where(
-        DiscoveryJob.source_id == source.id,
-        DiscoveryJob.state.in_([TaskState.READY, TaskState.RUNNING]),
-    )) or 0)
-    if active_tasks or active_discoveries:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Purge blocked by {active_tasks} task(s) and {active_discoveries} discovery job(s)",
-        )
-    admin = SimulatorAdminClient(runtime_context.simulator_base_url)
-    execution = admin.get_execution(source.simulation_execution_id)
-    if execution.get("state") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
-        raise HTTPException(status_code=409, detail="Simulation execution must be terminal before purge")
-    result = admin.purge_scenario(source.simulation_scenario_id, payload.reason)
-    record_event(
-        session,
-        "SIMULATION_SCENARIO_PURGED",
-        f"SIMULATED catalog physically purged; tombstone {result['evidence_sha256']}",
-        source_id=source.id,
-    )
-    session.commit()
-    return result
-
-
-@app.post("/api/simulation/sources/{source_id}/archive")
-def simulation_archive_source(source_id: int, session: Session = Depends(get_session)) -> dict:
-    require_simulation_mode()
-    source = simulation_source_or_404(session, source_id)
-    if source.archived_at is not None:
-        return {"id": source.id, "status": source.status, "archived_at": source.archived_at}
-    active_tasks = int(session.scalar(select(func.count(Task.id)).join(Wave).where(
-        Wave.source_id == source.id,
-        Task.state.in_([TaskState.READY, TaskState.RUNNING]),
-    )) or 0)
-    active_discoveries = int(session.scalar(select(func.count(DiscoveryJob.id)).where(
-        DiscoveryJob.source_id == source.id,
-        DiscoveryJob.state.in_([TaskState.READY, TaskState.RUNNING]),
-    )) or 0)
-    if active_tasks or active_discoveries:
-        raise HTTPException(status_code=409, detail="Simulation source still has active work")
-    execution = SimulatorAdminClient(runtime_context.simulator_base_url).get_execution(
-        source.simulation_execution_id
-    )
-    if execution.get("state") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
-        raise HTTPException(status_code=409, detail="Simulation execution must be terminal before archive")
-    source.archived_at, source.status = utcnow(), "ARCHIVED"
-    record_event(
-        session,
-        "SIMULATION_SOURCE_ARCHIVED",
-        f"SIMULATED source '{source.name}' archived; simulator evidence retained",
-        source_id=source.id,
-    )
-    session.commit()
-    return {"id": source.id, "status": source.status, "archived_at": source.archived_at}
-
-
-@app.delete("/api/simulation/sources/{source_id}")
-def delete_simulation_source(source_id: int, session: Session = Depends(get_session)) -> dict:
-    """Remove an unexecuted source from Raijin without resurrecting Fujin state.
-
-    Fujin scenarios are immutable records.  Instead of deleting their control
-    plane identity behind Fujin's back, retain a non-visible Raijin tombstone;
-    it prevents orphan recovery from recreating the source after the operator
-    explicitly removed it.
-    """
-    require_simulation_mode()
-    source = simulation_source_or_404(session, source_id)
-    if source_has_executed_wave(session, source.id):
-        raise HTTPException(status_code=409, detail="A simulation source with an executed wave cannot be deleted")
-    active_tasks = int(session.scalar(select(func.count(Task.id)).join(Wave).where(
-        Wave.source_id == source.id, Task.state.in_([TaskState.READY, TaskState.RUNNING])
-    )) or 0)
-    active_discoveries = int(session.scalar(select(func.count(DiscoveryJob.id)).where(
-        DiscoveryJob.source_id == source.id, DiscoveryJob.state.in_([TaskState.READY, TaskState.RUNNING])
-    )) or 0)
-    if active_tasks or active_discoveries:
-        raise HTTPException(status_code=409, detail="A simulation source with active work cannot be deleted")
-    source.archived_at, source.status, source.backend_kind = utcnow(), "DELETED", "SIMULATED_DELETED"
-    record_event(session, "SIMULATION_SOURCE_DELETED", f"SIMULATED source '{source.name}' removed before execution", source_id=source.id)
-    session.commit()
-    return {"id": source.id, "deleted": True}
-
-
-@app.post("/api/simulation/sources/{source_id}/reactivate")
-def simulation_reactivate_source(source_id: int, session: Session = Depends(get_session)) -> dict:
-    """Return an archived simulator source to the regular Migrations catalog.
-
-    Reactivation intentionally does not restart a terminal simulator execution.
-    It only removes the catalog archive marker so its retained evidence and
-    waves can again be inspected from Migrations.
-    """
-    require_simulation_mode()
-    source = simulation_source_or_404(session, source_id)
-    if source.archived_at is None:
-        raise HTTPException(status_code=409, detail="Simulation source is already active")
-    execution = SimulatorAdminClient(runtime_context.simulator_base_url).get_execution(
-        source.simulation_execution_id
-    )
-    if execution.get("state") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
-        raise HTTPException(status_code=409, detail="Only a terminal simulation execution can be reactivated")
-    has_inventory = bool(session.scalar(select(func.count(ObjectRecord.id)).where(
-        ObjectRecord.source_id == source.id
-    )) or 0)
-    source.archived_at = None
-    source.status = "DISCOVERED" if has_inventory else "DISCOVERY_FAILED"
-    record_event(
-        session,
-        "SIMULATION_SOURCE_REACTIVATED",
-        f"SIMULATED source '{source.name}' reactivated; terminal execution was not restarted",
-        source_id=source.id,
-    )
-    session.commit()
-    return {"id": source.id, "status": source.status, "archived_at": source.archived_at}
-
-
-@app.post("/api/simulation/sources/{source_id}/clone", status_code=201)
-def clone_simulation_source(
-    source_id: int,
-    payload: SimulationExecutionClone,
-    session: Session = Depends(get_session),
-) -> dict:
-    require_simulation_mode()
-    original = simulation_source_or_404(session, source_id)
-    if session.scalar(select(Source.id).where(Source.name == payload.name)):
-        raise HTTPException(status_code=409, detail="Simulation source name already exists")
-    result = SimulatorAdminClient(runtime_context.simulator_base_url, timeout_seconds=600).clone_execution(
-        original.simulation_execution_id,
-        payload.name,
-        payload.fidelity,
-        payload.physical_budget_bytes,
-    )
-    scenario, execution, catalog = result["scenario"], result["execution"], result["catalog"]
-    SimulatorAdminClient(runtime_context.simulator_base_url).control_clock(execution["id"], "PAUSE")
-    prefixes = source_prefix_values(original)
-    source = Source(
-        name=payload.name,
-        s3_bucket=catalog["source_bucket"],
-        s3_prefix=prefixes[0],
-        aws_region=original.aws_region,
-        aws_bucket_region=original.aws_bucket_region,
-        destination_bucket=catalog["destination_bucket"],
-        backend_kind="SIMULATED",
-        simulation_scenario_id=scenario["id"],
-        simulation_execution_id=execution["id"],
-        simulation_correlation_id=execution["correlation_id"],
-        simulation_tenant_id=str(uuid.uuid4()),
-        simulation_project_id=str(uuid.uuid4()),
-        simulation_fidelity=scenario["fidelity"],
-    )
-    session.add(source)
-    session.flush()
-    session.add_all(SourcePrefix(source_id=source.id, prefix=prefix) for prefix in prefixes)
-    record_event(
-        session,
-        "SIMULATED_EXECUTION_CLONED",
-        f"SIMULATED execution cloned from source {original.id} with immutable snapshot and seed",
-        source_id=source.id,
-    )
-    session.commit()
-    return {"source_id": source.id, **result}
-
-
-@app.post("/api/simulation/sources/{source_id}/discovery", status_code=202)
-def simulation_discovery(source_id: int, session: Session = Depends(get_session)) -> dict:
-    require_simulation_mode()
-    source = simulation_source_or_404(session, source_id)
-    job = queue_discovery(source, session)
-    return {"source_id": source.id, "job_id": job.id, "status": source.status}
-
-
-@app.get("/api/simulation/sources/{source_id}/waves")
-def simulation_waves(source_id: int, session: Session = Depends(get_session)) -> list[dict]:
-    require_simulation_mode()
-    simulation_source_or_404(session, source_id)
-    return list_waves(source_id, session)
-
-
-@app.get("/api/simulation/sources/{source_id}/flight-board")
-def simulation_flight_board(source_id: int, session: Session = Depends(get_session)) -> dict:
-    """Expose persisted planned/observed phases and scheduler decisions."""
-    require_simulation_mode()
-    simulation_source_or_404(session, source_id)
-    result = flight_board(source_id=source_id, run_id=None, session=session)
-    result["scheduler_decisions"] = [
-        {
-            "at": item.created_at,
-            "kind": item.kind,
-            "wave_id": item.wave_id,
-            "message": item.message,
-        }
-        for item in session.scalars(select(Event).where(
-            Event.source_id == source_id,
-            Event.kind.in_([
-                "DYNAMIC_WAVE_REPLANNED",
-                "DYNAMIC_PIPELINE_REPLANNED",
-                "DYNAMIC_RESTORE_RELEASED",
-                "DYNAMIC_RESTORE_SCHEDULED",
-            ]),
-        ).order_by(Event.created_at, Event.id))
-    ]
-    return result
-
-
-@app.post("/api/simulation/sources/{source_id}/waves/dynamic", status_code=201)
-def simulation_create_dynamic_waves(
-    source_id: int, payload: DynamicWaveCreate, session: Session = Depends(get_session)
-) -> dict:
-    require_simulation_mode()
-    simulation_source_or_404(session, source_id)
-    return create_dynamic_waves(source_id, payload, session)
-
-
-@app.post("/api/simulation/sources/{source_id}/waves/queue-all")
-def simulation_queue_all(source_id: int, session: Session = Depends(get_session)) -> dict:
-    require_simulation_mode()
-    simulation_source_or_404(session, source_id)
-    return queue_all_planned_waves(source_id, session)
-
-
-@app.get("/api/simulation/executions/{execution_id}/clock")
-def simulation_clock(execution_id: str) -> dict:
-    require_simulation_mode()
-    return SimulatorAdminClient(runtime_context.simulator_base_url).clock_status(execution_id)
-
-
-@app.get("/api/simulation/executions/{execution_id}/report")
-def simulation_execution_report(execution_id: str) -> dict:
-    require_simulation_mode()
-    return SimulatorAdminClient(runtime_context.simulator_base_url).execution_report(execution_id)
-
-
-@app.post("/api/simulation/executions/{execution_id}/clock")
-def simulation_control_clock(execution_id: str, payload: dict) -> dict:
-    require_simulation_mode()
-    action = str(payload.get("action") or "").upper()
-    if action not in {"PAUSE", "RESUME", "ADVANCE"}:
-        raise HTTPException(status_code=422, detail="Clock action must be PAUSE, RESUME, or ADVANCE")
-    try:
-        advance_seconds = float(payload.get("advance_seconds") or 0)
-    except (TypeError, ValueError) as error:
-        raise HTTPException(status_code=422, detail="advance_seconds must be numeric") from error
-    return SimulatorAdminClient(runtime_context.simulator_base_url).control_clock(
-        execution_id, action, advance_seconds
-    )
 
 
 @app.get("/api/platform/status")
@@ -10932,35 +10213,6 @@ def discovery_queue(limit: int = 5, project_id: int | None = None,
     } for job, source in rows]
 
 
-def simulated_destination_listing(source: Source) -> dict[str, object]:
-    """List Fujin's virtual OCI bucket through the same typed listing port."""
-    required = (source.simulation_execution_id, source.simulation_correlation_id,
-                source.simulation_tenant_id, source.simulation_project_id)
-    if source.backend_kind != "SIMULATED" or not runtime_context.simulator_base_url or not all(required):
-        raise RuntimeError("Simulated source has incomplete execution context")
-    context = ExecutionContext(
-        execution_id=uuid.UUID(str(source.simulation_execution_id)),
-        correlation_id=uuid.UUID(str(source.simulation_correlation_id)),
-        tenant_id=uuid.UUID(str(source.simulation_tenant_id)),
-        project_id=uuid.UUID(str(source.simulation_project_id)),
-    )
-    port = SimulatedSourcePort(runtime_context.simulator_base_url)
-    found: dict[str, object] = {}
-    for prefix in [destination_listing_prefix(source)]:
-        token = None
-        while True:
-            page = port.list_objects(ListObjectsRequest(
-                context=context, bucket=source.destination_bucket, prefix=prefix,
-                continuation_token=token, max_keys=1000,
-            ))
-            for descriptor in page.objects:
-                found[descriptor.key] = descriptor
-            token = page.next_continuation_token
-            if not token:
-                break
-    return found
-
-
 @app.post("/api/sources/{source_id}/validate-destination")
 def validate_destination(source_id: int, session: Session = Depends(get_session)) -> dict:
     """Explicit OCI-only final reconciliation against the durable discovery."""
@@ -10970,34 +10222,29 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
     )}
     if not expected:
         raise HTTPException(status_code=409, detail="Run discovery before validating the destination")
-    descriptors: dict[str, object] = {}
     client = namespace = None
     try:
-        if source.backend_kind == "SIMULATED":
-            descriptors = simulated_destination_listing(source)
-            found = {key: int(descriptor.size_bytes) for key, descriptor in descriptors.items()}
-        else:
-            import oci
-            namespace = read_oci_runtime_config().get("object_storage_namespace", "").strip()
-            if not namespace:
-                raise RuntimeError("OCI namespace is not configured")
-            client = oci_object_storage_client(oci.auth.signers.InstancePrincipalsSecurityTokenSigner())
-            found: dict[str, int] = {}
-            for prefix in [destination_listing_prefix(source)]:
-                start = None
-                while True:
-                    arguments = {"prefix": prefix, "limit": 1000, "fields": "name,size"}
-                    if start:
-                        arguments["start"] = start
-                    response = client.list_objects(namespace, source.destination_bucket, **arguments).data
-                    for item in response.objects:
-                        found[item.name] = int(item.size)
-                    start = response.next_start_with
-                    if not start:
-                        break
+        import oci
+        namespace = read_oci_runtime_config().get("object_storage_namespace", "").strip()
+        if not namespace:
+            raise RuntimeError("OCI namespace is not configured")
+        client = oci_object_storage_client(oci.auth.signers.InstancePrincipalsSecurityTokenSigner())
+        found: dict[str, int] = {}
+        for prefix in [destination_listing_prefix(source)]:
+            start = None
+            while True:
+                arguments = {"prefix": prefix, "limit": 1000, "fields": "name,size"}
+                if start:
+                    arguments["start"] = start
+                response = client.list_objects(namespace, source.destination_bucket, **arguments).data
+                for item in response.objects:
+                    found[item.name] = int(item.size)
+                start = response.next_start_with
+                if not start:
+                    break
     except Exception as error:
         source.destination_validation_at, source.destination_validation_status = utcnow(), "FAILED"
-        target = "Simulated destination" if source.backend_kind == "SIMULATED" else "OCI destination"
+        target = "OCI destination"
         # Keep the API response actionable without exposing a traceback or
         # credentials. The event preserves the same bounded diagnostic for
         # the operator's audit trail.
@@ -11016,11 +10263,6 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
     metadata_mismatched: list[str] = []
     for key, obj in expected.items():
         if key not in found or found[key] != obj.size_bytes or not obj.etag:
-            continue
-        if source.backend_kind == "SIMULATED":
-            descriptor = descriptors.get(key)
-            if not simulated_destination_provenance_matches(obj, descriptor):
-                metadata_mismatched.append(key)
             continue
         try:
             assert client is not None and namespace is not None

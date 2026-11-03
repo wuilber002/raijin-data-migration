@@ -24,8 +24,6 @@ def run_once(role: str = ROLE) -> None:
         raise RuntimeError(f"Audit execution does not support role {role!r}")
     if mode_switch_requested():
         return
-    if runtime_context.is_simulation:
-        cloud_backend.readiness(require_operations=True)
     with SessionLocal() as session:
         settings = runtime_settings(session)
         allowed_task_kinds = RAIKOU_AUDIT_TASK_KINDS

@@ -76,7 +76,6 @@ def test_about_page_text_and_presence_count_are_internationalized():
     catalog = json.loads((ROOT / "app/static/locales/en-US.json").read_text(encoding="utf-8"))
     for phrase in (
         "Presença anônima na console", "Console ativa", "Consoles ativas", "Princípios da plataforma",
-        "FUJIN simula AWS S3, OCI Object Storage, rede e tempo por contrato versionado, permitindo que os workers reais do RAIJIN sejam validados sem chamadas aos provedores.",
     ):
         assert phrase in page
         assert phrase in catalog
