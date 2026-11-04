@@ -28,6 +28,8 @@ def test_dashboard_bootstrap_script_has_no_known_parser_breaks():
         "startClock(target,{locale:window.raijinLocale?.()||'pt-BR'})", ""
     )
     assert "<script>\n  (()=>{\n<script>" not in page
+    assert "standardizeWaveDeepAuditButtons" not in page
+    assert "renameDeepAuditButtons();" in page
 
 
 def test_flight_board_clips_each_phase_to_the_visible_timeline_window():

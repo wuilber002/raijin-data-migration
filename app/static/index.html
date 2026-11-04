@@ -778,7 +778,7 @@ async function startSourceDeepAudit(){if(!selectedSource)return;try{const previe
 function addSourceDeepAuditButton(){const actions=$('#source-summary-actions');if(!actions)return;let button=actions.querySelector('.source-deep-audit-action');if(!selectedSource){button?.remove();return}if(!button){button=document.createElement('button');button.type='button';button.className='secondary source-deep-audit-action';button.textContent='🛡️ Deep Audit';button.title='Enfileira auditoria profunda de todas as waves concluídas, em ordem sequencial.';button.onclick=startSourceDeepAudit;actions.append(button)}}
 const addSourceCostButtonWithDeepAudit=addSourceCostButton;addSourceCostButton=function(){addSourceCostButtonWithDeepAudit();addSourceDeepAuditButton()};
 new MutationObserver(addSourceDeepAuditButton).observe($('#source-summary'),{childList:true,subtree:true});
-document.addEventListener('raijin:language-changed',standardizeWaveDeepAuditButtons);standardizeWaveDeepAuditButtons();
+document.addEventListener('raijin:language-changed',renameDeepAuditButtons);renameDeepAuditButtons();
 // Wave actions are inside a horizontally scrollable table. Render their help
 // in a body-level layer, anchored to its owner, so it cannot be clipped.
 (()=>{const waves=$('#waves');if(!waves)return;const tooltip=document.createElement('div');tooltip.className='waves-action-tooltip hidden';tooltip.setAttribute('role','tooltip');document.body.appendChild(tooltip);let owner=null;const place=target=>{const text=target?.dataset?.costHelp;if(!text)return;owner=target;tooltip.textContent=text;tooltip.classList.remove('hidden');tooltip.style.visibility='hidden';const rect=target.getBoundingClientRect(),margin=12,width=tooltip.offsetWidth,height=tooltip.offsetHeight,left=Math.min(window.innerWidth-width-margin,Math.max(margin,rect.left)),below=rect.bottom+8,top=below+height<=window.innerHeight-margin?below:Math.max(margin,rect.top-height-8);tooltip.style.left=`${left}px`;tooltip.style.top=`${top}px`;tooltip.style.visibility='visible'};const hide=target=>{if(!target||target===owner){owner=null;tooltip.classList.add('hidden')}};const targetFor=node=>node?.closest?.('#waves .cost-action[data-cost-help]')||null;waves.addEventListener('mouseover',event=>{const target=targetFor(event.target);if(target)place(target)});waves.addEventListener('mouseout',event=>{const target=targetFor(event.target);if(target&&!target.contains(event.relatedTarget))hide(target)});waves.addEventListener('focusin',event=>{const target=targetFor(event.target);if(target)place(target)});waves.addEventListener('focusout',event=>{const target=targetFor(event.target);if(target&&!target.contains(event.relatedTarget))hide(target)});new MutationObserver(()=>{if(owner&&!tooltip.classList.contains('hidden'))place(owner)}).observe(waves,{subtree:true,attributes:true,attributeFilter:['data-cost-help']});window.addEventListener('resize',()=>{if(owner)place(owner)});window.addEventListener('scroll',()=>{if(owner)place(owner)},{capture:true,passive:true})})();
@@ -1528,7 +1528,7 @@ refreshAll();
     formatWaveStatuses();
     updateWaveStatusHelp();
     addWaveCostButtons();
-    standardizeWaveDeepAuditButtons();
+    renameDeepAuditButtons();
     normalizeWaveActions();
   };
 </script>
