@@ -183,11 +183,16 @@
     try { await window.raijinI18nReady; } catch (_) { /* fallback to Portuguese source strings */ }
     let identity;
     try { identity = await apiCall("/api/auth/me"); } catch (_) { return; }
-    if (!identity.enabled) return;
-    window.raijinConsoleRole = identity.user.role;
+    // With web authentication disabled, the console is intentionally limited
+    // to the host's loopback interface. Its administrative APIs remain
+    // available for first-time configuration, so mount the administrative
+    // settings panels without creating a fictitious user session/profile.
+    const webAuthenticationEnabled = Boolean(identity.enabled);
+    const consoleRole = webAuthenticationEnabled ? identity.user.role : "ADMIN";
+    window.raijinConsoleRole = consoleRole;
     applyNavigationRoleVisibility();
     markMigrationMutationControls(document);
-    applyRoleControls(identity.user.role);
+    applyRoleControls(consoleRole);
     const activeNavigation = document.querySelector(".nav [data-view].active");
     if (activeNavigation?.classList.contains("hidden")) {
       window.showView?.("queue", {scroll:false});
@@ -205,9 +210,10 @@
             if (node.matches?.("button, input[type=submit]")) markMigrationMutationControls(node.parentElement);
           }
         }
-        applyRoleControls(identity.user.role);
+        applyRoleControls(consoleRole);
       }).observe(migrations, {childList:true, subtree:true});
     }
+    if (webAuthenticationEnabled) {
     const actions = document.querySelector(".banner-actions");
     const userMenu = document.createElement("div");
     userMenu.className = "console-user-menu";
@@ -409,14 +415,15 @@
       profileMessage(profileMessageSource);
       if (adminMfaAlert && !adminMfaAlert.classList.contains("hidden")) renderAdminMfaAlert(false);
     });
-    if (identity.user.role !== "ADMIN") {
+    }
+    if (consoleRole !== "ADMIN") {
       // Settings contains only tenancy integration and global scheduling
       // controls. Do not make an OPERATOR/VIEWER discover administrative
       // integration blocks that the server must correctly deny anyway.
       document.querySelector('[data-view="settings"]')?.classList.add("hidden");
       document.querySelector('.settings-menu[data-required-role="ADMIN"]')?.classList.add("hidden");
       if (document.getElementById("view-settings")?.classList.contains("active")) {
-        window.showView?.(identity.user.role === "VIEWER" ? "queue" : "dashboard");
+        window.showView?.(consoleRole === "VIEWER" ? "queue" : "dashboard");
       }
       // An initial settings route can start its asynchronous loaders before
       // this identity check completes. Later route/language refreshes must

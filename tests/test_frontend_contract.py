@@ -465,8 +465,16 @@ def test_console_hides_admin_settings_navigation_for_non_admin_roles():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert 'class="settings-menu" data-required-role="ADMIN" data-hide-when-denied' in page
     assert 'id="activity-auto-refresh" data-required-role="ADMIN"' in page
-    assert "applyRoleControls(identity.user.role)" in script
+    assert "applyRoleControls(consoleRole)" in script
     assert "settings-menu[data-required-role=\"ADMIN\"]" in script
+
+
+def test_loopback_console_without_web_auth_still_mounts_local_admin_settings():
+    script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
+    assert "const webAuthenticationEnabled = Boolean(identity.enabled);" in script
+    assert 'const consoleRole = webAuthenticationEnabled ? identity.user.role : "ADMIN";' in script
+    assert "if (webAuthenticationEnabled) {" in script
+    assert "if (!identity.enabled) return;" not in script
 
 
 def test_admin_settings_menu_opens_each_existing_settings_section_in_a_modal():
@@ -478,7 +486,8 @@ def test_admin_settings_menu_opens_each_existing_settings_section_in_a_modal():
     ):
         assert f"openSettingsSection('{section}')" in page
     assert "function toggleSettingsMenu" in page
-    assert "function openSettingsSection(sectionId)" in page
+    assert "function openSettingsSection(sectionId,event)" in page
+    assert "window.setTimeout(()=>openSettingsSection(sectionId),50)" not in page
     assert 'id="settings-topic-modal"' in page
     assert "content.replaceChildren(...nodes)" in page
     assert "function closeSettingsTopicModal" in page
@@ -506,7 +515,7 @@ def test_console_navigation_visibility_matches_viewer_operator_and_admin_roles()
     assert '["dashboard", "migrations"]' in script
     assert 'control.dataset.requiredRole = "OPERATOR"' in script
     assert 'window.showView?.("queue", {scroll:false})' in script
-    assert 'identity.user.role === "VIEWER" ? "queue" : "dashboard"' in script
+    assert 'consoleRole === "VIEWER" ? "queue" : "dashboard"' in script
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "minimumRole={dashboard:'OPERATOR',migrations:'OPERATOR',settings:'ADMIN'}" in page
     assert "view=role==='VIEWER'?'queue':'dashboard'" in page
@@ -610,7 +619,7 @@ def test_console_admin_security_alerts_are_aggregate_and_do_not_affect_other_rol
     assert '"/api/admin/auth-security-summary"' in script
     assert '"auth-lockout"' in script
     assert '"auth-authorization-denied"' in script
-    assert "identity.user.role !== \"ADMIN\"" in script
+    assert "consoleRole !== \"ADMIN\"" in script
 
 
 def test_auth_alerts_open_filtered_audit_and_admins_can_see_authenticated_sessions():
