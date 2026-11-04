@@ -5398,6 +5398,16 @@ def observability_details(indicator: str, limit: int = 100,
             "truncated": len(rows) >= limit}
 
 
+@app.get("/healthz", include_in_schema=False)
+def healthz() -> dict[str, str]:
+    """Unauthenticated liveness probe used by the host runtime launcher."""
+    return {
+        "status": "ok",
+        "service": "raijin-data-migration",
+        "revision": RAIJIN_BUILD_REVISION,
+    }
+
+
 @app.get("/metrics", include_in_schema=False)
 def prometheus_metrics(session: Session = Depends(get_session)) -> Response:
     """Prometheus text exposition, loopback-only with the rest of the API."""

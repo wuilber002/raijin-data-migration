@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MigrationProject, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, ProjectClosureIssueRequest, ProjectClosureReport, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, deep_audits, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, issue_project_closure_report, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, project_closure_readiness, project_closure_snapshot, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, repair_completed_deep_audit_statuses, replan_dynamic_pipeline, reprocess_preview, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_oci_error_summary, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, pause_deep_audit_queue, resume_deep_audit_queue, transfer_queue, wave_cost_estimate
 from app.main import ConsolePresence, ConsolePresenceHeartbeat, console_presence_heartbeat
+from app.main import app as raijin_app, healthz
 from app.closure_report import build_artifacts, canonical_json, safe_csv_cell, sha256
 from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, RAIKOU_AUDIT_TASK_KINDS, RAIKOU_RESTORE_TASK_KINDS, RAIKOU_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
 from app import real_worker
@@ -34,6 +35,16 @@ from app import real_worker
 def test_object_model_contains_durable_multipart_checkpoint_fields():
     columns = ObjectRecord.__table__.columns
     assert {"multipart_upload_id", "multipart_part_size", "multipart_parts_json", "multipart_updated_at"} <= set(columns.keys())
+
+
+def test_runtime_health_probe_is_available_without_authentication_or_database_access():
+    route = next(route for route in raijin_app.routes if route.path == "/healthz")
+    assert route.endpoint is healthz
+    assert healthz() == {
+        "status": "ok",
+        "service": "raijin-data-migration",
+        "revision": os.environ.get("RAIJIN_BUILD_REVISION", "development"),
+    }
 
 
 def test_anonymous_console_presence_counts_sessions_and_expires_stale_heartbeats():
