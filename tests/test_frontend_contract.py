@@ -21,6 +21,15 @@ def test_raijin_uses_the_shared_operational_card_contract():
     assert 'data-card-kind="status"' in styles
 
 
+def test_dashboard_bootstrap_script_has_no_known_parser_breaks():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "startClock(target,{locale:window.raijinLocale?.()||'pt-BR'})" in page
+    assert "startClock(target,{locale:window.raijinLocale?.()||'pt-BR'}" not in page.replace(
+        "startClock(target,{locale:window.raijinLocale?.()||'pt-BR'})", ""
+    )
+    assert "<script>\n  (()=>{\n<script>" not in page
+
+
 def test_flight_board_clips_each_phase_to_the_visible_timeline_window():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "visibleStart=Math.max(start,phaseStart)" in page
