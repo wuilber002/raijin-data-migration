@@ -48,6 +48,22 @@ PY
 
 publish_bind_addresses
 
+verify_published_endpoint() {
+  local probe_host probe_url
+  probe_host="$host"
+  [[ "$probe_host" == 0.0.0.0 ]] && probe_host=127.0.0.1
+  [[ "$probe_host" == :: ]] && probe_host=::1
+  if [[ "$probe_host" == *:* ]]; then
+    probe_host="[$probe_host]"
+  fi
+  probe_url="$transport://$probe_host:$port/healthz"
+  if [[ "$transport" == https ]]; then
+    curl --insecure --fail --silent --show-error --connect-timeout 5 --max-time 10 "$probe_url" >/dev/null
+  else
+    curl --fail --silent --show-error --connect-timeout 5 --max-time 10 "$probe_url" >/dev/null
+  fi
+}
+
 if [[ -e "$retire_request" ]]; then
   source "$install_root/scripts/web-auth.sh"
   source "$install_root/scripts/console-auth-lifecycle.sh"
@@ -155,6 +171,13 @@ PY
   mv "$tls_root/cert.pem.tmp" "$tls_root/cert.pem"
 fi
 umask 077
+previous_config=""
+previous_config_exists=false
+if [[ -e "$config" ]]; then
+  previous_config="$(mktemp "$control_root/web-bind.env.previous.XXXXXX")"
+  cp --preserve=mode,ownership "$config" "$previous_config"
+  previous_config_exists=true
+fi
 cat >"$config.tmp" <<EOF
 # Managed by the Raijin ADMIN console. Do not edit while the service is active.
 WEB_BIND_HOST=$host
@@ -163,5 +186,23 @@ WEB_TRANSPORT=$transport
 WEB_TRUSTED_UPSTREAM_IPS=$upstreams
 EOF
 mv "$config.tmp" "$config"
-systemctl restart raijin-data-migration.service
-finish SUCCEEDED "Console endpoint request applied; the service was restarted."
+if systemctl restart raijin-data-migration.service && verify_published_endpoint; then
+  rm -f "$previous_config"
+  finish SUCCEEDED "Console endpoint request applied and passed its local health check."
+  exit 0
+fi
+
+# A TCP listener can be present while Podman fails to relay application bytes
+# after a port mapping change. Do not leave the console configured for an
+# unreachable endpoint. Revert only the configuration; recreating a Podman
+# network is a deliberate maintenance operation because it stops all workers.
+if [[ "$previous_config_exists" == true ]]; then
+  mv "$previous_config" "$config"
+else
+  rm -f "$config"
+fi
+if ! systemctl restart raijin-data-migration.service; then
+  finish FAILED "Console endpoint failed its local health check and the previous configuration could not be restarted."
+  exit 0
+fi
+finish FAILED "Console endpoint failed its local health check; the previous endpoint configuration was restored. See docs/podman-network-recovery.md if Podman port forwarding is unhealthy."
