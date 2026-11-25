@@ -3627,6 +3627,22 @@ def connection_endpoint_configuration(connection: AwsConnection) -> dict:
     }
 
 
+def secret_endpoint_configuration(secret: dict) -> dict:
+    """Build the safe endpoint profile represented by a validated AWS Secret."""
+    private_endpoint = secret.get("private_endpoint") or {}
+    endpoints = {
+        field: normalized_private_endpoint(private_endpoint.get(field), field)
+        for field in ("sts_endpoint_url", "s3_endpoint_url", "s3control_endpoint_url")
+    }
+    if not endpoints["s3control_endpoint_url"]:
+        endpoints["s3control_endpoint_url"] = derived_s3control_endpoint(endpoints["s3_endpoint_url"])
+    return {
+        **endpoints,
+        "s3_addressing_style": private_endpoint.get("s3_addressing_style", "auto"),
+        "tls_ca_bundle_path": private_endpoint.get("tls_ca_bundle_path"),
+    }
+
+
 def freeze_source_endpoint_configuration(source: Source, connection: AwsConnection) -> None:
     """Persist the non-secret SDK endpoint profile selected for a source."""
     source.aws_endpoint_snapshot_json = json.dumps(connection_endpoint_configuration(connection), sort_keys=True)
@@ -7974,6 +7990,7 @@ def create_aws_connection(payload: AwsConnectionCreate, session: Session = Depen
     requested_endpoint_values = (payload.sts_endpoint_url, payload.s3_endpoint_url, payload.s3control_endpoint_url)
     request_has_endpoint = any(value and value.strip() for value in requested_endpoint_values)
     secret_endpoint = secret.get("private_endpoint") or {}
+    secret_profile = secret_endpoint_configuration(secret)
     endpoint_source = ({"sts_endpoint_url": payload.sts_endpoint_url,
                         "s3_endpoint_url": payload.s3_endpoint_url,
                         "s3control_endpoint_url": payload.s3control_endpoint_url}
@@ -8001,7 +8018,7 @@ def create_aws_connection(payload: AwsConnectionCreate, session: Session = Depen
     connection = AwsConnection(label=payload.label.strip(), secret_ocid=payload.secret_ocid,
                                aws_account_id=secret["aws_account_id"], default_region=secret["default_region"], control_bucket=secret["control_bucket"],
                                s3_addressing_style=(payload.s3_addressing_style if request_has_endpoint
-                                                    else secret_endpoint.get("s3_addressing_style", payload.s3_addressing_style)),
+                                                    else secret_profile["s3_addressing_style"]),
                                tls_ca_bundle_path=ca_bundle, **endpoints)
     session.add(connection)
     session.flush()
@@ -8146,7 +8163,12 @@ def refresh_global_aws_pricing_now(session: Session = Depends(get_session)) -> d
 
 @app.post("/api/aws-connections/{connection_id}/sync")
 def sync_aws_connection(connection_id: int, session: Session = Depends(get_session)) -> dict:
-    """Synchronize non-sensitive connection metadata while preserving its immutable label and identity."""
+    """Synchronize the safe Secret metadata and recover failed discovery routes.
+
+    Sources that are already executing retain their frozen endpoint snapshot.
+    A failed discovery has not produced a remote mutation, so it can safely be
+    rebound to the current connection endpoint after an explicit sync.
+    """
     connection = connection_or_404(session, connection_id)
     try:
         secret = aws_secret_payload(connection.secret_ocid)
@@ -8154,17 +8176,46 @@ def sync_aws_connection(connection_id: int, session: Session = Depends(get_sessi
         raise HTTPException(status_code=422, detail=f"AWS connection Secret is no longer compatible: {type(error).__name__}") from error
     if secret["aws_account_id"] != connection.aws_account_id:
         raise HTTPException(status_code=409, detail="Secret AWS account ID differs from the immutable registered connection")
-    before = {"default_region": connection.default_region, "control_bucket": connection.control_bucket}
+    profile = secret_endpoint_configuration(secret)
+    before = {
+        "default_region": connection.default_region,
+        "control_bucket": connection.control_bucket,
+        **connection_endpoint_configuration(connection),
+    }
     connection.default_region, connection.control_bucket = secret["default_region"], secret["control_bucket"]
+    for field, value in profile.items():
+        setattr(connection, field, value)
     cached = session.scalar(select(AwsSecretCache).where(AwsSecretCache.secret_ocid == connection.secret_ocid))
     if cached:
         cached.schema_version, cached.connection_name = secret["schema_version"], secret["connection_name"]
         cached.aws_account_id, cached.default_region, cached.valid, cached.validation_error = secret["aws_account_id"], secret["default_region"], True, None
         cached.refreshed_at = utcnow()
     changed = [field for field, old in before.items() if getattr(connection, field) != old]
-    record_event(session, "AWS_CONNECTION_SYNCED", f"AWS connection '{connection.label}' synchronized from its current Secret version; changed: {', '.join(changed) or 'none'}")
+    refreshed_sources = list(session.scalars(select(Source).where(
+        Source.aws_connection_id == connection.id,
+        Source.archived_at.is_(None),
+        Source.status == "DISCOVERY_FAILED",
+    )))
+    for source in refreshed_sources:
+        freeze_source_endpoint_configuration(source, connection)
+        record_event(
+            session,
+            "SOURCE_AWS_ENDPOINT_SYNCED",
+            f"Source '{source.name}' adopted the current AWS endpoint profile after failed discovery.",
+            source_id=source.id,
+        )
+    record_event(
+        session,
+        "AWS_CONNECTION_SYNCED",
+        f"AWS connection '{connection.label}' synchronized from its current Secret version; changed: {', '.join(changed) or 'none'}; failed-discovery source routes refreshed: {len(refreshed_sources)}",
+    )
     session.commit()
-    return {"connection": connection_summary(session, connection), "changed": changed, "configuration": aws_connection_configuration(connection, secret)}
+    return {
+        "connection": connection_summary(session, connection),
+        "changed": changed,
+        "failed_discovery_sources_refreshed": len(refreshed_sources),
+        "configuration": aws_connection_configuration(connection, secret),
+    }
 
 
 @app.delete("/api/aws-connections/{connection_id}")
