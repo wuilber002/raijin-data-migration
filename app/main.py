@@ -10170,20 +10170,54 @@ def source_report_csv(source_id: int, session: Session = Depends(get_session)) -
 @app.get("/api/discovery-queue")
 def discovery_queue(limit: int = 5, project_id: int | None = None,
                     session: Session = Depends(get_session)) -> list[dict]:
-    """Show only the next five durable remote-discovery jobs."""
+    """Show one current discovery execution per source, with bounded history."""
     limit = min(max(limit, 1), 5)
     project = migration_project_or_404(session, project_id) if project_id is not None else None
     source_scope = Source.migration_project_id == project.id if project else True
-    rows = session.execute(
-        select(DiscoveryJob, Source)
+    latest_ids = (
+        select(DiscoveryJob.source_id.label("source_id"), func.max(DiscoveryJob.id).label("job_id"))
         .join(Source, DiscoveryJob.source_id == Source.id)
         .where(source_scope)
+        .group_by(DiscoveryJob.source_id)
+        .subquery()
+    )
+    rows = list(session.execute(
+        select(DiscoveryJob, Source)
+        .join(Source, DiscoveryJob.source_id == Source.id)
+        .join(latest_ids, DiscoveryJob.id == latest_ids.c.job_id)
         .order_by(
             case((DiscoveryJob.state == TaskState.RUNNING, 0), (DiscoveryJob.state == TaskState.READY, 1), else_=2),
             DiscoveryJob.available_at, DiscoveryJob.id,
         ).limit(limit)
-    )
+    ))
     now = utcnow()
+    source_ids = [source.id for _, source in rows]
+    history_by_source: dict[int, list[DiscoveryJob]] = {}
+    if source_ids:
+        for historical in session.scalars(select(DiscoveryJob).where(
+            DiscoveryJob.source_id.in_(source_ids)
+        ).order_by(DiscoveryJob.source_id, DiscoveryJob.id.desc())):
+            entries = history_by_source.setdefault(int(historical.source_id), [])
+            if len(entries) < 20:
+                entries.append(historical)
+
+    def elapsed(job: DiscoveryJob) -> int:
+        end = now if job.state == TaskState.RUNNING else (job.completed_at or job.created_at)
+        if job.created_at and job.created_at.tzinfo is None:
+            started = job.created_at.replace(tzinfo=timezone.utc)
+        else:
+            started = job.created_at
+        if end and end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        return max(0, int((end - started).total_seconds())) if started and end else 0
+
+    def summary(job: DiscoveryJob) -> dict:
+        return {
+            "id": job.id, "state": job.state, "attempts": job.attempts,
+            "error": job.error, "created_at": job.created_at,
+            "completed_at": job.completed_at, "elapsed_seconds": elapsed(job),
+        }
+
     return [{
         "id": job.id, "source_id": source.id, "source_name": source.name, "mode": job.mode,
         "state": job.state, "attempts": job.attempts, "available_at": job.available_at,
@@ -10195,7 +10229,8 @@ def discovery_queue(limit: int = 5, project_id: int | None = None,
         "pages_completed": job.checkpoint_pages_completed,
         "objects_observed": job.checkpoint_objects_observed,
         "checkpoint_recorded_at": job.checkpoint_recorded_at,
-        "elapsed_seconds": int(float(source.discovery_elapsed_seconds or 0) + (max(0, (now - source.discovery_started_at).total_seconds()) if source.status == "DISCOVERING" and source.discovery_started_at else 0)),
+        "elapsed_seconds": elapsed(job),
+        "history": [summary(entry) for entry in reversed(history_by_source.get(source.id, []))],
     } for job, source in rows]
 
 

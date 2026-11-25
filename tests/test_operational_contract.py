@@ -2133,10 +2133,39 @@ def test_discovery_queue_renders_execution_checkpoint_and_expandable_errors():
     assert "j.objects_observed" in page
     assert 'class="discovery-checkpoint-pages"' in page
     assert 'class="discovery-checkpoint-objects"' in page
-    assert "Sem checkpoint individual" in page
-    assert 'class="discovery-error"' in page
-    assert "Clique para exibir a mensagem completa" in page
-    assert "maximum=110" in page
+    assert "Esta execução histórica não possui checkpoint individual persistido." in page
+    assert "function discoveryMessages(j,expanded)" in page
+    assert 'class="discovery-messages"' in page
+    assert "Clique para acompanhar o histórico das execuções" in page
+    assert "Estado atual" in page
+    assert "Mensagens" in page
+
+
+def test_discovery_queue_returns_only_the_latest_execution_per_source_with_history():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="source-discovery-history", s3_bucket="history", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source)
+        session.flush()
+        session.add_all([
+            DiscoveryJob(source_id=source.id, state=TaskState.FAILED, attempts=1, error="first denial"),
+            DiscoveryJob(source_id=source.id, state=TaskState.FAILED, attempts=1, error="second denial"),
+            DiscoveryJob(source_id=source.id, state=TaskState.SUCCEEDED, attempts=1),
+        ])
+        session.commit()
+
+        rows = main.discovery_queue(session=session)
+
+        assert len(rows) == 1
+        assert rows[0]["state"] == TaskState.SUCCEEDED
+        assert [entry["state"] for entry in rows[0]["history"]] == [
+            TaskState.FAILED, TaskState.FAILED, TaskState.SUCCEEDED,
+        ]
 
 
 def test_inventory_file_import_is_batched_and_never_calls_aws_discovery():
