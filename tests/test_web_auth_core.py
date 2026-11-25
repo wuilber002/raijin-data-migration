@@ -131,14 +131,22 @@ def test_admin_web_bind_request_is_constrained_and_written_atomically(tmp_path, 
                                  role=ConsoleRole.ADMIN)
         session.add(admin); session.commit()
         request = SimpleNamespace(state=SimpleNamespace(console_principal={"id": admin.id}), client=None, headers={})
-        payload = main.ConsoleWebBindUpdate(host="192.0.2.12", port=9443, transport="https")
+        with pytest.raises(main.HTTPException, match="Confirm network recreation"):
+            main.console_update_web_bind(
+                main.ConsoleWebBindUpdate(host="192.0.2.12", port=9443, transport="https"), request, session
+            )
+        payload = main.ConsoleWebBindUpdate(
+            host="192.0.2.12", port=9443, transport="https", confirm_network_recreation=True
+        )
         response = main.console_update_web_bind(payload, request, session)
     assert response["accepted"] is True
     assert control.exists()
     assert control.read_text(encoding="utf-8").find('"transport": "https"') >= 0
+    assert control.read_text(encoding="utf-8").find('"confirm_network_recreation": true') >= 0
     with pytest.raises(main.HTTPException, match="IPv4 /32"):
         main.console_update_web_bind(main.ConsoleWebBindUpdate(host="192.0.2.12", port=8080, transport="http",
-                                                               trusted_upstream_ips=["192.0.2.0/24"]), request, session)
+                                                               trusted_upstream_ips=["192.0.2.0/24"],
+                                                               confirm_network_recreation=True), request, session)
 
 
 def test_admin_web_bind_addresses_come_from_host_inventory(tmp_path, monkeypatch):

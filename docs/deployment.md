@@ -168,7 +168,15 @@ Substitua todos os valores entre `<...>` e proteja o arquivo:
     "console_bootstrap_password": "/etc/raijin-data-migration/bootstrap-console-password"
   },
   "secrets_compartment_ocid": "<SECRETS_COMPARTMENT_OCID>",
-  "secret_compartment_ocids": ["<SECRETS_COMPARTMENT_OCID>"]
+  "secret_compartment_ocids": ["<SECRETS_COMPARTMENT_OCID>"],
+  "iam_preflight": {
+    "dynamic_group_name": "<DYNAMIC_GROUP_NAME>",
+    "policy_compartment_ocid": "<POLICY_COMPARTMENT_OCID>",
+    "secret_compartment_ocids": ["<SECRETS_COMPARTMENT_OCID>"],
+    "destination_buckets": [
+      {"compartment_id": "<DESTINATION_COMPARTMENT_OCID>", "name": "<DESTINATION_BUCKET>"}
+    ]
+  }
 }
 ```
 
@@ -198,6 +206,16 @@ sudo chmod 0600 /etc/raijin-data-migration/oci-runtime.json
 Deixe endpoint e CA vazios para OCI público. Em OCI privado, informe a URL
 HTTPS e o bundle da CA interna. Para Secrets em compartments adicionais,
 inclua cada OCID em `secret_compartment_ocids` e confirme as policies OCI.
+
+### Pré-validação de IAM
+
+Depois de configurar o runtime, abra **Configurações → OCI → Validar IAM OCI**.
+O relatório mostra separadamente o acesso efetivo da Instance Principal e a
+declaração esperada de Dynamic Group e policy, incluindo os statements exatos
+para criar ou corrigir. Por padrão, a VM não recebe privilégio de inspeção IAM;
+nesse caso o estado é **UNKNOWN / não verificável**, não **MISSING / ausente**.
+Isso preserva o menor privilégio, enquanto falhas reais de Vault ou Object
+Storage continuam aparecendo como falhas efetivas.
 
 Para cada Secret, configure exatamente uma origem: `secret_ocids` (OCI Vault)
 ou `secret_file_paths` (fallback local). O fallback local é indicado apenas

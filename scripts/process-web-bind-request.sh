@@ -10,6 +10,8 @@ result="$control_root/result.json"
 retire_request="$control_root/retire-bootstrap"
 config=/etc/raijin-data-migration/web-bind.env
 secret_root=/etc/raijin-data-migration/secrets
+runtime_service=raijin-data-migration.service
+runtime_network=raijin-data-migration
 
 # The container sees only its Podman interfaces. Collect candidate bind
 # addresses on the host, where the listener is actually published.
@@ -82,12 +84,16 @@ fi
 mv "$request" "$request.processing"
 finish() {
   local status="$1" message="$2"
+  publish_result "$status" "$message"
+  rm -f "$request.processing"
+}
+publish_result() {
+  local status="$1" message="$2"
   python3 - "$status" "$message" >"$result.tmp" <<'PY'
 import json, sys
 print(json.dumps({"status": sys.argv[1], "message": sys.argv[2]}))
 PY
   mv "$result.tmp" "$result"
-  rm -f "$request.processing"
 }
 trap 'finish FAILED "Host endpoint request could not be processed"' ERR
 
@@ -107,6 +113,8 @@ try:
     port = int(data["port"])
     transport = str(data["transport"]).strip().lower()
     upstreams = data.get("trusted_upstream_ips", [])
+    if data.get("confirm_network_recreation") is not True:
+        raise ValueError("network recreation was not explicitly confirmed")
     if not isinstance(upstreams, list): raise ValueError("trusted_upstream_ips must be a list")
     ipaddress.ip_address(host)
     if not 1 <= port <= 65535: raise ValueError("port must be 1-65535")
@@ -126,8 +134,48 @@ PY
 )
 
 host="${values[0]}" port="${values[1]}" transport="${values[2]}" upstreams="${values[3]}"
+umask 077
+previous_config=""
+previous_config_exists=false
+previous_tls_root=""
+tls_root=/etc/raijin-data-migration/web-tls
+if [[ -e "$config" ]]; then
+  previous_config="$(mktemp "$control_root/web-bind.env.previous.XXXXXX")"
+  cp --preserve=mode,ownership "$config" "$previous_config"
+  previous_config_exists=true
+fi
+if [[ -d "$tls_root" ]]; then
+  previous_tls_root="$(mktemp -d "$control_root/web-tls.previous.XXXXXX")"
+  cp -a "$tls_root/." "$previous_tls_root/"
+fi
+
+restore_previous_endpoint_files() {
+  if [[ "$previous_config_exists" == true ]]; then
+    mv "$previous_config" "$config"
+  else
+    rm -f "$config"
+  fi
+  if [[ -n "$previous_tls_root" ]]; then
+    rm -rf "$tls_root"
+    install -d -m 0750 "$tls_root"
+    cp -a "$previous_tls_root/." "$tls_root/"
+  else
+    rm -rf "$tls_root"
+  fi
+}
+
+recreate_runtime_network() {
+  # A listener can still accept TCP while conmon no longer relays bytes after
+  # a published-port change. Recreate the exclusive Raijin network after all
+  # runtime containers have stopped; bootstrap creates it again on start.
+  systemctl stop "$runtime_service" || return 1
+  if podman network exists "$runtime_network"; then
+    podman network rm "$runtime_network" || return 1
+  fi
+  systemctl start "$runtime_service" || return 1
+}
+
 if [[ "$transport" == https ]]; then
-  tls_root=/etc/raijin-data-migration/web-tls
   install -d -m 0750 "$tls_root"
   command -v openssl >/dev/null || { finish FAILED "openssl is required to generate the local TLS certificate"; exit 0; }
   # A wildcard listener is reached through one of the host's real VNIC
@@ -170,14 +218,6 @@ PY
   mv "$tls_root/key.pem.tmp" "$tls_root/key.pem"
   mv "$tls_root/cert.pem.tmp" "$tls_root/cert.pem"
 fi
-umask 077
-previous_config=""
-previous_config_exists=false
-if [[ -e "$config" ]]; then
-  previous_config="$(mktemp "$control_root/web-bind.env.previous.XXXXXX")"
-  cp --preserve=mode,ownership "$config" "$previous_config"
-  previous_config_exists=true
-fi
 cat >"$config.tmp" <<EOF
 # Managed by the Raijin ADMIN console. Do not edit while the service is active.
 WEB_BIND_HOST=$host
@@ -186,23 +226,21 @@ WEB_TRANSPORT=$transport
 WEB_TRUSTED_UPSTREAM_IPS=$upstreams
 EOF
 mv "$config.tmp" "$config"
-if systemctl restart raijin-data-migration.service && verify_published_endpoint; then
+publish_result RUNNING "Recreating the Raijin network and runtime containers for the new console endpoint."
+if recreate_runtime_network && verify_published_endpoint; then
   rm -f "$previous_config"
-  finish SUCCEEDED "Console endpoint request applied and passed its local health check."
+  [[ -n "$previous_tls_root" ]] && rm -rf "$previous_tls_root"
+  finish SUCCEEDED "Console endpoint applied. The Raijin network and runtime containers were recreated and the new endpoint passed its local health check. Reconnect using the selected endpoint."
   exit 0
 fi
 
-# A TCP listener can be present while Podman fails to relay application bytes
-# after a port mapping change. Do not leave the console configured for an
-# unreachable endpoint. Revert only the configuration; recreating a Podman
-# network is a deliberate maintenance operation because it stops all workers.
-if [[ "$previous_config_exists" == true ]]; then
-  mv "$previous_config" "$config"
-else
-  rm -f "$config"
-fi
-if ! systemctl restart raijin-data-migration.service; then
-  finish FAILED "Console endpoint failed its local health check and the previous configuration could not be restarted."
+# Return the platform to the exact prior endpoint, including its certificate,
+# then use another clean network recreation so a failed publish never leaves
+# a stale conmon forwarding path behind.
+restore_previous_endpoint_files
+if ! recreate_runtime_network || ! verify_published_endpoint; then
+  finish RECOVERY_FAILED "Console endpoint failed its local health check and the previous endpoint could not be restored automatically. Run the documented recovery procedure before retrying."
   exit 0
 fi
-finish FAILED "Console endpoint failed its local health check; the previous endpoint configuration was restored. See docs/podman-network-recovery.md if Podman port forwarding is unhealthy."
+[[ -n "$previous_tls_root" ]] && rm -rf "$previous_tls_root"
+finish ROLLED_BACK "Console endpoint failed its local health check; the previous endpoint was restored after recreating the Raijin network and runtime containers."

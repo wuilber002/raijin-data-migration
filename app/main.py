@@ -51,6 +51,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_col
 from app.cloud_backends import backend_for
 from app.closure_report import build_artifacts, canonical_json, safe_filename, sha256
 from app.duration_format import format_duration
+from app.oci_iam_preflight import build_iam_preflight
 from app.runtime_context import RAIJIN_BUILD_REVISION, RAIJIN_SERVICE_VERSION, load_runtime_context
 from app.production_migrations import migrate as migrate_production_schema
 from app.web_auth import ConsoleRole, PasswordHasher, generate_csrf_token, generate_session_token, hash_opaque_token, load_web_auth_settings, normalize_username, read_password_file, validate_password
@@ -1952,6 +1953,10 @@ class ConsoleWebBindUpdate(BaseModel):
     port: int = Field(ge=1, le=65535)
     transport: str = Field(pattern="^(http|https)$")
     trusted_upstream_ips: list[str] = Field(default_factory=list, max_length=16)
+    # A published-port change is not a hot reload: Podman's network is
+    # deliberately recreated so stale port forwarding cannot survive it.
+    confirm_network_recreation: bool = False
+    confirmation_phrase: str = Field(default="", max_length=64)
 
 
 class ConsoleUpdateApply(BaseModel):
@@ -3346,6 +3351,50 @@ def safe_oci_error_summary(error: Exception) -> str:
     return f"{type(error).__name__}{f' ({context})' if context else ''}"
 
 
+def safe_aws_secret_validation_summary(error: Exception) -> str:
+    """Return an actionable, non-sensitive reason why an AWS Secret was rejected.
+
+    The cached diagnostic is shown to console administrators.  It must help
+    them correct the JSON schema while never persisting credential values,
+    arbitrary JSON content, OCI request identifiers, or service messages.
+    """
+    if isinstance(error, UnicodeDecodeError):
+        return "Secret content must be UTF-8 encoded JSON"
+    if not isinstance(error, ValueError):
+        return safe_oci_error_summary(error)
+
+    detail = str(error)
+    safe_exact = {
+        "Secret content is not valid JSON",
+        f"Expected schema_version {AWS_CONNECTION_SCHEMA_VERSION}",
+        "aws_account_id must contain 12 digits",
+        "control_bucket is not a valid S3 bucket name",
+        "private_endpoint must be an object",
+        "private_endpoint.s3_addressing_style must be auto, virtual or path",
+        "private_endpoint.tls_ca_bundle_path must be a non-empty absolute path",
+        "private_endpoint.tls_ca_bundle_path must be an absolute infrastructure path",
+    }
+    if detail in safe_exact:
+        return detail
+    for prefix in (
+        "Missing or empty field(s): ",
+        "Placeholder value(s) must be replaced: ",
+        "migration_role_arn must be a role ARN for aws_account_id",
+        "batch_operations_role_arn must be a role ARN for aws_account_id",
+        "private_endpoint.sts_endpoint_url must be an HTTPS origin or blank",
+        "private_endpoint.s3_endpoint_url must be an HTTPS origin or blank",
+        "private_endpoint.s3control_endpoint_url must be an HTTPS origin or blank",
+        "private_endpoint.sts_endpoint_url must be an HTTPS origin without credentials, path, query or fragment",
+        "private_endpoint.s3_endpoint_url must be an HTTPS origin without credentials, path, query or fragment",
+        "private_endpoint.s3control_endpoint_url must be an HTTPS origin without credentials, path, query or fragment",
+    ):
+        if detail.startswith(prefix):
+            return detail
+    if detail.startswith("Unknown private_endpoint field(s): "):
+        return "private_endpoint contains unsupported field names"
+    return "Secret content does not match the supported AWS connection schema"
+
+
 def read_oci_runtime_config() -> dict:
     with open(oci_runtime_config_file, encoding="utf-8") as config_file:
         return json.load(config_file)
@@ -4563,7 +4612,29 @@ def console_update_auth_settings(payload: ConsoleAuthSettingsUpdate, request: Fa
     return console_auth_settings_view(settings)
 
 
-def console_web_bind_state() -> dict:
+WEB_BIND_ACTIVE_WORK_CONFIRMATION = "RECREATE_NETWORK"
+
+
+def console_web_bind_impact(session: Session | None = None) -> dict:
+    """Return durable work that will be paused by an endpoint maintenance run."""
+    if session is None:
+        return {"active_transfers": 0, "running_tasks": 0, "running_discoveries": 0, "total": 0}
+    active_transfers = int(session.scalar(select(func.count(TransferQueueItem.id)).where(
+        TransferQueueItem.state.in_((TransferQueueState.LEASED, TransferQueueState.MULTIPART_RESUME))
+    )) or 0)
+    running_tasks = int(session.scalar(select(func.count(Task.id)).where(Task.state == TaskState.RUNNING)) or 0)
+    running_discoveries = int(session.scalar(select(func.count(DiscoveryJob.id)).where(
+        DiscoveryJob.state == TaskState.RUNNING
+    )) or 0)
+    return {
+        "active_transfers": active_transfers,
+        "running_tasks": running_tasks,
+        "running_discoveries": running_discoveries,
+        "total": active_transfers + running_tasks + running_discoveries,
+    }
+
+
+def console_web_bind_state(session: Session | None = None) -> dict:
     """Expose only non-secret endpoint state; host remains the authority."""
     request_file = Path(os.environ.get("RAIJIN_WEB_BIND_REQUEST_FILE", "/run/web-bind-control/request.json"))
     result_file = Path(os.environ.get("RAIJIN_WEB_BIND_RESULT_FILE", "/run/web-bind-control/result.json"))
@@ -4579,8 +4650,10 @@ def console_web_bind_state() -> dict:
         "trusted_upstream_ips": list(web_auth_settings.trusted_upstream_networks),
         "locked": bool(web_auth_settings.bootstrap_required),
         "lock_reason": "Bootstrap is incomplete; endpoint settings remain loopback-only." if web_auth_settings.bootstrap_required else "",
-        "pending": request_file.exists(),
+        "pending": request_file.exists() or request_file.with_name(f"{request_file.name}.processing").exists(),
         "result": result,
+        "impact": console_web_bind_impact(session),
+        "confirmation_phrase": WEB_BIND_ACTIVE_WORK_CONFIRMATION,
     }
 
 
@@ -4777,8 +4850,8 @@ def console_apply_update(payload: ConsoleUpdateApply, request: FastAPIRequest,
 
 
 @app.get("/api/admin/web-bind")
-def console_get_web_bind() -> dict:
-    return console_web_bind_state()
+def console_get_web_bind(session: Session = Depends(get_session)) -> dict:
+    return console_web_bind_state(session)
 
 
 @app.put("/api/admin/web-bind", status_code=202)
@@ -4786,6 +4859,11 @@ def console_update_web_bind(payload: ConsoleWebBindUpdate, request: FastAPIReque
                             session: Session = Depends(get_session)) -> dict:
     if web_auth_settings.bootstrap_required:
         raise HTTPException(status_code=409, detail="Console endpoint is locked until bootstrap is completed")
+    if not payload.confirm_network_recreation:
+        raise HTTPException(status_code=409, detail="Confirm network recreation before changing the console endpoint")
+    impact = console_web_bind_impact(session)
+    if impact["total"] and payload.confirmation_phrase != WEB_BIND_ACTIVE_WORK_CONFIRMATION:
+        raise HTTPException(status_code=409, detail="Active work requires the network recreation confirmation phrase")
     try:
         import ipaddress
         host = str(ipaddress.ip_address(payload.host.strip()))
@@ -4806,15 +4884,17 @@ def console_update_web_bind(payload: ConsoleWebBindUpdate, request: FastAPIReque
         request_file.parent.mkdir(parents=True, exist_ok=True)
         temporary = request_file.with_suffix(".tmp")
         temporary.write_text(json.dumps({"host": host, "port": payload.port, "transport": payload.transport,
-                                         "trusted_upstream_ips": upstreams}), encoding="utf-8")
+                                         "trusted_upstream_ips": upstreams,
+                                         "confirm_network_recreation": True}), encoding="utf-8")
         temporary.replace(request_file)
     except OSError as error:
         raise HTTPException(status_code=503, detail="Host console endpoint control channel is unavailable") from error
     auth_audit(session, "WEB_BIND_CHANGE_REQUESTED", actor_user_id=console_principal(request)["id"],
                target=f"{payload.transport}:{host}:{payload.port}", request=request,
-               detail={"trusted_upstream_ips": upstreams})
+               detail={"trusted_upstream_ips": upstreams, "impact": impact,
+                       "network_recreation_confirmed": True})
     session.commit()
-    return {"accepted": True, **console_web_bind_state()}
+    return {"accepted": True, **console_web_bind_state(session)}
 
 
 @app.post("/api/admin/users", status_code=201)
@@ -5592,6 +5672,16 @@ def oci_readiness(project_id: int | None = None,
         checks.append({"name": "OCI Object Storage", "status": "FAILED", "detail": type(error).__name__})
     ready = all(check["status"] in ["READY", "VALIDATED", "CONFIGURED"] for check in checks)
     return {"ready": ready, "checks": checks}
+
+
+@app.get("/api/oci/iam-preflight")
+def oci_iam_preflight() -> dict:
+    """Return secret-free OCI IAM requirements and non-mutating probes."""
+    try:
+        runtime_config = read_oci_runtime_config()
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as error:
+        raise HTTPException(status_code=503, detail=f"OCI runtime configuration unavailable: {type(error).__name__}") from error
+    return build_iam_preflight(runtime_config)
 
 
 @app.post("/api/console-presence/heartbeat")
@@ -7810,7 +7900,7 @@ def refresh_aws_secret_cache(session: Session = Depends(get_session)) -> dict:
             cached.connection_name, cached.aws_account_id, cached.default_region = payload["connection_name"], payload["aws_account_id"], payload["default_region"]
             cached.valid, compatible = True, compatible + 1
         except Exception as error:
-            cached.validation_error = safe_oci_error_summary(error)
+            cached.validation_error = safe_aws_secret_validation_summary(error)
     if seen:
         session.query(AwsSecretCache).filter(AwsSecretCache.secret_ocid.not_in(seen)).delete(synchronize_session=False)
     else:

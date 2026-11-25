@@ -452,6 +452,7 @@
       <hr>
       <h3 data-console-i18n="Endpoint da console"></h3>
       <p class="hint" id="console-web-bind-help" data-console-i18n="HTTPS direto usa certificado autoassinado persistente. HTTP fora do loopback exige os IPs privados /32 dos terminadores TLS."></p>
+      <p class="warning" id="console-web-bind-maintenance" data-console-i18n="Alterar o endpoint recria a rede Podman e todos os containers Raijin. A sessão atual será encerrada; workers ficarão temporariamente indisponíveis e retomarão o trabalho persistido após a validação do novo endpoint."></p>
       <form id="console-web-bind" class="row console-endpoint-form">
         <label class="field"><span data-console-i18n="IP de bind"></span><select name="host" required></select></label>
         <label class="field"><span data-console-i18n="Porta"></span><input name="port" type="number" min="1" max="65535" required></label>
@@ -513,6 +514,15 @@
     updateModal.innerHTML = `<div class="modal-panel console-update-workflow-panel"><h2 id="console-update-workflow-title" data-console-i18n="Atualização da plataforma em andamento"></h2><div id="console-update-workflow-content"></div></div>`;
     document.body.append(updateModal);
     applyAuthTranslations(updateModal);
+    const webBindWorkflowModal = document.createElement("section");
+    webBindWorkflowModal.id = "console-web-bind-workflow-modal";
+    webBindWorkflowModal.className = "modal hidden";
+    webBindWorkflowModal.setAttribute("role", "dialog");
+    webBindWorkflowModal.setAttribute("aria-modal", "true");
+    webBindWorkflowModal.setAttribute("aria-labelledby", "console-web-bind-workflow-title");
+    webBindWorkflowModal.innerHTML = `<div class="modal-panel console-web-bind-workflow-panel"><h2 id="console-web-bind-workflow-title" data-console-i18n="Aplicar configuração de endpoint"></h2><div id="console-web-bind-workflow-content"></div></div>`;
+    document.body.append(webBindWorkflowModal);
+    applyAuthTranslations(webBindWorkflowModal);
     const updateCommitsModal = document.createElement("section");
     updateCommitsModal.id = "console-update-commits-modal";
     updateCommitsModal.className = "modal hidden";
@@ -600,9 +610,65 @@
     let updateWorkflowLocked = false;
     let updateWorkflowSelective = false;
     let updateWorkflowPollTimer = null;
+    let latestWebBindState = null;
+    let webBindRedirectTimer = null;
     let sessionTab = "active";
     let sessionHistoryPage = 1;
     const updateWorkflowContent = updateModal.querySelector("#console-update-workflow-content");
+    const webBindWorkflowContent = webBindWorkflowModal.querySelector("#console-web-bind-workflow-content");
+    const closeWebBindWorkflow = () => {
+      clearInterval(webBindRedirectTimer); webBindRedirectTimer = null;
+      if (window.closeModal) window.closeModal("#console-web-bind-workflow-modal");
+      else webBindWorkflowModal.classList.add("hidden");
+    };
+    const endpointNavigationUrl = ({host, port, transport}) => {
+      const target = new URL(window.location.href);
+      target.protocol = `${transport}:`;
+      // 0.0.0.0 is a listener, not a browser destination. For the wildcard
+      // option keep the hostname through which the administrator reached Raijin.
+      target.hostname = host === "0.0.0.0" || host === "::" ? window.location.hostname : host;
+      target.port = String(port);
+      return target.href;
+    };
+    const showWebBindConfirmation = configuration => {
+      const impact = latestWebBindState?.impact || {};
+      const total = Number(impact.total || 0);
+      const phrase = latestWebBindState?.confirmation_phrase || "RECREATE_NETWORK";
+      const endpoint = `${configuration.transport}://${configuration.host}:${configuration.port}`;
+      const phraseField = total ? `<label class="field"><span>${escapeHtml(uiText("Frase de confirmação"))}</span><input id="console-web-bind-confirmation-phrase" autocomplete="off" spellcheck="false" required><small class="hint">${escapeHtml(uiText("Digite exatamente {{phrase}} para continuar.", {phrase}))}</small></label>` : "";
+      webBindWorkflowContent.innerHTML = `<p class="warning">${escapeHtml(uiText("Esta manutenção recriará a rede Podman e todos os containers Raijin. Sua sessão será encerrada e os workers ficarão temporariamente indisponíveis."))}</p><p>${escapeHtml(uiText("Novo endpoint"))}: <code>${escapeHtml(endpoint)}</code></p>${total ? `<p class="warning">${escapeHtml(uiText("Há {{count}} unidade(s) de trabalho ativa(s).", {count:total}))}</p>` : `<p class="hint">${escapeHtml(uiText("Nenhum trabalho ativo foi identificado."))}</p>`}<p class="hint">${escapeHtml(uiText("A operação continua em background. Em até um minuto a página será aberta novamente no novo endpoint."))}</p>${phraseField}<div class="modal-actions"><button type="button" class="secondary" id="console-web-bind-workflow-cancel" data-console-i18n="Cancelar"></button><button type="button" id="console-web-bind-workflow-confirm" data-console-i18n="Confirmar e aplicar"></button></div>`;
+      applyAuthTranslations(webBindWorkflowContent);
+      if (window.openModal) window.openModal("#console-web-bind-workflow-modal"); else webBindWorkflowModal.classList.remove("hidden");
+      webBindWorkflowContent.querySelector("#console-web-bind-workflow-cancel").addEventListener("click", closeWebBindWorkflow);
+      webBindWorkflowContent.querySelector("#console-web-bind-workflow-confirm").addEventListener("click", async event => {
+        const phraseField = webBindWorkflowContent.querySelector("#console-web-bind-confirmation-phrase");
+        phraseField?.setCustomValidity("");
+        const confirmationPhrase = phraseField?.value || "";
+        if (total && confirmationPhrase !== phrase) {
+          phraseField.setCustomValidity(uiText("A frase de confirmação não confere. Nenhuma alteração foi feita.")); phraseField.reportValidity(); phraseField.focus(); return;
+        }
+        event.currentTarget.disabled = true;
+        webBindWorkflowContent.innerHTML = `<div class="console-web-bind-workflow-loading" role="status" aria-live="polite"><span class="console-web-bind-workflow-spinner" aria-hidden="true"></span><strong data-console-i18n="Aplicando configuração de endpoint em background…"></strong><small data-console-i18n="A rede e os containers serão recriados. A página será aberta novamente em até um minuto."></small><code class="console-web-bind-workflow-destination">${escapeHtml(endpointNavigationUrl(configuration))}</code><p id="console-web-bind-workflow-countdown"></p></div>`;
+        applyAuthTranslations(webBindWorkflowContent);
+        try {
+          await apiCall("/api/admin/web-bind", {method:"PUT", headers:{"content-type":"application/json"}, body:JSON.stringify({...configuration, confirm_network_recreation:true, confirmation_phrase:confirmationPhrase})});
+          const destination = endpointNavigationUrl(configuration);
+          const deadline = Date.now() + 60_000;
+          const countdown = () => {
+            const seconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+            const label = webBindWorkflowContent.querySelector("#console-web-bind-workflow-countdown");
+            if (label) label.textContent = uiText("Redirecionando para o novo endpoint em {{seconds}} segundo(s)…", {seconds});
+            if (!seconds) { clearInterval(webBindRedirectTimer); window.location.assign(destination); }
+          };
+          countdown(); webBindRedirectTimer = window.setInterval(countdown, 1000);
+        } catch (error) {
+          webBindWorkflowContent.innerHTML = `<p class="error">${escapeHtml(error.message)}</p><div class="modal-actions"><button type="button" class="secondary" id="console-web-bind-workflow-close" data-console-i18n="Fechar"></button></div>`;
+          applyAuthTranslations(webBindWorkflowContent);
+          webBindWorkflowContent.querySelector("#console-web-bind-workflow-close").addEventListener("click", closeWebBindWorkflow);
+        }
+      });
+      webBindWorkflowContent.querySelector("#console-web-bind-confirmation-phrase")?.focus();
+    };
     const showUpdateCommits = () => {
       const impact = latestUpdateState?.impact || {};
       const commits = Array.isArray(impact.commits) ? impact.commits : [];
@@ -788,13 +854,26 @@
         ? `${row.event_type} (${row.target})` : row.event_type;
       query("#console-auth-policy").elements.password_history_count.value = authSettings.password_history_count;
       const bindForm = query("#console-web-bind");
+      latestWebBindState = webBind;
       const addresses = Array.isArray(bindAddresses.addresses) ? bindAddresses.addresses : [];
       if (!addresses.some(item => item.value === webBind.host)) addresses.push({value:webBind.host, label:webBind.host});
       bindForm.host.innerHTML = addresses.map(item => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label || item.value)}</option>`).join("");
       bindForm.host.value = webBind.host; bindForm.port.value = webBind.port; bindForm.transport.value = webBind.transport;
       bindForm.trusted_upstream_ips.value = (webBind.trusted_upstream_ips || []).join(",");
       bindForm.querySelectorAll("input, select, button").forEach(control => { control.disabled = Boolean(webBind.locked || webBind.pending); });
-      query("#console-web-bind-status").textContent = webBind.locked ? uiText(webBind.lock_reason) : (webBind.pending ? uiText("Solicitação de endpoint aguardando aplicação no host.") : (webBind.result?.message || ""));
+      const activeWork = webBind.impact || {};
+      const activeWorkTotal = Number(activeWork.total || 0);
+      const activeWorkMessage = activeWorkTotal
+        ? uiText("Há {{count}} unidade(s) de trabalho ativa(s): {{transfers}} transferência(s), {{tasks}} tarefa(s) e {{discoveries}} discovery(s). Será necessário confirmar digitando a frase de manutenção.", {count:activeWorkTotal, transfers:Number(activeWork.active_transfers || 0), tasks:Number(activeWork.running_tasks || 0), discoveries:Number(activeWork.running_discoveries || 0)})
+        : uiText("Nenhuma transferência, tarefa ou discovery em execução foi identificada.");
+      query("#console-web-bind-maintenance").textContent = `${uiText("Alterar o endpoint recria a rede Podman e todos os containers Raijin. A sessão atual será encerrada; workers ficarão temporariamente indisponíveis e retomarão o trabalho persistido após a validação do novo endpoint.")} ${activeWorkMessage}`;
+      const endpointResultMessage = {
+        RUNNING: uiText("A rede e os containers Raijin estão sendo recriados para o novo endpoint."),
+        SUCCEEDED: uiText("O endpoint foi aplicado, a rede e os containers foram recriados e o health check local foi aprovado. Reconecte-se usando o endpoint selecionado."),
+        ROLLED_BACK: uiText("O novo endpoint não passou no health check local. O endpoint anterior foi restaurado após a recriação da rede e dos containers."),
+        RECOVERY_FAILED: uiText("O novo endpoint não passou no health check local e o endpoint anterior não pôde ser restaurado automaticamente. Execute o procedimento de recuperação documentado."),
+      }[webBind.result?.status] || webBind.result?.message || "";
+      query("#console-web-bind-status").textContent = webBind.locked ? uiText(webBind.lock_reason) : (webBind.pending ? uiText("Solicitação de endpoint aguardando aplicação no host.") : endpointResultMessage);
       const updatePending = Boolean(updateState.pending);
       const updateAvailable = updateState.state === "AVAILABLE" && /^[0-9a-f]{40}$/.test(updateState.available_revision || "");
       const updateMessage = {
@@ -836,7 +915,7 @@
       renderUpdateCheckButton(updateCheckInProgress, updatePending || updateCheckInProgress);
       query("#console-update-apply").disabled = updatePending || !updateAvailable;
       clearTimeout(updateRefreshTimer);
-      if (updatePending || ["BACKING_UP", "DEPLOYING", "VERIFYING", "ROLLING_BACK"].includes(updateState.state)) {
+      if (webBind.pending || updatePending || ["BACKING_UP", "DEPLOYING", "VERIFYING", "ROLLING_BACK"].includes(updateState.state)) {
         updateRefreshTimer = window.setTimeout(() => render().catch(() => {}), 3000);
       }
       query("#console-users").innerHTML = `<table><thead><tr><th>${uiText("Ativa")}</th><th>${uiText("Usuário")}</th><th>MFA</th><th>${uiText("Papel")}</th><th>${uiText("Ação")}</th></tr></thead><tbody>${users.map(user => { const isCurrentUser = user.id === identity.user.id; const deleteControl = isCurrentUser ? `<button type="button" class="danger" disabled title="${escapeHtml(uiText("Você não pode excluir sua própria conta."))}">${uiText("Excluir")}</button>` : `<button type="button" class="danger" data-delete-user="${user.id}">${uiText("Excluir")}</button>`; const enabledLabel = user.enabled ? uiText("Conta ativa") : uiText("Conta desativada"); const enabledControl = isCurrentUser ? `<label class="console-user-enabled-switch is-disabled" title="${escapeHtml(uiText("Você não pode desativar sua própria conta."))}"><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} disabled aria-label="${escapeHtml(enabledLabel)}"><span aria-hidden="true"></span></label>` : `<label class="console-user-enabled-switch" title="${escapeHtml(enabledLabel)}"><input data-field="enabled" type="checkbox"${user.enabled?" checked":""} aria-label="${escapeHtml(enabledLabel)}"><span aria-hidden="true"></span></label>`; return `<tr data-user="${user.id}"><td>${enabledControl}</td><td>${escapeHtml(user.username)}${user.must_change_password?` · ${uiText("troca de senha obrigatória")}`:""}</td><td>${user.mfa_enabled ? `<button type="button" class="secondary" data-reset-mfa="${user.id}">${uiText("Redefinir MFA")}</button>` : uiText("Não configurado")}</td><td><select data-field="role">${["VIEWER","OPERATOR","ADMIN"].map(role => `<option${role===user.role?" selected":""}>${role}</option>`).join("")}</select></td><td><div class="console-user-actions"><button type="button" class="secondary" data-edit-user="${user.id}">${uiText("Editar")}</button><button type="button" class="secondary" data-reset-user-password="${user.id}" data-reset-user-username="${escapeHtml(user.username)}">${uiText("Trocar senha")}</button>${deleteControl}<button type="button" data-save-user="${user.id}">${uiText("Salvar")}</button></div></td></tr>`; }).join("")}</tbody></table>`;
@@ -981,8 +1060,7 @@
     query("#console-web-bind").addEventListener("submit", async event => {
       event.preventDefault(); const form = event.currentTarget;
       const trusted_upstream_ips = form.trusted_upstream_ips.value.split(",").map(value => value.trim()).filter(Boolean);
-      await apiCall("/api/admin/web-bind", {method:"PUT", headers:{"content-type":"application/json"}, body:JSON.stringify({host:form.host.value, port:Number(form.port.value), transport:form.transport.value, trusted_upstream_ips})});
-      await render();
+      showWebBindConfirmation({host:form.host.value, port:Number(form.port.value), transport:form.transport.value, trusted_upstream_ips});
     });
     query("#console-update-check").addEventListener("click", async () => {
       if (updateCheckInProgress) return;

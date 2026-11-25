@@ -208,6 +208,14 @@ resource "oci_core_instance" "migration" {
         }
         secrets_compartment_ocid = var.secrets_compartment_ocid
         secret_compartment_ocids = local.secret_compartment_ocids
+        # IAM identifiers and expected declarations only: this never stores
+        # credentials, but lets the console explain the exact setup expected.
+        iam_preflight = {
+          dynamic_group_name       = local.dynamic_group_name
+          policy_compartment_ocid  = var.policy_compartment_ocid
+          secret_compartment_ocids = local.secret_compartment_ocids
+          destination_buckets      = local.destination_buckets
+        }
       })
     }))
   }

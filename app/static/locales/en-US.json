@@ -48,6 +48,22 @@
   "Atualizar agora": "Refresh now",
   "Atualizar automaticamente": "Refresh automatically",
   "Atualizar buckets OCI": "Refresh OCI buckets",
+  "Confirma o acesso efetivo da Instance Principal e mostra a Dynamic Group e as policies esperadas. Sem permissão de inspeção IAM, o resultado fica como não verificável — não como ausente.": "Confirms effective Instance Principal access and shows the expected Dynamic Group and policies. Without IAM inspection permission, the result is not verifiable — not missing.",
+  "Detalhe": "Detail",
+  "Dynamic Group esperada": "Expected Dynamic Group",
+  "Há permissões ou configurações pendentes.": "Permissions or configuration are pending.",
+  "Permissões efetivas": "Effective permissions",
+  "Policy esperada em": "Expected policy in",
+  "Pré-validação concluída.": "Preflight completed.",
+  "Pré-validação IAM da VM": "VM IAM preflight",
+  "Pré-validação IAM indisponível.": "IAM preflight unavailable.",
+  "Regra": "Rule",
+  "Sem permissão de inspeção IAM, o resultado fica como não verificável — não como ausente.": "Without IAM inspection permission, the result is not verifiable — not missing.",
+  "Statement": "Statement",
+  "Validando Instance Principal e declarações IAM…": "Validating Instance Principal and IAM declarations…",
+  "Validar IAM OCI": "Validate OCI IAM",
+  "Verificação": "Check",
+  "Configure iam_preflight no runtime OCI para gerar as policies esperadas.": "Configure iam_preflight in the OCI runtime to generate the expected policies.",
   "Atualizar histórico": "Refresh history",
   "Atualização automática": "Auto refresh",
   "Atualize e selecione um Secret": "Refresh and select a Secret",
@@ -869,4 +885,52 @@
   ,"Emblema detalhado do RAIJIN": "Detailed RAIJIN emblem"
   ,"Emblema detalhado do SEPARADO": "Detailed SEPARADO emblem"
   ,"RAIJIN e SEPARADO integrados em uma execução antiga cloud": "RAIJIN and SEPARADO integrated in a cloud execução antiga"
+  ,"Alterar o endpoint recria a rede Podman e todos os containers Raijin. A sessão atual será encerrada; workers ficarão temporariamente indisponíveis e retomarão o trabalho persistido após a validação do novo endpoint.": "Changing the endpoint recreates the Podman network and every Raijin container. Your current session will end; workers will be temporarily unavailable and resume persisted work after the new endpoint is validated."
+  ,"Há {{count}} unidade(s) de trabalho ativa(s): {{transfers}} transferência(s), {{tasks}} tarefa(s) e {{discoveries}} discovery(s). Será necessário confirmar digitando a frase de manutenção.": "There are {{count}} active work unit(s): {{transfers}} transfer(s), {{tasks}} task(s), and {{discoveries}} discovery job(s). You must confirm by entering the maintenance phrase."
+  ,"Nenhuma transferência, tarefa ou discovery em execução foi identificada.": "No running transfer, task, or discovery job was identified."
+  ,"A alteração para {{endpoint}} recriará a rede Podman e todos os containers Raijin. A sessão atual será encerrada e os workers ficarão temporariamente indisponíveis. O trabalho com leases e checkpoints persistentes será retomado. Continuar?": "Changing to {{endpoint}} will recreate the Podman network and every Raijin container. Your current session will end and workers will be temporarily unavailable. Work with durable leases and checkpoints will resume. Continue?"
+  ,"Há trabalho ativo. Para autorizar esta manutenção, digite exatamente {{phrase}}.": "There is active work. To authorize this maintenance, enter exactly {{phrase}}."
+  ,"A frase de confirmação não confere. Nenhuma alteração foi feita.": "The confirmation phrase does not match. No change was made."
+  ,"A rede e os containers Raijin estão sendo recriados para o novo endpoint.": "The Raijin network and containers are being recreated for the new endpoint."
+  ,"O endpoint foi aplicado, a rede e os containers foram recriados e o health check local foi aprovado. Reconecte-se usando o endpoint selecionado.": "The endpoint was applied, the network and containers were recreated, and the local health check passed. Reconnect using the selected endpoint."
+  ,"O novo endpoint não passou no health check local. O endpoint anterior foi restaurado após a recriação da rede e dos containers.": "The new endpoint did not pass the local health check. The previous endpoint was restored after recreating the network and containers."
+  ,"O novo endpoint não passou no health check local e o endpoint anterior não pôde ser restaurado automaticamente. Execute o procedimento de recuperação documentado.": "The new endpoint did not pass the local health check and the previous endpoint could not be restored automatically. Run the documented recovery procedure."
+  ,"Aplicar configuração de endpoint": "Apply endpoint configuration"
+  ,"Frase de confirmação": "Confirmation phrase"
+  ,"Digite exatamente {{phrase}} para continuar.": "Enter exactly {{phrase}} to continue."
+  ,"Esta manutenção recriará a rede Podman e todos os containers Raijin. Sua sessão será encerrada e os workers ficarão temporariamente indisponíveis.": "This maintenance will recreate the Podman network and all Raijin containers. Your session will end and workers will be temporarily unavailable."
+  ,"Novo endpoint": "New endpoint"
+  ,"Há {{count}} unidade(s) de trabalho ativa(s).": "There are {{count}} active work unit(s)."
+  ,"Nenhum trabalho ativo foi identificado.": "No active work was identified."
+  ,"A operação continua em background. Em até um minuto a página será aberta novamente no novo endpoint.": "The operation continues in the background. Within one minute, the page will open again at the new endpoint."
+  ,"Confirmar e aplicar": "Confirm and apply"
+  ,"Aplicando configuração de endpoint em background…": "Applying endpoint configuration in the background…"
+  ,"A rede e os containers serão recriados. A página será aberta novamente em até um minuto.": "The network and containers will be recreated. The page will open again within one minute."
+  ,"Redirecionando para o novo endpoint em {{seconds}} segundo(s)…": "Redirecting to the new endpoint in {{seconds}} second(s)…"
+  ,"Secrets não aceitos": "Rejected Secrets"
+  ,"Os valores dos Secrets não são exibidos. Os motivos abaixo se limitam ao schema ou à leitura no OCI.": "Secret values are not shown. The reasons below are limited to the schema or OCI read access."
+  ,"Secret OCI": "OCI Secret"
+  ,"Compartment": "Compartment"
+  ,"O conteúdo do Secret não é JSON válido.": "The Secret content is not valid JSON."
+  ,"O conteúdo do Secret deve ser JSON codificado em UTF-8.": "The Secret content must be UTF-8 encoded JSON."
+  ,"É esperado schema_version 1.": "schema_version 1 is required."
+  ,"aws_account_id deve conter 12 dígitos.": "aws_account_id must contain 12 digits."
+  ,"control_bucket não é um nome de bucket S3 válido.": "control_bucket is not a valid S3 bucket name."
+  ,"private_endpoint deve ser um objeto.": "private_endpoint must be an object."
+  ,"private_endpoint contém nomes de campos não suportados.": "private_endpoint contains unsupported field names."
+  ,"private_endpoint.s3_addressing_style deve ser auto, virtual ou path.": "private_endpoint.s3_addressing_style must be auto, virtual, or path."
+  ,"private_endpoint.tls_ca_bundle_path deve ser um caminho absoluto não vazio.": "private_endpoint.tls_ca_bundle_path must be a non-empty absolute path."
+  ,"private_endpoint.tls_ca_bundle_path deve ser um caminho absoluto da infraestrutura.": "private_endpoint.tls_ca_bundle_path must be an absolute infrastructure path."
+  ,"migration_role_arn deve ser uma role ARN para aws_account_id.": "migration_role_arn must be a role ARN for aws_account_id."
+  ,"batch_operations_role_arn deve ser uma role ARN para aws_account_id.": "batch_operations_role_arn must be a role ARN for aws_account_id."
+  ,"private_endpoint.sts_endpoint_url deve ser uma origem HTTPS ou ficar em branco.": "private_endpoint.sts_endpoint_url must be an HTTPS origin or blank."
+  ,"private_endpoint.s3_endpoint_url deve ser uma origem HTTPS ou ficar em branco.": "private_endpoint.s3_endpoint_url must be an HTTPS origin or blank."
+  ,"private_endpoint.s3control_endpoint_url deve ser uma origem HTTPS ou ficar em branco.": "private_endpoint.s3control_endpoint_url must be an HTTPS origin or blank."
+  ,"private_endpoint.sts_endpoint_url deve ser uma origem HTTPS sem credenciais, caminho, query ou fragmento.": "private_endpoint.sts_endpoint_url must be an HTTPS origin without credentials, path, query, or fragment."
+  ,"private_endpoint.s3_endpoint_url deve ser uma origem HTTPS sem credenciais, caminho, query ou fragmento.": "private_endpoint.s3_endpoint_url must be an HTTPS origin without credentials, path, query, or fragment."
+  ,"private_endpoint.s3control_endpoint_url deve ser uma origem HTTPS sem credenciais, caminho, query ou fragmento.": "private_endpoint.s3control_endpoint_url must be an HTTPS origin without credentials, path, query, or fragment."
+  ,"O conteúdo do Secret não corresponde ao schema de conexão AWS suportado.": "The Secret content does not match the supported AWS connection schema."
+  ,"Campos obrigatórios ausentes ou vazios: ": "Missing or empty required field(s): "
+  ,"Valores de exemplo devem ser substituídos: ": "Placeholder value(s) must be replaced: "
+  ,"Não foi possível ler o Secret no OCI: ": "The Secret could not be read from OCI: "
 }

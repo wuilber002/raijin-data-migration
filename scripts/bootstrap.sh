@@ -158,9 +158,9 @@ if [[ ! -f "$oci_runtime_config" ]]; then
   printf '{"secret_ocids":{}}\n' >"$oci_runtime_config"
 fi
 # The runtime config contains only secret references (Vault OCIDs or protected
-# local file paths), never secret values. The application container reads it
-# only when it needs OCI metadata.
-chmod 644 "$oci_runtime_config"
+# local file paths), never secret values. Keep metadata and local paths
+# root-only; all Raijin containers run with the required read access.
+chmod 600 "$oci_runtime_config"
 
 # A host that starts from a protected local password needs an explicit durable
 # marker. On a later restart, changing only oci-runtime.json from
