@@ -1641,6 +1641,13 @@ def test_discovery_queue_renders_at_most_five_items():
     assert "(await api('/api/discovery-queue')).slice(0,5)" in page
 
 
+def test_discovery_queue_uses_a_compact_checkpoint_placeholder_for_historic_jobs():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'title="Esta execução histórica não possui checkpoint individual persistido."' in page
+    assert "Sem checkpoint individual<br>em execução histórica" not in page
+    assert "#discovery-queue th:nth-child(5),#discovery-queue td:nth-child(5){width:1%;white-space:nowrap}" in page
+
+
 def test_final_report_keeps_its_header_visible_and_explains_evidence_metrics():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
 
