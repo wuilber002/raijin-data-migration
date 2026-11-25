@@ -21,6 +21,8 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from app.oci_runtime import object_storage_client, resolve_object_storage_namespace
+
 
 def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
@@ -202,24 +204,25 @@ def build_iam_preflight(runtime: dict[str, Any]) -> dict[str, object]:
     except Exception as error:
         checks.append(_check("OCI Vault", "FAILED", _safe_error(error)))
 
-    namespace = _text(runtime.get("object_storage_namespace"))
     destinations = list(requirements["destination_buckets"])
-    if not namespace:
-        checks.append(_check("OCI Object Storage namespace", "NOT_CONFIGURED",
-                             "object_storage_namespace is absent from the OCI runtime configuration."))
-    elif not destinations:
+    try:
+        storage = object_storage_client(signer, runtime)
+        namespace, namespace_source = resolve_object_storage_namespace(signer, runtime, client=storage)
+        namespace_detail = (
+            "Discovered automatically with the Instance Principal."
+            if namespace_source == "AUTO_DISCOVERED" else "Configured explicitly."
+        )
+        checks.append(_check("OCI Object Storage namespace", "OK", namespace_detail))
+    except Exception as error:
+        namespace = ""
+        storage = None
+        checks.append(_check("OCI Object Storage namespace", "FAILED", _safe_error(error)))
+
+    if namespace and not destinations:
         checks.append(_check("OCI destination buckets", "NOT_CONFIGURED",
                              "iam_preflight.destination_buckets is empty."))
-    else:
+    elif namespace:
         try:
-            endpoint = _text(runtime.get("object_storage_endpoint_url"))
-            client_kwargs: dict[str, object] = {"signer": signer}
-            if endpoint:
-                client_kwargs["service_endpoint"] = endpoint
-            storage = oci.object_storage.ObjectStorageClient({}, **client_kwargs)
-            ca_bundle = _text(runtime.get("object_storage_ca_bundle_path"))
-            if ca_bundle:
-                storage.base_client.session.verify = ca_bundle
             for destination in destinations:
                 bucket = _text(destination.get("name")) if isinstance(destination, dict) else ""
                 if not bucket:

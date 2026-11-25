@@ -52,6 +52,10 @@ from app.cloud_backends import backend_for
 from app.closure_report import build_artifacts, canonical_json, safe_filename, sha256
 from app.duration_format import format_duration
 from app.oci_iam_preflight import build_iam_preflight
+from app.oci_runtime import (
+    object_storage_client as build_oci_object_storage_client,
+    resolve_object_storage_namespace,
+)
 from app.runtime_context import RAIJIN_BUILD_REVISION, RAIJIN_SERVICE_VERSION, load_runtime_context
 from app.production_migrations import migrate as migrate_production_schema
 from app.web_auth import ConsoleRole, PasswordHasher, generate_csrf_token, generate_session_token, hash_opaque_token, load_web_auth_settings, normalize_username, read_password_file, validate_password
@@ -3450,22 +3454,8 @@ def read_oci_runtime_config() -> dict:
 
 def oci_object_storage_client(signer, runtime: dict | None = None):
     """Create OCI SDK client using optional, generic deployment endpoint."""
-    import oci
     values = runtime if runtime is not None else read_oci_runtime_config()
-    endpoint = str(values.get("object_storage_endpoint_url") or "").strip()
-    ca_bundle = str(values.get("object_storage_ca_bundle_path") or "").strip()
-    config = {}
-    if endpoint:
-        client = oci.object_storage.ObjectStorageClient(config, signer=signer, service_endpoint=endpoint)
-    else:
-        client = oci.object_storage.ObjectStorageClient(config, signer=signer)
-    # The OCI SDK validates the minimal Instance Principal config before it
-    # consumes arbitrary config keys, and does not map ``cert_bundle`` onto
-    # its requests session.  Set verification on that session explicitly so
-    # any generic private Object Storage endpoint can provide its CA bundle.
-    if ca_bundle:
-        client.base_client.session.verify = ca_bundle
-    return client
+    return build_oci_object_storage_client(signer, values)
 
 
 AWS_CONNECTION_SCHEMA_VERSION = 1
@@ -5638,16 +5628,16 @@ def oci_readiness(project_id: int | None = None,
     try:
         runtime_config = read_oci_runtime_config()
         secret_ocids = runtime_config.get("secret_ocids", {})
-        object_storage_namespace = runtime_config.get("object_storage_namespace", "").strip()
     except (FileNotFoundError, json.JSONDecodeError, OSError) as error:
         return {"ready": False, "checks": [{"name": "Configuração OCI", "status": "NOT_CONFIGURED", "detail": type(error).__name__}]}
-    if not object_storage_namespace:
-        checks.append({"name": "Namespace OCI Object Storage", "status": "NOT_CONFIGURED", "detail": "namespace ausente do runtime gerado pelo Terraform"})
     try:
         import oci
         signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
         secrets_client = oci.secrets.SecretsClient({}, signer=signer)
         object_storage_client = oci_object_storage_client(signer, runtime_config)
+        object_storage_namespace, namespace_source = resolve_object_storage_namespace(
+            signer, runtime_config, client=object_storage_client
+        )
     except Exception as error:  # SDK exposes several auth-specific exception types.
         return {"ready": False, "checks": [{"name": "Identidade dinâmica OCI", "status": "FAILED", "detail": type(error).__name__}]}
 
@@ -5704,9 +5694,10 @@ def oci_readiness(project_id: int | None = None,
             checks.append({"name": f"AWS connection {connection.label}", "status": "FAILED", "detail": safe_aws_error_summary(error)})
 
     try:
-        if not object_storage_namespace:
-            raise RuntimeError("Object Storage namespace is not configured")
-        checks.append({"name": "Namespace OCI Object Storage", "status": "READY", "detail": object_storage_namespace})
+        namespace_detail = object_storage_namespace
+        if namespace_source == "AUTO_DISCOVERED":
+            namespace_detail += " (descoberto automaticamente pela identidade da instância)"
+        checks.append({"name": "Namespace OCI Object Storage", "status": "READY", "detail": namespace_detail})
         destination_buckets = session.scalars(
             select(Source.destination_bucket).where(*source_scope).distinct()
         )
@@ -7844,9 +7835,7 @@ def refresh_oci_bucket_cache(session: Session = Depends(get_session)) -> dict:
         endpoint = str(runtime.get("object_storage_endpoint_url") or "").strip()
         if endpoint:
             storage = oci_object_storage_client(signer, runtime)
-            namespace = str(runtime.get("object_storage_namespace") or "").strip()
-            if not namespace:
-                namespace = storage.get_namespace().data
+            namespace, _ = resolve_object_storage_namespace(signer, runtime, client=storage)
             compartment_id = str(runtime.get("destination_compartment_id") or "local")
             listed = storage.list_buckets(namespace, compartment_id).data
             items = [{"identifier": getattr(item, "id", None) or f"private:{namespace}:{item.name}",
@@ -10163,10 +10152,10 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
     client = namespace = None
     try:
         import oci
-        namespace = read_oci_runtime_config().get("object_storage_namespace", "").strip()
-        if not namespace:
-            raise RuntimeError("OCI namespace is not configured")
-        client = oci_object_storage_client(oci.auth.signers.InstancePrincipalsSecurityTokenSigner())
+        runtime = read_oci_runtime_config()
+        signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
+        client = oci_object_storage_client(signer, runtime)
+        namespace, _ = resolve_object_storage_namespace(signer, runtime, client=client)
         found: dict[str, int] = {}
         for prefix in [destination_listing_prefix(source)]:
             start = None

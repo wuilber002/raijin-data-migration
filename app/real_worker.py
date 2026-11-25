@@ -38,6 +38,7 @@ from botocore.session import get_session as get_botocore_session
 from sqlalchemy import and_, case, delete, func, or_, select, update
 
 from app.duration_format import format_duration
+from app.oci_runtime import resolve_object_storage_namespace
 from app.main import (
     AwsConnection, DiscoveryJob, Event, MigrationProject, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, RuntimeLaneControlState, RuntimeLaneMeasurement, TransferQueueItem, TransferQueueState, merge_discovery_rows, source_key_in_scope, source_prefix_values,
     DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, resolve_destination_object_key, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, select_global_transfer_lane_candidate, transfer_priority, utcnow,
@@ -62,6 +63,7 @@ RAIJU_TASK_KINDS = frozenset({"TRANSFER_CONTINUOUS"})
 # Aggregate task families are used by scheduling and observability; runtime
 # identities themselves are always the explicit Raikō roles below.
 TRANSFER_TASK_KINDS = RAIJU_TASK_KINDS
+LEGACY_NAMESPACE_CONFIGURATION_ERROR = "OCI Object Storage namespace is absent from runtime configuration"
 # The split topology has one controller and three independent consumers. The
 # controller alone plans/releases work, keeping global decisions serialized;
 # discovery and audit cannot delay restore submission or polling.
@@ -1012,6 +1014,53 @@ def ensure_transfer_task(session, wave: Wave, settings=None) -> bool:
         wave_id=selected.id,
     )
     return True
+
+
+def recover_legacy_namespace_configuration_failures(session) -> int:
+    """Resume only legacy transfer tasks blocked before namespace auto-discovery.
+
+    Older releases marked this local configuration omission as permanent even
+    though no S3 or OCI object operation had begun.  Once the current runtime
+    can resolve the tenancy namespace through the Instance Principal, returning
+    those exact dispatchers to READY is safe and avoids an unnecessary paid
+    restore/reprocess cycle.
+    """
+    tasks = list(session.scalars(select(Task).join(Wave).join(Source).where(
+        Task.kind == "TRANSFER_CONTINUOUS",
+        Task.state == TaskState.FAILED,
+        Task.error.contains(LEGACY_NAMESPACE_CONFIGURATION_ERROR),
+        Wave.status == "FAILED",
+        Source.archived_at.is_(None),
+    )))
+    if not tasks:
+        return 0
+    try:
+        runtime = read_oci_runtime_config()
+        resolve_object_storage_namespace(
+            oci.auth.signers.InstancePrincipalsSecurityTokenSigner(), runtime
+        )
+    except Exception:
+        return 0
+
+    recovered = 0
+    for task in tasks:
+        task.state, task.worker_id, task.lease_expires_at = TaskState.READY, None, None
+        task.available_at = utcnow()
+        task.error = None
+        wave = session.get(Wave, task.wave_id)
+        if wave:
+            wave.status = "TRANSFERRING"
+            event(
+                session,
+                "TRANSFER_NAMESPACE_AUTO_RECOVERED",
+                "Transfer dispatcher resumed after OCI Object Storage namespace auto-discovery; no new AWS restore was submitted.",
+                source_id=wave.source_id,
+                wave_id=wave.id,
+            )
+        recovered += 1
+    if recovered:
+        session.commit()
+    return recovered
 
 
 def reconcile_restored_transfer_lane(session, settings=None) -> int:
@@ -3349,9 +3398,10 @@ def transfer_continuous(session, task: Task, settings) -> None:
     cycle_dispatched_items = 0
     multipart_part_size = int(settings.multipart_part_size_mib) * 1024 * 1024
     s3, _, _ = aws_clients(settings, source.aws_region, source)
-    namespace = read_oci_runtime_config().get("object_storage_namespace", "").strip()
-    if not namespace:
-        raise RuntimeError("OCI Object Storage namespace is absent from runtime configuration")
+    runtime = read_oci_runtime_config()
+    namespace, _ = resolve_object_storage_namespace(
+        oci.auth.signers.InstancePrincipalsSecurityTokenSigner(), runtime
+    )
 
     # Future metadata carries the rate allocated when it was dispatched.
     # This permits adaptive Raiju expansion at the next free slot while
@@ -3848,11 +3898,10 @@ def verify_wave(session, task: Task) -> None:
     """Read OCI objects and compare them to the SHA-256 evidence from S3."""
     wave = session.get(Wave, task.wave_id)
     source = wave.source
-    namespace = read_oci_runtime_config().get("object_storage_namespace", "").strip()
-    if not namespace:
-        raise RuntimeError("OCI Object Storage namespace is absent from runtime configuration")
+    runtime = read_oci_runtime_config()
     signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
     oci_client = object_storage_client(signer)
+    namespace, _ = resolve_object_storage_namespace(signer, runtime, client=oci_client)
     objects = list(session.scalars(select(ObjectRecord).where(
         ObjectRecord.wave_id == wave.id, ObjectRecord.state == ObjectState.TRANSFERRED
     ).order_by(ObjectRecord.id)))
@@ -3986,6 +4035,7 @@ def run_once(role: str = WORKER_ROLE) -> None:
             # polling tasks. Reconcile them before any planner/claim action.
             if reconcile_archived_source_work(session):
                 session.commit()
+            recover_legacy_namespace_configuration_failures(session)
             # A source can have no queued dispatcher precisely because its
             # final remaining object is an expired lease. Sweep that durable
             # state before the planner so it cannot keep the lane blocked.

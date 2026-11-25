@@ -180,6 +180,12 @@ Substitua todos os valores entre `<...>` e proteja o arquivo:
 }
 ```
 
+`object_storage_namespace` é opcional. Quando ausente, o Raijin o consulta
+automaticamente com a Instance Principal da VM e mantém o resultado em cache
+de processo. Um valor explícito continua tendo prioridade, o que é útil em
+ambientes com conectividade OCI restrita. A descoberta não altera este arquivo
+root-owned nem registra credenciais ou valores de Secret.
+
 Cada nome de Secret deve estar em exatamente uma das duas seções. O bootstrap
 inicial da console sempre usa um caminho absoluto root-owned `0600` em
 `secret_file_paths`:
