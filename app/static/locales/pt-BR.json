@@ -933,4 +933,7 @@
   ,"Campos obrigatórios ausentes ou vazios: ": "Campos obrigatórios ausentes ou vazios: "
   ,"Valores de exemplo devem ser substituídos: ": "Valores de exemplo devem ser substituídos: "
   ,"Não foi possível ler o Secret no OCI: ": "Não foi possível ler o Secret no OCI: "
+  ,"Cópia 1:1": "Cópia 1:1"
+  ,"Diretório OCI do projeto": "Diretório OCI do projeto"
+  ,"Rota exclusiva desta source dentro do bucket OCI. Em cópia 1:1, usa a raiz do bucket e reserva todo o bucket para esta origem.": "Rota exclusiva desta source dentro do bucket OCI. Em cópia 1:1, usa a raiz do bucket e reserva todo o bucket para esta origem."
 }

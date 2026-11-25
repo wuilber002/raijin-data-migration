@@ -385,6 +385,10 @@ class Source(Base):
     # Normalized without leading/trailing slash. The empty default preserves
     # legacy identity routing until a project route is explicitly configured.
     destination_prefix: Mapped[str] = mapped_column(String(1024), default="")
+    # An explicit identity route preserves every S3 object key in a dedicated
+    # OCI bucket.  It is never inferred from an empty prefix: legacy sources
+    # may have an empty route without having reserved their destination bucket.
+    destination_identity_copy: Mapped[bool] = mapped_column(Boolean, default=False)
     # Compatibility only.  Transfer strategy now belongs to each wave or to
     # the continuous pipeline, but older PostgreSQL deployments retain this
     # non-null source column.  Keep it populated without exposing it again in
@@ -1568,6 +1572,25 @@ def project_destination_route_conflicts(session: Session, project_id: int,
     ]
 
 
+def identity_destination_bucket_conflicts(session: Session, destination_bucket: str,
+                                          *, identity_copy: bool,
+                                          exclude_source_id: int | None = None) -> list[Source]:
+    """Return durable source records that make an OCI destination unsafe.
+
+    An identity copy owns an entire OCI bucket, including after it is archived:
+    its historical objects retain the original S3 keys and a later source could
+    otherwise overwrite them.  Ordinary prefixed routes remain governed by
+    their existing active-route collision policy.
+    """
+    query = select(Source).where(Source.destination_bucket == destination_bucket)
+    if exclude_source_id is not None:
+        query = query.where(Source.id != exclude_source_id)
+    rows = list(session.scalars(query))
+    if identity_copy:
+        return rows
+    return [source for source in rows if source.destination_identity_copy]
+
+
 def source_route_is_locked(session: Session, source_id: int) -> bool:
     """A project route is immutable once inventory or any wave exists."""
     return bool(
@@ -1592,7 +1615,8 @@ def active_migration_project_or_409(session: Session, project_id: int) -> Migrat
 
 def normalized_project_destination_route(session: Session, migration_project_id: int | None,
                                          destination_bucket: str, destination_prefix: str,
-                                         *, exclude_source_id: int | None = None) -> tuple[MigrationProject | None, str]:
+                                         *, identity_copy: bool = False,
+                                         exclude_source_id: int | None = None) -> tuple[MigrationProject | None, str]:
     """Validate a source's project-owned destination route.
 
     A legacy source has no project and must retain identity routing.  A
@@ -1604,6 +1628,11 @@ def normalized_project_destination_route(session: Session, migration_project_id:
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     if migration_project_id is None:
+        if identity_copy:
+            raise HTTPException(
+                status_code=422,
+                detail="Identity destination copy requires an explicit migration project",
+            )
         if normalized_prefix:
             raise HTTPException(
                 status_code=422,
@@ -1611,11 +1640,29 @@ def normalized_project_destination_route(session: Session, migration_project_id:
             )
         return None, ""
     project = active_migration_project_or_409(session, migration_project_id)
-    if not normalized_prefix:
+    if identity_copy and normalized_prefix:
+        raise HTTPException(
+            status_code=422,
+            detail="Identity destination copy must use the OCI bucket root",
+        )
+    if not identity_copy and not normalized_prefix:
         raise HTTPException(
             status_code=422,
             detail="Project sources require a non-empty destination prefix",
         )
+    bucket_conflicts = identity_destination_bucket_conflicts(
+        session, destination_bucket, identity_copy=identity_copy,
+        exclude_source_id=exclude_source_id,
+    )
+    if bucket_conflicts:
+        names = ", ".join(sorted({source.name for source in bucket_conflicts}))
+        detail = (
+            f"OCI destination bucket is reserved by identity copy source(s): {names}. "
+            "Choose another bucket."
+            if not identity_copy else
+            f"Identity destination copy requires an exclusive OCI bucket; it is already used by source(s): {names}."
+        )
+        raise HTTPException(status_code=409, detail=detail)
     conflicts = project_destination_route_conflicts(
         session,
         project.id,
@@ -1693,6 +1740,7 @@ class SourceCreate(BaseModel):
         default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _-]{1,127}$"
     )
     destination_prefix: str = Field(default="", max_length=1024)
+    destination_identity_copy: bool = False
     # Lower values are preferred only when deadline risk is equivalent.  The
     # default deliberately means "no business preference".
     business_priority: int = Field(default=999, ge=1, le=999)
@@ -2342,7 +2390,7 @@ def create_schema() -> None:
         "restore_forecast_standard_first_seconds": "INTEGER NOT NULL DEFAULT 14400",
         "restore_forecast_standard_complete_seconds": "INTEGER NOT NULL DEFAULT 64800",
     }
-    source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_objects_inserted": "BIGINT NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "migration_project_id": "BIGINT", "destination_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''", "business_priority": "INTEGER NOT NULL DEFAULT 999"}
+    source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_objects_inserted": "BIGINT NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "migration_project_id": "BIGINT", "destination_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''", "destination_identity_copy": "BOOLEAN NOT NULL DEFAULT FALSE", "business_priority": "INTEGER NOT NULL DEFAULT 999"}
     source_columns["archived_at"] = "TIMESTAMP WITH TIME ZONE"
     source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION", "completion_estimate_json": "TEXT NOT NULL DEFAULT '{}'"})
     wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "restore_submission_deadline_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_observed_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_started_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_completed_at": "TIMESTAMP WITH TIME ZONE", "transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
@@ -8257,6 +8305,7 @@ def migration_project_summary(session: Session, project: MigrationProject) -> di
             "name": source.name,
             "destination_bucket": source.destination_bucket,
             "destination_prefix": normalize_destination_prefix(source.destination_prefix),
+            "destination_identity_copy": bool(source.destination_identity_copy),
             "route_locked": source_route_is_locked(session, source.id),
         } for source in sources],
     }
@@ -8308,6 +8357,7 @@ def migration_project_metrics(session: Session, project: MigrationProject,
             "aws_region": source.aws_region, "s3_prefixes": source_prefix_values(source),
             "destination_bucket": source.destination_bucket,
             "destination_prefix": normalize_destination_prefix(source.destination_prefix),
+            "destination_identity_copy": bool(source.destination_identity_copy),
             "discovery_status": source.status,
             "destination_validation_status": source.destination_validation_status,
         } for source in sources],
@@ -8472,6 +8522,7 @@ def project_closure_snapshot(session: Session, project: MigrationProject, readin
             "s3_prefixes": source_prefix_values(source), "aws_region": source.aws_region,
             "destination_bucket": source.destination_bucket,
             "destination_prefix": normalize_destination_prefix(source.destination_prefix),
+            "destination_identity_copy": bool(source.destination_identity_copy),
             "discovery_generation": int(source.discovery_generation or 0),
             "discovery_completed_at": _closure_iso(source.discovery_completed_at),
             "objects": int(data.get("objects") or 0), "bytes": int(data.get("bytes") or 0),
@@ -9002,6 +9053,7 @@ def remove_source_from_migration_project(project_id: int, source_id: int,
     previous_prefix = source.destination_prefix
     source.migration_project_id = None
     source.destination_prefix = ""
+    source.destination_identity_copy = False
     record_event(
         session,
         "SOURCE_REMOVED_FROM_MIGRATION_PROJECT",
@@ -9011,7 +9063,8 @@ def remove_source_from_migration_project(project_id: int, source_id: int,
         migration_project_id=project.id,
     )
     session.commit()
-    return {"source_id": source.id, "migration_project_id": None, "destination_prefix": ""}
+    return {"source_id": source.id, "migration_project_id": None, "destination_prefix": "",
+            "destination_identity_copy": False}
 
 
 @app.get("/api/sources")
@@ -9079,6 +9132,7 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
              "migration_project_id": s.migration_project_id,
              "migration_project_name": (s.migration_project.name if s.migration_project else None),
              "destination_prefix": normalize_destination_prefix(s.destination_prefix),
+             "destination_identity_copy": bool(s.destination_identity_copy),
              "destination_route_locked": source_route_is_locked(session, s.id),
              "aws_bucket_region": s.aws_bucket_region,
              "aws_connection_id": s.aws_connection_id,
@@ -9150,7 +9204,8 @@ def create_source(payload: SourceCreate, session: Session = Depends(get_session)
             f"S3 prefix scope overlaps active source(s): {names}. Deactivate the conflicting source or remove the overlapping prefix."
         ))
     project, destination_prefix = normalized_project_destination_route(
-        session, payload.migration_project_id, payload.destination_bucket, payload.destination_prefix
+        session, payload.migration_project_id, payload.destination_bucket, payload.destination_prefix,
+        identity_copy=payload.destination_identity_copy,
     )
     source_data = payload.model_dump(exclude={"s3_prefixes", "migration_project_name"})
     source_data["migration_project_id"] = project.id if project else None
@@ -9204,9 +9259,13 @@ def update_source(source_id: int, payload: SourceUpdate, session: Session = Depe
     requested_destination_prefix = (payload.destination_prefix
                                     if "destination_prefix" in payload.model_fields_set
                                     else source.destination_prefix)
+    requested_identity_copy = (payload.destination_identity_copy
+                               if "destination_identity_copy" in payload.model_fields_set
+                               else source.destination_identity_copy)
     project, destination_prefix = normalized_project_destination_route(
         session, requested_project_id, payload.destination_bucket,
-        requested_destination_prefix, exclude_source_id=source.id,
+        requested_destination_prefix, identity_copy=requested_identity_copy,
+        exclude_source_id=source.id,
     )
     source_data = payload.model_dump(exclude={"s3_prefixes", "migration_project_name"})
     if "migration_project_id" in payload.model_fields_set:
@@ -9217,6 +9276,8 @@ def update_source(source_id: int, payload: SourceUpdate, session: Session = Depe
         source_data["destination_prefix"] = destination_prefix
     else:
         source_data.pop("destination_prefix", None)
+    if "destination_identity_copy" not in payload.model_fields_set:
+        source_data.pop("destination_identity_copy", None)
     for field, value in source_data.items():
         setattr(source, field, value)
     if payload.aws_connection_id is not None:

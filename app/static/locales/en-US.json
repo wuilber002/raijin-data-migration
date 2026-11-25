@@ -933,4 +933,7 @@
   ,"Campos obrigatórios ausentes ou vazios: ": "Missing or empty required field(s): "
   ,"Valores de exemplo devem ser substituídos: ": "Placeholder value(s) must be replaced: "
   ,"Não foi possível ler o Secret no OCI: ": "The Secret could not be read from OCI: "
+  ,"Cópia 1:1": "1:1 copy"
+  ,"Diretório OCI do projeto": "Project OCI directory"
+  ,"Rota exclusiva desta source dentro do bucket OCI. Em cópia 1:1, usa a raiz do bucket e reserva todo o bucket para esta origem.": "An exclusive route for this source inside the OCI bucket. In 1:1 copy mode, it uses the bucket root and reserves the entire bucket for this source."
 }

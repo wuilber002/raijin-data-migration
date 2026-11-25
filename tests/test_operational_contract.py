@@ -4596,7 +4596,7 @@ def test_multi_source_foundation_preserves_legacy_identity_destination_route():
     legacy = ObjectRecord(source_id=1, object_key="legacy/key", size_bytes=1)
     assert main.resolve_destination_object_key(source, "legacy/key") == "legacy/key"
     assert main.object_destination_key(legacy) == "legacy/key"
-    assert {"migration_project_id", "destination_prefix"} <= set(Source.__table__.columns.keys())
+    assert {"migration_project_id", "destination_prefix", "destination_identity_copy"} <= set(Source.__table__.columns.keys())
     assert "destination_object_key" in ObjectRecord.__table__.columns.keys()
 
 
@@ -4640,6 +4640,38 @@ def test_project_destination_routes_require_distinct_directory_prefixes():
             main.normalized_project_destination_route(session, project.id, "destination", "")
         with pytest.raises(HTTPException, match="requires an explicit migration project"):
             main.normalized_project_destination_route(session, None, "destination", "legacy-prefix")
+
+
+def test_identity_copy_reserves_the_entire_oci_destination_bucket():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-identidade")
+        shared = Source(name="source-prefixada", s3_bucket="source-a", aws_region="us-east-1",
+                        destination_bucket="destination", migration_project=project,
+                        destination_prefix="programa/source-a")
+        session.add_all([project, shared]); session.flush()
+        with pytest.raises(HTTPException, match="exclusive OCI bucket"):
+            main.normalized_project_destination_route(
+                session, project.id, "destination", "/", identity_copy=True,
+            )
+        session.delete(shared); session.flush()
+        _, prefix = main.normalized_project_destination_route(
+            session, project.id, "destination", "/", identity_copy=True,
+        )
+        assert prefix == ""
+        identity = Source(name="source-identidade", s3_bucket="source-b", aws_region="us-east-1",
+                          destination_bucket="destination", migration_project=project,
+                          destination_identity_copy=True)
+        session.add(identity); session.flush()
+        identity.archived_at = datetime.now(timezone.utc)
+        with pytest.raises(HTTPException, match="reserved by identity copy"):
+            main.normalized_project_destination_route(
+                session, project.id, "destination", "programa/source-c",
+            )
 
 
 def test_project_adoption_is_reversible_only_before_inventory_or_waves():
