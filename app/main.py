@@ -281,6 +281,7 @@ class TransferQueueState(StrEnum):
     MULTIPART_RESUME = "MULTIPART_RESUME"
     TRANSFERRED = "TRANSFERRED"
     RETRY_WAIT = "RETRY_WAIT"
+    FAILED = "FAILED"
     EXPIRED = "EXPIRED"
     REAPPROVAL_REQUIRED = "REAPPROVAL_REQUIRED"
     CANCELLED = "CANCELLED"
@@ -6144,7 +6145,7 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
             TransferQueueItem.state.in_([
                 TransferQueueState.AVAILABLE, TransferQueueState.READY,
                 TransferQueueState.LEASED, TransferQueueState.MULTIPART_RESUME,
-                TransferQueueState.RETRY_WAIT,
+                TransferQueueState.RETRY_WAIT, TransferQueueState.FAILED,
             ]),
             Wave.status != "PAUSED", Source.archived_at.is_(None), source_scope,
         )
@@ -6350,6 +6351,8 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
         "leased_bytes": 0,
         "retry_items": 0,
         "retry_bytes": 0,
+        "failed_items": 0,
+        "failed_bytes": 0,
         "earliest_expiry_at": None,
     }
     for lane in lane_by_wave.values():
@@ -6363,6 +6366,8 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
         lane_totals["leased_bytes"] += int(state_bytes.get(TransferQueueState.LEASED.value, 0))
         lane_totals["retry_items"] += int(states.get(TransferQueueState.RETRY_WAIT.value, 0)) + int(states.get(TransferQueueState.MULTIPART_RESUME.value, 0))
         lane_totals["retry_bytes"] += int(state_bytes.get(TransferQueueState.RETRY_WAIT.value, 0)) + int(state_bytes.get(TransferQueueState.MULTIPART_RESUME.value, 0))
+        lane_totals["failed_items"] += int(states.get(TransferQueueState.FAILED.value, 0))
+        lane_totals["failed_bytes"] += int(state_bytes.get(TransferQueueState.FAILED.value, 0))
         expiry = lane.get("earliest_expiry_at")
         if expiry and (lane_totals["earliest_expiry_at"] is None or expiry < lane_totals["earliest_expiry_at"]):
             lane_totals["earliest_expiry_at"] = expiry
@@ -8509,7 +8514,10 @@ def project_closure_readiness(session: Session, project: MigrationProject) -> di
     )) or 0)
     pending_queue = int(session.scalar(select(func.count(TransferQueueItem.id)).where(
         TransferQueueItem.source_id.in_(source_ids) if source_ids else False,
-        TransferQueueItem.state.not_in([TransferQueueState.TRANSFERRED, TransferQueueState.CANCELLED]),
+        TransferQueueItem.state.not_in([
+            TransferQueueState.TRANSFERRED, TransferQueueState.CANCELLED,
+            TransferQueueState.FAILED,
+        ]),
     )) or 0)
     if pending_tasks:
         blockers.append({"code": "PENDING_TASKS", "description": f"Há {pending_tasks} tarefa(s) operacional(is) pendente(s)."})

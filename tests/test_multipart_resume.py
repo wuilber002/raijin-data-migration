@@ -20,6 +20,7 @@ from app.real_worker import (
     AWS_CLIENT_CONFIG,
     batch_manifest_fields,
     classify_task_error,
+    permanent_transfer_error_message,
     restored_object_is_unavailable,
     WORKER_ID,
     effective_multipart_part_size,
@@ -186,6 +187,18 @@ def test_aws_task_errors_retry_only_for_transient_service_pressure():
     assert classify_task_error(malformed)[0] == "failed"
     assert classify_task_error(TimeoutError("provider request timed out"))[0] == "retry"
     assert classify_task_error(ConnectionResetError("connection reset by peer"))[0] == "retry"
+
+
+def test_access_denied_get_object_becomes_an_actionable_non_retryable_transfer_error():
+    denied = ClientError(
+        {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+        "GetObject",
+    )
+    disposition, summary = classify_task_error(denied)
+    assert disposition == "failed"
+    message = permanent_transfer_error_message(denied, summary)
+    assert "s3:GetObject" in message
+    assert "s3:GetObjectVersion" in message
 
 
 def test_unknown_worker_errors_fail_instead_of_looping_indefinitely():

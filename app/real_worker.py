@@ -2716,6 +2716,70 @@ def _remember_transfer_error(item: TransferQueueItem, message: str) -> None:
     item.priority_details_json = json.dumps(details, sort_keys=True)
 
 
+def permanent_transfer_error_message(error: Exception, summary: str) -> str:
+    """Return an operator-safe, actionable explanation for a terminal copy error."""
+    response = getattr(error, "response", None) or {}
+    code = ((response.get("Error") or {}).get("Code") or "").strip()
+    operation = str(getattr(error, "operation_name", "") or "").strip()
+    if code in {"AccessDenied", "AccessDeniedException"} and operation == "GetObject":
+        return (
+            "AWS denied s3:GetObject for the migration role. Grant s3:GetObject "
+            "(and s3:GetObjectVersion when versioned objects are migrated) on the source bucket path."
+        )
+    if code in {"AccessDenied", "AccessDeniedException"} and operation == "GetObjectTagging":
+        return "AWS denied s3:GetObjectTagging for the migration role; grant it on the source bucket path or disable S3 tag preservation."
+    return f"Permanent transfer error: {summary}"
+
+
+def mark_transfer_item_failed(session, item: TransferQueueItem, obj: ObjectRecord | None, message: str) -> None:
+    """Make a non-retryable object failure visible without creating retry churn."""
+    item.state = TransferQueueState.FAILED
+    item.retry_at = item.lease_expires_at = None
+    item.lease_token = item.lease_owner = None
+    item.decision_reason = message[:8000]
+    _remember_transfer_error(item, item.decision_reason)
+    if obj:
+        obj.state = ObjectState.FAILED
+        obj.integrity_error = message[:8000]
+
+
+def quarantine_legacy_permanent_transfer_failures(session) -> int:
+    """Stop retry storms left by releases that retried known IAM denials.
+
+    This is intentionally narrow: only persisted AccessDenied/GetObject
+    evidence is converted. Network errors and unknown failures keep their
+    existing retry semantics.
+    """
+    items = list(session.scalars(select(TransferQueueItem).where(
+        TransferQueueItem.state == TransferQueueState.RETRY_WAIT,
+    )))
+    affected: list[TransferQueueItem] = []
+    for item in items:
+        try:
+            details = json.loads(item.priority_details_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        message = str((details.get("last_transfer_error") or {}).get("message") or "") if isinstance(details, dict) else ""
+        if "AccessDenied" not in message or "GetObject" not in message:
+            continue
+        obj = session.get(ObjectRecord, item.object_id)
+        mark_transfer_item_failed(
+            session, item, obj,
+            "AWS denied s3:GetObject for the migration role. Grant s3:GetObject "
+            "(and s3:GetObjectVersion when versioned objects are migrated) on the source bucket path.",
+        )
+        affected.append(item)
+    for wave_id in {item.wave_id for item in affected}:
+        wave = session.get(Wave, wave_id)
+        if wave:
+            event(
+                session, "CONTINUOUS_TRANSFER_PERMISSION_REQUIRED",
+                f"{sum(1 for item in affected if item.wave_id == wave_id)} object(s) were stopped because AWS denied s3:GetObject. Update the migration role policy, then reprocess the wave.",
+                source_id=wave.source_id, wave_id=wave.id,
+            )
+    return len(affected)
+
+
 def reconcile_continuous_lane_history(session, source: Source) -> tuple[int, int]:
     """Close attempt history orphaned when durable truth outlives a worker."""
     now = utcnow()
@@ -3243,6 +3307,10 @@ def reconcile_continuous_source_waves(session, source: Source) -> None:
             ObjectRecord.wave_id == wave.id,
             ObjectRecord.state.notin_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]),
         )) or 0
+        failed_objects = session.scalar(select(func.count(ObjectRecord.id)).where(
+            ObjectRecord.wave_id == wave.id,
+            ObjectRecord.state == ObjectState.FAILED,
+        )) or 0
         verification_pending = session.scalar(select(Task.id).where(
             Task.wave_id == wave.id,
             Task.kind == "VERIFY_WAVE",
@@ -3282,6 +3350,8 @@ def reconcile_continuous_source_waves(session, source: Source) -> None:
                     source_id=source.id,
                     wave_id=wave.id,
                 )
+        elif failed_objects and not outstanding:
+            wave.status = "TRANSFERRED_WITH_ERRORS"
         elif pending_restore:
             wave.status = "RESTORE_DRAINING" if outstanding else "RESTORING"
         elif outstanding:
@@ -3591,14 +3661,31 @@ def transfer_continuous(session, task: Task, settings) -> None:
             if segment:
                 segment.exit_reason = "restored copy unavailable; explicit new restore approval required"
         else:
-            item.state = TransferQueueState.RETRY_WAIT
-            item.retry_at = utcnow() + timedelta(seconds=min(1800, 60 * max(1, int(item.attempts))))
-            item.decision_reason = f"retry after transfer error: {type(error).__name__ if error else 'incomplete'}: {error or ''}"[:8000]
-            _remember_transfer_error(item, item.decision_reason)
-            if obj and obj.state == ObjectState.TRANSFERRING:
-                obj.state = ObjectState.RESTORED
-            if segment:
-                segment.exit_reason = "transient transfer error; returned to retry queue"
+            disposition, summary = classify_task_error(error or RuntimeError("transfer did not complete"))
+            if disposition == "failed":
+                reason = permanent_transfer_error_message(error or RuntimeError("transfer did not complete"), summary)
+                mark_transfer_item_failed(session, item, obj, reason)
+                wave = session.get(Wave, item.wave_id)
+                if wave and not session.scalar(select(Event.id).where(
+                    Event.wave_id == wave.id,
+                    Event.kind == "CONTINUOUS_TRANSFER_PERMISSION_REQUIRED",
+                ).limit(1)):
+                    event(
+                        session, "CONTINUOUS_TRANSFER_PERMISSION_REQUIRED", reason,
+                        source_id=wave.source_id, wave_id=wave.id,
+                    )
+                print(f"continuous transfer permanently failed for queue item {item.id}: {reason}", flush=True)
+                if segment:
+                    segment.exit_reason = "permanent transfer error; operator action required"
+            else:
+                item.state = TransferQueueState.RETRY_WAIT
+                item.retry_at = utcnow() + timedelta(seconds=min(1800, 60 * max(1, int(item.attempts))))
+                item.decision_reason = f"retry after transfer error: {summary}"[:8000]
+                _remember_transfer_error(item, item.decision_reason)
+                if obj and obj.state == ObjectState.TRANSFERRING:
+                    obj.state = ObjectState.RESTORED
+                if segment:
+                    segment.exit_reason = "transient transfer error; returned to retry queue"
         if item.dispatch_batch_id:
             batch = session.get(TransferDispatchBatch, item.dispatch_batch_id)
             if batch:
@@ -4036,6 +4123,8 @@ def run_once(role: str = WORKER_ROLE) -> None:
             if reconcile_archived_source_work(session):
                 session.commit()
             recover_legacy_namespace_configuration_failures(session)
+            if quarantine_legacy_permanent_transfer_failures(session):
+                session.commit()
             # A source can have no queued dispatcher precisely because its
             # final remaining object is an expired lease. Sweep that durable
             # state before the planner so it cannot keep the lane blocked.
