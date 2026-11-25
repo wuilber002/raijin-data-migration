@@ -2277,6 +2277,8 @@ def test_wave_report_returns_tasks_in_durable_execution_order():
     report = source[source.index("def wave_report"):source.index("\n\n@app.get(\"/api/waves/{wave_id}/cost-estimate\")")]
     assert 'select(Task).where(Task.wave_id == wave_id).order_by(Task.id)' in report
     assert 'for t in tasks' in report
+    assert '"restore_requirement"' in report
+    assert "ARCHIVE_STORAGE_CLASSES" in report
 
 
 def test_restore_polling_uses_the_same_control_prefix_as_submission_and_labels_report_errors():

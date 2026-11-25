@@ -12820,6 +12820,13 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
         .group_by(ObjectRecord.state)
     ).all())
     total_objects, total_bytes = session.execute(select(func.count(ObjectRecord.id), func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(ObjectRecord.wave_id == wave_id)).one()
+    archive_objects, archive_bytes = session.execute(select(
+        func.count(ObjectRecord.id),
+        func.coalesce(func.sum(ObjectRecord.size_bytes), 0),
+    ).where(
+        ObjectRecord.wave_id == wave_id,
+        ObjectRecord.storage_class.in_(ARCHIVE_STORAGE_CLASSES),
+    )).one()
     integrity_verified, integrity_failed = session.execute(
         select(
             func.coalesce(func.sum(case((ObjectRecord.integrity_verified_at.is_not(None), 1), else_=0)), 0),
@@ -12938,6 +12945,11 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
             ),
         }
     return {"wave_id": wave_id, "status": wave.status, "objects": total_objects, "bytes": total_bytes, "object_states": by_state,
+            "restore_requirement": {
+                "required": bool(archive_objects),
+                "archive_objects": int(archive_objects or 0),
+                "archive_bytes": int(archive_bytes or 0),
+            },
             "summary": {"transfer_elapsed_seconds": transfer_elapsed_seconds,
                         "transfer_time_basis": transfer_time_basis,
                         "transfer_started_at": transfer_started_at,

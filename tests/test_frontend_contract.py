@@ -995,6 +995,13 @@ def test_wave_report_distinguishes_aws_batch_evidence_from_raijin_polling():
     assert "Raijin polling:" in page
 
 
+def test_wave_report_distinguishes_transfer_preparation_from_an_aws_restore():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "restore_requirement" in page
+    assert "Preparação da transferência (sem restore AWS)" in page
+    assert "não cria Batch Job, manifest nem solicitação de restore na AWS" in page
+
+
 def test_object_detail_opens_in_a_scrollable_modal():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="object-detail-modal"' in page
