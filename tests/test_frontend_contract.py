@@ -1800,3 +1800,13 @@ def test_reprocess_requires_a_second_explicit_confirmation_when_restore_cost_may
     assert "checkpoints multipart serão preservados" in page
     assert "approve_new_restore:true" in page
     assert "pode gerar cobrança AWS" in page
+
+
+def test_continuous_transfer_drain_has_global_and_source_controls_with_completion_notice():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert "Parar novas transferências e drenar" in page
+    assert "Parar e drenar transfers" in page
+    assert "/api/transfer-queue/${stopped?'resume':'drain'}" in page
+    assert "/api/sources/${sourceId}/transfer/${stopped?'resume':'drain'}" in page
+    assert "Drenagem de transferências concluída" in page

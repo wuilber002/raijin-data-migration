@@ -1882,6 +1882,63 @@ refreshAll();
   })();
 </script>
 <script>
+  // Continuous-transfer admission controls are intentionally rendered from
+  // the durable queue read model. A click requests a drain; completion is
+  // announced only after leases have actually reached zero.
+  (()=>{
+    let transferControls={global:{state:'RUNNING'},sources:{}};
+    const announced=new Set();
+    const notifyCompleted=(key,control,label)=>{
+      if(control?.state!=='DRAINED'||announced.has(key))return;
+      announced.add(key);
+      const pending=Number(control.failed_items||0);
+      say(pending?`Drenagem concluída com atenção: ${label}. ${fmt(pending)} item(ns) já estavam com falha e exigem ação do operador.`:`Drenagem de transferências concluída: ${label}. Nenhuma cópia permaneceu em execução.`,Boolean(pending));
+    };
+    window.toggleTransferDrain=async scope=>{
+      const sourceId=scope==='global'?null:Number(scope);
+      const control=sourceId==null?transferControls.global:transferControls.sources[String(sourceId)];
+      const stopped=control?.state!=='RUNNING';
+      const label=sourceId==null?'toda a fila contínua':'esta source';
+      const message=stopped
+        ?`Retomar transferências para ${label}? Itens preservados voltarão à fila.`
+        :`Parar novas transferências para ${label} e drenar as cópias em andamento? Restores AWS não serão cancelados e nenhum item será perdido.`;
+      if(!await ask(message,{confirmLabel:stopped?'Retomar transferências':'Parar e drenar',danger:!stopped}))return;
+      try{
+        const url=sourceId==null?`/api/transfer-queue/${stopped?'resume':'drain'}`:`/api/sources/${sourceId}/transfer/${stopped?'resume':'drain'}`;
+        const result=await api(url,{method:'POST'});
+        say(stopped?'Transferências retomadas.':result.state==='DRAINED'?'Drenagem concluída.':'Drenagem solicitada; as cópias em andamento serão concluídas com segurança.');
+        await Promise.all([loadHealth(),loadTasks(),loadEvents()]);
+      }catch(error){say(`Controle de transferências: ${error.message}`,true)}
+    };
+    const renderBase=renderTransferQueue;
+    renderTransferQueue=function(queue){
+      transferControls=queue.transfer_controls||transferControls;
+      renderBase(queue);
+      const global=transferControls.global||{state:'RUNNING'};
+      const label=global.state==='RUNNING'?'Transferências em execução':global.state==='DRAINING'?`Drenando ${fmt(global.active_items||0)} cópia(s) em andamento`:'Transferências paradas com drenagem concluída';
+      const button=global.state==='RUNNING'?'Parar novas transferências e drenar':'Retomar transferências';
+      const target=$('#transfer-queue');
+      if(target)target.insertAdjacentHTML('afterbegin',`<div class="transfer-drain-control ${global.state==='RUNNING'?'':'warning'}"><b>${label}</b><button type="button" class="${global.state==='RUNNING'?'warn':'secondary'}" onclick="toggleTransferDrain('global')">${button}</button></div>`);
+      notifyCompleted('global',global,'fila global');
+      addSourceTransferDrainButton();
+    };
+    window.addSourceTransferDrainButton=()=>{
+      const actions=$('#source-summary-actions');if(!actions||!selectedSource)return;
+      let button=actions.querySelector('.source-transfer-drain-action');
+      const control=transferControls.sources[String(selectedSource)]||{state:'RUNNING'};
+      if(!button){button=document.createElement('button');button.type='button';button.className='secondary source-transfer-drain-action';actions.append(button)}
+      const stopped=control.state!=='RUNNING';
+      button.textContent=stopped?'▶ Retomar transfers':'⏹ Parar e drenar transfers';
+      button.className=stopped?'secondary source-transfer-drain-action':'warn source-transfer-drain-action';
+      button.disabled=Boolean(control.blocked_by_global&&!stopped);
+      button.title=control.blocked_by_global&&!stopped?'A fila global está em drenagem.':'Controla apenas a transferência contínua desta source; restores não são cancelados.';
+      button.onclick=()=>toggleTransferDrain(selectedSource);
+      notifyCompleted(`source:${selectedSource}`,control,`source selecionada`);
+    };
+    new MutationObserver(()=>window.addSourceTransferDrainButton()).observe($('#source-summary'),{childList:true,subtree:true});
+  })();
+</script>
+<script>
   /* Serialize operational refreshes: concurrent timer ticks and route loads
      previously rebuilt the full queue at the same time. */
   (()=>{
@@ -1899,6 +1956,7 @@ refreshAll();
   })();
 </script>
 <style>
+  .transfer-drain-control{display:flex;align-items:center;justify-content:space-between;gap:.8rem;margin:.4rem 0 .9rem;padding:.7rem .8rem;border:1px solid #2dd4bf;border-radius:7px;background:#0f2f34}.transfer-drain-control.warning{border-color:#f59e0b;background:#34220d}.transfer-drain-control button{width:auto!important;white-space:nowrap}
   /* This late override must follow the global button normalization. The
      available revision is interactive, but must remain visually identical
      and column-aligned with the installed revision. */

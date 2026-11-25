@@ -41,7 +41,7 @@ from app.duration_format import format_duration
 from app.oci_runtime import resolve_object_storage_namespace
 from app.main import (
     AwsConnection, DiscoveryJob, Event, MigrationProject, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, RuntimeLaneControlState, RuntimeLaneMeasurement, TransferQueueItem, TransferQueueState, merge_discovery_rows, source_key_in_scope, source_prefix_values,
-    DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, resolve_destination_object_key, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, select_global_transfer_lane_candidate, transfer_priority, utcnow,
+    DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, continuous_transfer_drain_requested, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, resolve_destination_object_key, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, select_global_transfer_lane_candidate, transfer_priority, utcnow,
 )
 
 # Raiju is the operational worker identity.  Raikou is the separate governance
@@ -954,6 +954,8 @@ def ensure_transfer_task(session, wave: Wave, settings=None) -> bool:
     allowing one partially restored wave to monopolize copy capacity.
     """
     source = wave.source
+    if continuous_transfer_drain_requested(session, source.id):
+        return False
     # A previous Raiju can disappear after it claims an object but before it
     # records the next dispatcher. Recover the object *before* looking for a
     # live task or an eligible item, otherwise an expired LEASED row is
@@ -3007,6 +3009,8 @@ def claim_continuous_transfer_batch(session, source: Source, settings, task: Tas
     in the lane it is a valid one-object batch; waiting to fill a 100-object
     or 1-GiB batch could let a temporary restored copy expire.
     """
+    if continuous_transfer_drain_requested(session, source.id):
+        return []
     # Priority/expiry belongs to the source timeline; task retries and leases
     # are deliberately real-time so a virtual date can never make an item
     # permanently ineligible for retry.
@@ -3378,6 +3382,12 @@ def transfer_continuous(session, task: Task, settings) -> None:
         task.error = "Source is no longer eligible"
         session.commit()
         return
+    if continuous_transfer_drain_requested(session, source.id):
+        task.state, task.worker_id, task.lease_expires_at = TaskState.PAUSED, None, None
+        task.error = "Paused: continuous transfer drain requested by operator"
+        event(session, "CONTINUOUS_TRANSFER_DRAINING", "Raiju accepted the operator drain; no new object will be admitted.", source_id=source.id, wave_id=anchor.id)
+        session.commit()
+        return
     normal_concurrency: LaneConcurrencyController | None = None
     autoscale_state = _runtime_lane_control_state(session)
     # A fully drained lane is a genuine new capacity epoch. Preserve
@@ -3418,6 +3428,12 @@ def transfer_continuous(session, task: Task, settings) -> None:
 
     initial = claim_continuous_transfer_batch(session, source, settings, task)
     if not initial:
+        if continuous_transfer_drain_requested(session, source.id):
+            task.state, task.worker_id, task.lease_expires_at = TaskState.PAUSED, None, None
+            task.error = "Paused: continuous transfer drain requested by operator"
+            event(session, "CONTINUOUS_TRANSFER_DRAINING", "Raiju stopped before admitting a new object.", source_id=source.id, wave_id=anchor.id)
+            session.commit()
+            return
         reconcile_continuous_source_waves(session, source)
         succeed(session, task)
         ensure_transfer_task(session, anchor, settings)
@@ -3874,6 +3890,27 @@ def transfer_continuous(session, task: Task, settings) -> None:
             reconcile_continuous_source_waves(session, source)
             renew_lane_leases()
             session.commit()
+
+            # A handoff has already been reserved, but drain mode promises
+            # that no new object starts. Return it before its slot is reused.
+            if continuous_transfer_drain_requested(session, source.id):
+                _return_unstarted_queue_items(
+                    session,
+                    [session.get(TransferQueueItem, successor_id)
+                     for successor_id, _slot in handoff_starts
+                     if session.get(TransferQueueItem, successor_id)],
+                    "returned because the operator requested a transfer drain",
+                )
+                if futures:
+                    session.commit()
+                    continue
+                task.state, task.worker_id, task.lease_expires_at = TaskState.PAUSED, None, None
+                task.error = "Paused: continuous transfer drain completed"
+                event(session, "CONTINUOUS_TRANSFER_DRAIN_COMPLETED",
+                      "Raiju drained active transfers at safe object boundaries; no new object was admitted.",
+                      source_id=source.id, wave_id=anchor.id)
+                session.commit()
+                return
 
             # All active transfer functions observe SIGTERM only at a
             # safe object/part checkpoint.  Until they settle, retain

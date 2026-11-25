@@ -719,6 +719,34 @@ def test_deep_audit_queue_pause_and_resume_preserves_fifo_work():
         assert deep_audits(session=session)["queue_paused"] is False
 
 
+def test_continuous_transfer_drain_stops_admission_without_losing_queued_work():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="transfer-drain", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination")
+        wave = Wave(source=source, name="drain-wave", max_bytes=1, restore_days=1,
+                    restore_tier="BULK", status="RESTORED")
+        session.add_all([source, wave]); session.flush()
+        session.add(Task(wave_id=wave.id, kind="TRANSFER_CONTINUOUS", state=TaskState.READY))
+        session.add(TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=1,
+                                      size_bytes=1, state=TransferQueueState.READY))
+        session.commit()
+
+        drained = main.request_continuous_transfer_drain(session, source.id)
+        assert drained["state"] == "DRAINED"
+        assert session.get(TransferQueueItem, 1).state == TransferQueueState.READY
+        assert session.scalar(select(Task.state).where(Task.kind == "TRANSFER_CONTINUOUS")) == TaskState.PAUSED
+        assert main.continuous_transfer_drain_requested(session, source.id) is True
+
+        resumed = main.resume_continuous_transfer_drain(session, source.id)
+        assert resumed["resumed"] == 1
+        assert session.scalar(select(Task.state).where(Task.kind == "TRANSFER_CONTINUOUS")) == TaskState.READY
+
+
 def test_verify_wave_execution_renews_its_task_lease():
     worker = (Path(__file__).resolve().parents[1] / "app/real_worker.py").read_text(encoding="utf-8")
     dispatch = worker[worker.index('elif task.kind == "VERIFY_WAVE"'):worker.index('else: raise RuntimeError', worker.index('elif task.kind == "VERIFY_WAVE"'))]

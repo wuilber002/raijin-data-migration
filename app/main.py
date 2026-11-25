@@ -406,6 +406,11 @@ class Source(Base):
     # always wins, but an operator can make one source preferred when several
     # equally safe queues later share a project-level lane.
     business_priority: Mapped[int] = mapped_column(Integer, default=999, index=True)
+    # Admission to the continuous transfer lane can be stopped independently
+    # for one source without cancelling restores or discarding durable work.
+    continuous_transfer_drain_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    continuous_transfer_drain_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    continuous_transfer_drain_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     discovery_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # ``discovery_elapsed_seconds`` is durable work time, rather than wall-clock
     # time since an operator pressed the button.  This keeps the UI useful when
@@ -1425,6 +1430,9 @@ class RuntimeSettings(Base):
     # audit rereads OCI content and can be suspended without delaying restores
     # or the continuous transfer lane.
     deep_audit_queue_paused: Mapped[bool] = mapped_column(default=False)
+    continuous_transfer_drain_requested: Mapped[bool] = mapped_column(default=False)
+    continuous_transfer_drain_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    continuous_transfer_drain_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The queue view refreshes several operational tables. Thirty seconds is
     # responsive enough for an operator while avoiding overlapping full-page
     # renders in browsers under load.
@@ -2374,6 +2382,9 @@ def create_schema() -> None:
         "multipart_part_size_mib": "INTEGER NOT NULL DEFAULT 64",
         "activity_auto_refresh_enabled": "BOOLEAN NOT NULL DEFAULT TRUE",
         "deep_audit_queue_paused": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "continuous_transfer_drain_requested": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "continuous_transfer_drain_requested_at": "TIMESTAMP WITH TIME ZONE",
+        "continuous_transfer_drain_completed_at": "TIMESTAMP WITH TIME ZONE",
         "activity_refresh_seconds": "INTEGER NOT NULL DEFAULT 30",
         "dynamic_wave_target_seconds": "INTEGER NOT NULL DEFAULT 43200",
         "dynamic_wave_max_objects": "INTEGER NOT NULL DEFAULT 50000",
@@ -2395,7 +2406,7 @@ def create_schema() -> None:
         "restore_forecast_standard_first_seconds": "INTEGER NOT NULL DEFAULT 14400",
         "restore_forecast_standard_complete_seconds": "INTEGER NOT NULL DEFAULT 64800",
     }
-    source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_objects_inserted": "BIGINT NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "migration_project_id": "BIGINT", "destination_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''", "destination_identity_copy": "BOOLEAN NOT NULL DEFAULT FALSE", "business_priority": "INTEGER NOT NULL DEFAULT 999"}
+    source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "migration_project_id": "BIGINT", "destination_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''", "destination_identity_copy": "BOOLEAN NOT NULL DEFAULT FALSE", "business_priority": "INTEGER NOT NULL DEFAULT 999", "continuous_transfer_drain_requested": "BOOLEAN NOT NULL DEFAULT FALSE", "continuous_transfer_drain_requested_at": "TIMESTAMP WITH TIME ZONE", "continuous_transfer_drain_completed_at": "TIMESTAMP WITH TIME ZONE"}
     source_columns["archived_at"] = "TIMESTAMP WITH TIME ZONE"
     source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION", "completion_estimate_json": "TEXT NOT NULL DEFAULT '{}'"})
     wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "restore_submission_deadline_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_observed_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_started_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_completed_at": "TIMESTAMP WITH TIME ZONE", "transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
@@ -6721,6 +6732,30 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
     lane_totals["backlog_eta_seconds"] = round(
         lane_totals["bytes"] / reference_bytes_per_second, 2
     ) if reference_bytes_per_second > 0 else None
+    settings = runtime_settings(session)
+    global_active = int(lane_totals["active_items"] or 0)
+    global_state = "RUNNING"
+    if settings.continuous_transfer_drain_requested:
+        global_state = "DRAINING" if global_active else "DRAINED"
+    source_controls = {}
+    for source_id, source in session.execute(select(Source.id, Source).where(source_scope)):
+        active = int(session.scalar(select(func.count(TransferQueueItem.id)).where(
+            TransferQueueItem.source_id == source_id,
+            TransferQueueItem.state == TransferQueueState.LEASED,
+        )) or 0)
+        failed = int(session.scalar(select(func.count(TransferQueueItem.id)).where(
+            TransferQueueItem.source_id == source_id,
+            TransferQueueItem.state == TransferQueueState.FAILED,
+        )) or 0)
+        state = "RUNNING"
+        if source.continuous_transfer_drain_requested:
+            state = "DRAINING" if active else "DRAINED"
+        source_controls[str(source_id)] = {
+            "state": state, "active_items": active, "failed_items": failed,
+            "requested_at": source.continuous_transfer_drain_requested_at,
+            "completed_at": source.continuous_transfer_drain_completed_at,
+            "blocked_by_global": bool(settings.continuous_transfer_drain_requested),
+        }
     return {
         "project_id": project.id if project else None,
         "project_name": project.name if project else None,
@@ -6728,6 +6763,12 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
         "planned_lookahead": planned,
         "restore_schedule": restore_schedule,
         "continuous_lane": lane_totals,
+        "transfer_controls": {"global": {
+            "state": global_state, "active_items": global_active,
+            "failed_items": int(lane_totals["failed_items"] or 0),
+            "requested_at": settings.continuous_transfer_drain_requested_at,
+            "completed_at": settings.continuous_transfer_drain_completed_at,
+        }, "sources": source_controls},
         "generated_at": now,
     }
 
@@ -7743,6 +7784,121 @@ def pause_deep_audits(session: Session = Depends(get_session)) -> dict:
 @app.post("/api/deep-audits/resume")
 def resume_deep_audits(session: Session = Depends(get_session)) -> dict:
     return resume_deep_audit_queue(session)
+
+
+def continuous_transfer_drain_requested(session: Session, source_id: int) -> bool:
+    """Whether global or source-local transfer admission is stopped."""
+    global_stop = session.scalar(select(RuntimeSettings.continuous_transfer_drain_requested).limit(1))
+    source_stop = session.scalar(select(Source.continuous_transfer_drain_requested).where(Source.id == source_id))
+    return bool(global_stop or source_stop)
+
+
+def _pause_ready_transfer_tasks(session: Session, source_id: int | None = None) -> int:
+    query = select(Task).join(Wave).where(
+        Task.kind == "TRANSFER_CONTINUOUS", Task.state == TaskState.READY,
+    )
+    if source_id is not None:
+        query = query.where(Wave.source_id == source_id)
+    tasks = list(session.scalars(query.with_for_update()))
+    for task in tasks:
+        task.state, task.worker_id, task.lease_expires_at = TaskState.PAUSED, None, None
+        task.error = "Paused: continuous transfer drain requested by operator"
+    return len(tasks)
+
+
+def _transfer_drain_snapshot(session: Session, source_id: int | None = None) -> dict:
+    scope = [] if source_id is None else [TransferQueueItem.source_id == source_id]
+    active = int(session.scalar(select(func.count(TransferQueueItem.id)).where(
+        TransferQueueItem.state == TransferQueueState.LEASED, *scope
+    )) or 0)
+    failed = int(session.scalar(select(func.count(TransferQueueItem.id)).where(
+        TransferQueueItem.state == TransferQueueState.FAILED, *scope
+    )) or 0)
+    return {"active_items": active, "failed_items": failed,
+            "state": "DRAINING" if active else "DRAINED"}
+
+
+def request_continuous_transfer_drain(session: Session, source_id: int | None = None) -> dict:
+    """Stop future transfer admission and let already leased objects settle."""
+    now = utcnow()
+    label = "global continuous transfer lane" if source_id is None else f"source {source_id}"
+    if source_id is None:
+        settings = runtime_settings(session)
+        settings.continuous_transfer_drain_requested = True
+        settings.continuous_transfer_drain_requested_at = now
+        settings.continuous_transfer_drain_completed_at = None
+    else:
+        source = source_or_404(session, source_id)
+        source.continuous_transfer_drain_requested = True
+        source.continuous_transfer_drain_requested_at = now
+        source.continuous_transfer_drain_completed_at = None
+    paused = _pause_ready_transfer_tasks(session, source_id)
+    snapshot = _transfer_drain_snapshot(session, source_id)
+    if snapshot["state"] == "DRAINED":
+        if source_id is None:
+            runtime_settings(session).continuous_transfer_drain_completed_at = now
+        else:
+            source_or_404(session, source_id).continuous_transfer_drain_completed_at = now
+    record_event(session, "CONTINUOUS_TRANSFER_DRAIN_REQUESTED",
+                 f"Operator stopped new admission for {label}; {snapshot['active_items']} leased transfer(s) will drain safely.",
+                 source_id=source_id)
+    if snapshot["state"] == "DRAINED":
+        record_event(session, "CONTINUOUS_TRANSFER_DRAIN_COMPLETED",
+                     f"Continuous transfer drain completed for {label}.", source_id=source_id)
+    session.commit()
+    return {"scope": "GLOBAL" if source_id is None else "SOURCE", "source_id": source_id,
+            "paused": paused, **snapshot}
+
+
+def resume_continuous_transfer_drain(session: Session, source_id: int | None = None) -> dict:
+    """Resume only work stopped by the selected scope, preserving FIFO order."""
+    if source_id is None:
+        settings = runtime_settings(session)
+        settings.continuous_transfer_drain_requested = False
+        settings.continuous_transfer_drain_requested_at = None
+        settings.continuous_transfer_drain_completed_at = None
+        source_filter = Source.continuous_transfer_drain_requested.is_(False)
+    else:
+        source = source_or_404(session, source_id)
+        source.continuous_transfer_drain_requested = False
+        source.continuous_transfer_drain_requested_at = None
+        source.continuous_transfer_drain_completed_at = None
+        source_filter = Wave.source_id == source_id
+    query = select(Task).join(Wave).join(Source).where(
+        Task.kind == "TRANSFER_CONTINUOUS", Task.state == TaskState.PAUSED, source_filter,
+    )
+    if source_id is not None and runtime_settings(session).continuous_transfer_drain_requested:
+        session.commit()
+        return {"scope": "SOURCE", "source_id": source_id, "resumed": 0, "blocked_by_global": True}
+    tasks = list(session.scalars(query.with_for_update()))
+    for task in tasks:
+        task.state, task.worker_id, task.lease_expires_at, task.error = TaskState.READY, None, None, None
+    record_event(session, "CONTINUOUS_TRANSFER_DRAIN_RESUMED",
+                 f"Operator resumed continuous transfer admission for {'the global lane' if source_id is None else f'source {source_id}' }.",
+                 source_id=source_id)
+    session.commit()
+    return {"scope": "GLOBAL" if source_id is None else "SOURCE", "source_id": source_id,
+            "resumed": len(tasks), "blocked_by_global": False}
+
+
+@app.post("/api/transfer-queue/drain")
+def drain_continuous_transfer_queue(session: Session = Depends(get_session)) -> dict:
+    return request_continuous_transfer_drain(session)
+
+
+@app.post("/api/transfer-queue/resume")
+def resume_continuous_transfer_queue(session: Session = Depends(get_session)) -> dict:
+    return resume_continuous_transfer_drain(session)
+
+
+@app.post("/api/sources/{source_id}/transfer/drain")
+def drain_source_continuous_transfer(source_id: int, session: Session = Depends(get_session)) -> dict:
+    return request_continuous_transfer_drain(session, source_id)
+
+
+@app.post("/api/sources/{source_id}/transfer/resume")
+def resume_source_continuous_transfer(source_id: int, session: Session = Depends(get_session)) -> dict:
+    return resume_continuous_transfer_drain(session, source_id)
 
 
 def repair_completed_deep_audit_statuses(session: Session) -> int:
