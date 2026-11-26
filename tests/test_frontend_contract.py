@@ -855,7 +855,17 @@ def test_dynamic_pipeline_exposes_its_fixed_immediate_release_and_source_priorit
     assert 'id="source-business-priority"' in page
     assert '<option value="999">Sem preferência</option>' in page
     assert '<option value="1">#1</option>' in page
+    assert '<option value="10" selected>#10</option>' in page
     assert '<option value="20">#20</option>' in page
+
+
+def test_new_source_defaults_to_identity_copy_and_queues_discovery_when_requested():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'id="source-identity-copy" type="checkbox" checked' in page
+    assert 'id="source-auto-discovery" type="checkbox" checked' in page
+    assert "$('#source-auto-discovery').checked=true" in page
+    assert "autoDiscovery=creating&&$('#source-auto-discovery').checked" in page
+    assert "`/api/sources/${d.id}/discovery`" in page
 
 
 def test_aws_connection_sync_and_safe_configuration_controls_are_available():
