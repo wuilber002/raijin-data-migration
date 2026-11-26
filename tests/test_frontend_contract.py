@@ -1830,3 +1830,6 @@ def test_project_executive_summary_has_project_button_modal_and_grouped_aws_oci_
     assert "Porcentagem entregue" in page
     assert 'colspan="5">AWS' in page and 'colspan="5">OCI' in page
     assert "Total de arquivos" in page and "Total de dados" in page
+    assert "project-executive-summary-table-wrap{max-width:100%;flex:1 1 auto;min-height:0;overflow:auto" in page
+    assert "project-executive-summary-table th:first-child,.project-executive-summary-table td:first-child{position:sticky" in page
+    assert "<td><b>${escape(source.source_name)}</b></td><td>${percent(source.percentage?.files)}</td>" in page
