@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -30,6 +31,7 @@ from app.main import app as raijin_app, healthz
 from app.closure_report import build_artifacts, canonical_json, safe_csv_cell, sha256
 from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, RAIKOU_AUDIT_TASK_KINDS, RAIKOU_RESTORE_TASK_KINDS, RAIKOU_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
 from app import real_worker
+from app import transfer_execution
 
 
 def test_object_model_contains_durable_multipart_checkpoint_fields():
@@ -374,6 +376,7 @@ def test_real_source_freezes_generic_private_endpoint_profile_before_execution()
         s3_addressing_style="virtual", tls_ca_bundle_path="/etc/separado-local-ca/separado-local.crt",
     )
     source = Source(name="frozen-endpoint", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+    source.aws_connection = connection
     freeze_source_endpoint_configuration(source, connection)
     frozen = source.aws_endpoint_snapshot_json
     connection.s3_endpoint_url = "https://changed.example.invalid"
@@ -1177,10 +1180,15 @@ def test_source_selector_exposes_one_operational_status_per_source():
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     with Session() as session:
+        connection = AwsConnection(label="selector", secret_ocid="ocid1.vaultsecret.oc1..selector",
+                                   aws_account_id="123456789012", default_region="us-east-1",
+                                   control_bucket="control")
         discovered = Source(id=901, name="discovered", s3_bucket="bucket-1", aws_region="us-east-1", destination_bucket="destination", status="DISCOVERED")
         queued = Source(id=902, name="queued", s3_bucket="bucket-2", aws_region="us-east-1", destination_bucket="destination", status="DISCOVERED")
         transferring = Source(id=903, name="transferring", s3_bucket="bucket-3", aws_region="us-east-1", destination_bucket="destination", status="DISCOVERED")
         restoring = Source(id=904, name="restoring", s3_bucket="bucket-4", aws_region="us-east-1", destination_bucket="destination", status="DISCOVERED")
+        for source in (discovered, queued, transferring, restoring):
+            source.aws_connection = connection
         session.add_all([discovered, queued, transferring, restoring]); session.flush()
         session.add_all([
             Wave(id=901, source_id=queued.id, name="queued", max_bytes=1, restore_days=1, restore_tier="BULK", status="READY_FOR_RESTORE"),
@@ -1203,11 +1211,15 @@ def test_source_selector_keeps_deactivated_sources_visible_with_explicit_state()
     Session = sessionmaker(bind=engine)
     with Session() as session:
         deactivated_at = datetime.now(timezone.utc)
+        connection = AwsConnection(label="selector-history", secret_ocid="ocid1.vaultsecret.oc1..selector-history",
+                                   aws_account_id="123456789012", default_region="us-east-1",
+                                   control_bucket="control")
         source = Source(
             id=906, name="historical", s3_bucket="bucket-history",
             aws_region="us-east-1", destination_bucket="destination",
             status="ARCHIVED", archived_at=deactivated_at,
         )
+        source.aws_connection = connection
         session.add(source)
         session.commit()
 
@@ -2443,6 +2455,36 @@ def test_restore_submission_reports_the_failed_aws_stage_without_exposing_detail
 def test_real_worker_imports_the_runtime_namespace_reader_used_by_transfer_and_audit():
     worker = Path("app/real_worker.py").read_text(encoding="utf-8")
     assert "read_oci_runtime_config" in worker[worker.index("from app.main import ("):worker.index(")\n\n# Raiju")]
+
+
+def test_raiju_recovers_only_legacy_namespace_blocked_transfers(monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as session:
+        source = Source(name="legacy-namespace", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", status="DISCOVERED")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="wave-001", max_bytes=1, restore_days=3,
+                    restore_tier="BULK", status="FAILED")
+        session.add(wave); session.flush()
+        blocked = Task(wave_id=wave.id, kind="TRANSFER_CONTINUOUS", state=TaskState.FAILED,
+                       error="RuntimeError: OCI Object Storage namespace is absent from runtime configuration")
+        unrelated = Task(wave_id=wave.id, kind="TRANSFER_CONTINUOUS", state=TaskState.FAILED,
+                         error="Access denied")
+        session.add_all([blocked, unrelated]); session.commit()
+        signer_type = type("Signer", (), {})
+        monkeypatch.setattr(transfer_execution, "oci", SimpleNamespace(
+            auth=SimpleNamespace(signers=SimpleNamespace(InstancePrincipalsSecurityTokenSigner=signer_type))
+        ))
+        monkeypatch.setattr(transfer_execution, "read_oci_runtime_config", lambda: {})
+        monkeypatch.setattr(transfer_execution, "resolve_object_storage_namespace", lambda *_args: ("tenant", "AUTO_DISCOVERED"))
+
+        assert transfer_execution.recover_legacy_namespace_blocked_transfers(session) == 1
+        assert session.get(Task, blocked.id).state == TaskState.READY
+        assert session.get(Task, blocked.id).error is None
+        assert session.get(Task, unrelated.id).state == TaskState.FAILED
+        assert session.get(Wave, wave.id).status == "TRANSFER_DRAINING"
+        assert session.scalar(select(Event.id).where(Event.kind == "TRANSFER_NAMESPACE_AUTO_RECOVERED"))
 
 
 def test_wave_report_returns_tasks_in_durable_execution_order():
