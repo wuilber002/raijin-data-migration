@@ -1892,6 +1892,9 @@ def test_project_executive_summary_has_project_button_modal_and_grouped_aws_oci_
 
     assert 'id="migration-project-executive-summary"' in page
     assert "openProjectExecutiveSummaryModal()" in page
+    assert 'id="project-executive-summary-export"' in page
+    assert "function exportProjectExecutiveSummaryXlsx()" in page
+    assert "/executive-summary.xlsx" in page
     assert "/executive-summary" in page
     assert "Porcentagem entregue" in page
     assert 'colspan="5">AWS (Origem)' in page and 'colspan="5">OCI (Destino)' in page

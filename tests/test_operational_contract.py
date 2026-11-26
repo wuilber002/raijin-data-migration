@@ -816,6 +816,35 @@ def test_project_executive_summary_reports_inventory_and_delivered_oci_evidence(
         assert report["sources"][0]["percentage"] == {"files": 50.0, "size": 25.0}
 
 
+def test_project_executive_summary_exports_the_same_source_evidence_as_xlsx():
+    from io import BytesIO
+    import app.main as main
+    from openpyxl import load_workbook
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = MigrationProject(name="Executive export")
+        source = Source(name="export-source", s3_bucket="aws-bucket", aws_region="us-east-1",
+                        destination_bucket="oci-bucket", migration_project=project)
+        session.add_all([project, source])
+        session.flush()
+        session.add(ObjectRecord(source_id=source.id, object_key="done", size_bytes=100,
+                                 storage_class="STANDARD", state=ObjectState.TRANSFERRED))
+        session.commit()
+
+        response = main.export_migration_project_executive_summary(project.id, session=session)
+        workbook = load_workbook(BytesIO(response.body))
+        sheet = workbook["Resumo executivo"]
+
+        assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        assert response.headers["content-disposition"].endswith('"Executive-export-resumo-executivo.xlsx"')
+        assert sheet["B1"].value == "Executive export"
+        assert sheet["A7"].value == "export-source"
+        assert sheet["G7"].value == 1 and sheet["L7"].value == 1
+
+
 def test_verify_wave_execution_renews_its_task_lease():
     worker = (Path(__file__).resolve().parents[1] / "app/real_worker.py").read_text(encoding="utf-8")
     dispatch = worker[worker.index('elif task.kind == "VERIFY_WAVE"'):worker.index('else: raise RuntimeError', worker.index('elif task.kind == "VERIFY_WAVE"'))]

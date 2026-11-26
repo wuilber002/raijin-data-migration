@@ -8767,6 +8767,62 @@ def migration_project_executive_summary(project_id: int,
             "sources": source_rows}
 
 
+@app.get("/api/migration-projects/{project_id}/executive-summary.xlsx")
+def export_migration_project_executive_summary(project_id: int,
+                                               session: Session = Depends(get_session)) -> Response:
+    """Export the evidence shown in the executive summary as an Excel workbook."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    data = migration_project_executive_summary(project_id, session=session)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Resumo executivo"
+    sheet.append(["Projeto", data["project_name"]])
+    sheet.append(["Sources", data["source_count"]])
+    sheet.append(["Total de arquivos", data["total_files"]])
+    sheet.append(["Total de dados (bytes)", data["total_size_bytes"]])
+    sheet.append([])
+    headers = [
+        "Source", "Entrega de arquivos (%)", "Entrega de tamanho (%)",
+        "AWS região", "AWS bucket name", "AWS bucket tier", "AWS bucket files",
+        "AWS bucket total size (bytes)", "OCI região", "OCI bucket name",
+        "OCI bucket tier", "OCI bucket files", "OCI bucket total size (bytes)",
+    ]
+    sheet.append(headers)
+    for source in data["sources"]:
+        aws, oci, percentage = source["aws"], source["oci"], source["percentage"]
+        sheet.append([
+            source["source_name"], percentage["files"] / 100, percentage["size"] / 100,
+            aws["region"], aws["bucket_name"], aws["bucket_tier"], aws["bucket_files"],
+            aws["bucket_size_bytes"], oci["region"], oci["bucket_name"], oci["bucket_tier"],
+            oci["bucket_files"], oci["bucket_size_bytes"],
+        ])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    for cell in sheet[6]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F4E78")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for row in sheet.iter_rows(min_row=7, min_col=2, max_col=3):
+        for cell in row:
+            cell.number_format = "0.00%"
+    for column, width in {
+        "A": 32, "B": 22, "C": 22, "D": 16, "E": 38, "F": 28, "G": 18,
+        "H": 30, "I": 16, "J": 38, "K": 24, "L": 18, "M": 30,
+    }.items():
+        sheet.column_dimensions[column].width = width
+    sheet.freeze_panes = "A7"
+    sheet.auto_filter.ref = f"A6:M{max(6, sheet.max_row)}"
+    content = io.BytesIO()
+    workbook.save(content)
+    filename = f'{safe_filename(data["project_name"])}-resumo-executivo.xlsx'
+    return Response(content.getvalue(),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                             "Cache-Control": "private, no-store"})
+
+
 PROJECT_CLOSURE_TERMINAL_WAVE_STATUSES = {"COMPLETED"}
 def _closure_iso(value: datetime | None) -> str | None:
     if value is None:

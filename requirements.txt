@@ -7,3 +7,4 @@ boto3==1.42.44
 python-multipart==0.0.20
 argon2-cffi==25.1.0
 qrcode==8.2
+openpyxl==3.1.5
