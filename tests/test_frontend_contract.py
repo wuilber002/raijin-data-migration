@@ -1138,7 +1138,7 @@ def test_source_editor_can_move_only_discovery_only_sources_between_projects():
     assert "populateSourceMigrationProjectSelector" in page
     assert "/project-move-eligibility" in page
     assert "/move-project" in page
-    assert "Discovery preservado; ainda não há waves, transfers ou pipeline" in (ROOT / "app/main.py").read_text(encoding="utf-8")
+    assert "a source pode trocar de projeto" in (ROOT / "app/main.py").read_text(encoding="utf-8")
 
 
 def test_source_creation_loads_cached_aws_connections_and_oci_buckets_outside_settings():

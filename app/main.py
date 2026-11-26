@@ -1618,17 +1618,16 @@ def source_route_is_locked(session: Session, source_id: int) -> bool:
 
 
 def source_project_move_eligibility(session: Session, source: Source) -> tuple[bool, str]:
-    """Allow ownership reassignment only after discovery and before execution.
+    """Allow ownership reassignment through discovery and before execution.
 
-    The source route and inventory are immutable evidence.  Project ownership,
-    however, is a reporting and admission boundary and can safely move while
-    the source has completed discovery but has not entered any wave, queue or
-    pipeline lifecycle.
+    Project ownership is a reporting and admission boundary.  It can safely
+    move before discovery, after a failed discovery, or after a completed
+    discovery, as long as the source has not entered any wave, transfer queue
+    or pipeline lifecycle.  This deliberately preserves an expensive (and
+    possibly partial) discovery instead of forcing the operator to repeat it.
     """
     if source.migration_project_id is None:
         return False, "A source sem projeto deve ser associada pelo fluxo de adoção"
-    if source.status != "DISCOVERED":
-        return False, "A source precisa ter o discovery concluído antes de trocar de projeto"
     if session.scalar(select(DiscoveryJob.id).where(
         DiscoveryJob.source_id == source.id,
         DiscoveryJob.state.in_([TaskState.READY, TaskState.RUNNING]),
@@ -1644,7 +1643,11 @@ def source_project_move_eligibility(session: Session, source: Source) -> tuple[b
         DynamicPipelineRun.source_id == source.id
     ).limit(1)):
         return False, "A source já possui execução de pipeline"
-    return True, "Discovery preservado; ainda não há waves, transfers ou pipeline"
+    if source.status == "DISCOVERED":
+        return True, "Discovery preservado; ainda não há waves, transfers ou pipeline"
+    if source.status == "DISCOVERY_FAILED":
+        return True, "Discovery com falha preservado; ainda não há waves, transfers ou pipeline"
+    return True, "Ainda não há waves, transfers ou pipeline; a source pode trocar de projeto"
 
 
 def migration_project_or_404(session: Session, project_id: int) -> MigrationProject:
@@ -9492,7 +9495,7 @@ def get_source_project_move_eligibility(source_id: int,
 @app.post("/api/sources/{source_id}/move-project")
 def move_discovered_source_to_migration_project(source_id: int, payload: SourceProjectMove,
                                                  session: Session = Depends(get_session)) -> dict:
-    """Move a discovery-only source without touching its inventory or OCI route."""
+    """Move a pre-execution source without touching its inventory or OCI route."""
     source = active_source_or_409(session, source_id)
     eligible, reason = source_project_move_eligibility(session, source)
     if not eligible:

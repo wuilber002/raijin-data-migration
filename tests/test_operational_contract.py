@@ -4936,6 +4936,33 @@ def test_discovery_only_source_moves_between_projects_without_rewriting_inventor
         assert event is not None and event.migration_project_id == target_project.id
 
 
+@pytest.mark.parametrize("status", ["CONFIGURED", "DISCOVERY_FAILED"])
+def test_pre_discovery_or_failed_discovery_source_can_move_between_projects(status):
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        wrong_project = main.MigrationProject(name=f"projeto-origem-{status.lower()}")
+        target_project = main.MigrationProject(name=f"projeto-destino-{status.lower()}")
+        source = Source(
+            name=f"source-{status.lower()}", s3_bucket="source", aws_region="us-east-1",
+            destination_bucket="destination", destination_prefix="preservado/source",
+            migration_project=wrong_project, status=status,
+        )
+        session.add_all([wrong_project, target_project, source]); session.flush()
+
+        eligible, _reason = main.source_project_move_eligibility(session, source)
+        assert eligible is True
+        moved = main.move_discovered_source_to_migration_project(
+            source.id, main.SourceProjectMove(migration_project_id=target_project.id), session,
+        )
+
+        assert moved["moved"] is True
+        assert source.migration_project_id == target_project.id
+
+
 def test_source_project_move_is_blocked_after_a_wave_exists():
     import app.main as main
 
