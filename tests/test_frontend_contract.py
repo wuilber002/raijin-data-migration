@@ -876,7 +876,7 @@ def test_new_source_defaults_to_identity_copy_and_queues_discovery_when_requeste
     assert "textContent='Executar discovery remoto'" in page
     assert "$('#source-auto-discovery').checked=true" in page
     assert "autoDiscovery=creating&&$('#source-auto-discovery').checked" in page
-    assert "`/api/sources/${d.id}/discovery`" in page
+    assert "`/api/sources/${persistedSourceId}/discovery`" in page
 
 
 def test_aws_connection_sync_and_safe_configuration_controls_are_available():
@@ -1128,7 +1128,10 @@ def test_source_form_opens_in_a_modal_with_a_fixed_prefix_workspace():
     assert "openModal('#source-modal')" in page
     assert "function closeSourceModal()" in page
     assert "#source-modal .prefix-list{align-content:start;height:10rem;max-height:10rem;overflow-y:auto" in page
-    assert "closeSourceModal();await loadSources()" in page
+    assert "id=\"source-mutation-modal\"" in page
+    assert "function runSourceMutation" in page
+    assert "setSourceMutationControls(true)" in page
+    assert "window.scrollTo(scroll.x,scroll.y)" in page
 
 
 def test_source_editor_can_move_only_discovery_only_sources_between_projects():
@@ -1139,6 +1142,19 @@ def test_source_editor_can_move_only_discovery_only_sources_between_projects():
     assert "/project-move-eligibility" in page
     assert "/move-project" in page
     assert "a source pode trocar de projeto" in (ROOT / "app/main.py").read_text(encoding="utf-8")
+
+
+def test_source_mutation_waits_for_confirmation_without_switching_projects():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    start = page.index("$('#source-form').addEventListener('submit'")
+    end = page.index("$('#source-form').addEventListener('reset'", start)
+    submit_handler = page[start:end]
+    assert "runSourceMutation(" in submit_handler
+    assert "selectedSource=moved?'':persistedSourceId" in submit_handler
+    assert "sayProjectMoveComplete" in submit_handler
+    assert "window.raijinSelectedProjectId=String(d.migration_project_id)" not in submit_handler
+    assert "document.dispatchEvent(new CustomEvent('raijin:project-changed'" not in submit_handler
+    assert "Abrir projeto destino" in page
 
 
 def test_source_creation_loads_cached_aws_connections_and_oci_buckets_outside_settings():
