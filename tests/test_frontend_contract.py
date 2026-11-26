@@ -1807,6 +1807,9 @@ def test_continuous_transfer_drain_has_global_and_source_controls_with_completio
 
     assert "Parar novas transferências e drenar" in page
     assert "Parar e drenar transfers" in page
+    assert "id='global-transfer-drain-button'" in page
+    assert "queue-global-transfer-drain" in page
+    assert "const target=$('#global-transfer-drain-button');" in page
     assert "/api/transfer-queue/${stopped?'resume':'drain'}" in page
     assert "/api/sources/${sourceId}/transfer/${stopped?'resume':'drain'}" in page
     assert "Drenagem de transferências concluída" in page
