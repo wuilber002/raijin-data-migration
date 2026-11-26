@@ -749,6 +749,22 @@ class DynamicPipelineRun(Base):
     source: Mapped[Source] = relationship()
 
 
+class ImportPipelineItem(Base):
+    """One discovery object admitted to an import-driven continuous pipeline."""
+    __tablename__ = "import_pipeline_items"
+    __table_args__ = (
+        UniqueConstraint("pipeline_run_id", "object_id", name="uq_import_pipeline_item_object"),
+        Index("ix_import_pipeline_items_run_sequence", "pipeline_run_id", "sequence"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    pipeline_run_id: Mapped[int] = mapped_column(ForeignKey("dynamic_pipeline_runs.id"), index=True)
+    object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    wave_id: Mapped[int | None] = mapped_column(ForeignKey("waves.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class RestoreAttempt(Base):
     """Immutable evidence for one S3 Batch Operations restore submission."""
     __tablename__ = "restore_attempts"
@@ -2771,14 +2787,30 @@ def wave_or_404(session: Session, wave_id: int) -> Wave:
     return wave
 
 
+IMPORT_PIPELINE_PLANNER_VERSION = "v5-import-list"
+
+
+def import_pipeline_run(run: DynamicPipelineRun) -> bool:
+    return run.planner_version == IMPORT_PIPELINE_PLANNER_VERSION
+
+
+def pipeline_remaining_object_count(session: Session, run: DynamicPipelineRun) -> int:
+    if import_pipeline_run(run):
+        return int(session.scalar(select(func.count(ImportPipelineItem.id)).where(
+            ImportPipelineItem.pipeline_run_id == run.id,
+            ImportPipelineItem.wave_id.is_(None),
+        )) or 0)
+    return int(session.scalar(select(func.count(ObjectRecord.id)).where(
+        *discovered_object_filters(run.source_id, run.selection_prefix)
+    )) or 0)
+
+
 def refresh_dynamic_pipeline_run(session: Session, run: DynamicPipelineRun) -> str:
     """Derive and persist the durable lifecycle of one dynamic pipeline run."""
     statuses = list(session.scalars(select(Wave.status).where(Wave.pipeline_run_id == run.id)))
     succeeded = {"COMPLETED", "VERIFIED", "TRANSFERRED"}
     if statuses and all(status in succeeded for status in statuses):
-        remaining = session.scalar(select(func.count(ObjectRecord.id)).where(
-            *discovered_object_filters(run.source_id, run.selection_prefix)
-        )) or 0
+        remaining = pipeline_remaining_object_count(session, run)
         # With a bounded horizon, completed waves do not mean the pipeline is
         # complete while undispatched inventory still exists.
         if remaining:
@@ -6567,7 +6599,7 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
     planned = []
     for wave, source in session.execute(
         select(Wave, Source).join(Source).where(
-            Wave.planner_mode == "DYNAMIC",
+            Wave.planner_mode.in_(["DYNAMIC", "IMPORT_PIPELINE"]),
             Wave.status == "RESTORE_SCHEDULED",
             Source.archived_at.is_(None), source_scope,
         ).order_by(Wave.pipeline_run_id, Wave.id)
@@ -7033,7 +7065,7 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
 def flight_board_availability(source_id: int | None = Query(default=None, ge=1),
                               session: Session = Depends(get_session)) -> dict:
     """Cheap indicator for the queued source's dynamic flight board only."""
-    filters = [Wave.planner_mode == "DYNAMIC"]
+    filters = [Wave.planner_mode.in_(["DYNAMIC", "IMPORT_PIPELINE"])]
     if source_id is not None:
         filters.append(Wave.source_id == source_id)
     dynamic_waves = session.scalar(select(func.count(Wave.id)).where(*filters)) or 0
@@ -7053,7 +7085,7 @@ def flight_board(source_id: int | None = Query(default=None, ge=1),
     now = utcnow()
     if project_id is not None and (source_id is not None or run_id is not None):
         raise HTTPException(status_code=422, detail="Project timeline cannot be combined with source_id or run_id")
-    filters = [Wave.planner_mode == "DYNAMIC"]
+    filters = [Wave.planner_mode.in_(["DYNAMIC", "IMPORT_PIPELINE"])]
     source_name = None
     if source_id is not None:
         source_name = source_or_404(session, source_id).name
@@ -11874,10 +11906,114 @@ def project_restore_admission_allocations(session: Session, settings: RuntimeSet
     return result
 
 
+def next_import_pipeline_wave_objects(session: Session, run: DynamicPipelineRun,
+                                      settings: RuntimeSettings) -> tuple[list[tuple[ImportPipelineItem, ObjectRecord, float]], dict]:
+    """Pack the next unassigned import-list slice without touching other discovery rows."""
+    profiles = transfer_history_profiles(session, run.source_id, settings.multipart_part_size_mib)
+    lane_profile = hierarchical_lane_capacity_profile(session, run.source_id, settings.max_throughput_mbps)
+    selected: list[tuple[ImportPipelineItem, ObjectRecord, float]] = []
+    total_bytes = prediction_samples = 0
+    predicted_sum = 0.0
+    exclusive = False
+    rows = session.execute(select(ImportPipelineItem, ObjectRecord).join(
+        ObjectRecord, ObjectRecord.id == ImportPipelineItem.object_id
+    ).where(
+        ImportPipelineItem.pipeline_run_id == run.id,
+        ImportPipelineItem.wave_id.is_(None),
+        ObjectRecord.state == ObjectState.DISCOVERED,
+    ).order_by(ImportPipelineItem.sequence).with_for_update(skip_locked=True)).yield_per(5000)
+    for item, obj in rows:
+        predicted, samples = predict_size_transfer_seconds(obj.size_bytes, settings, profiles)
+        projected_bytes = total_bytes + obj.size_bytes
+        projected_count = len(selected) + 1
+        projected_wall = predicted_continuous_lane_seconds(
+            projected_bytes, predicted_sum + predicted, settings, lane_profile,
+        )
+        if selected and (projected_bytes > run.target_max_bytes
+                         or projected_count > run.max_objects
+                         or projected_wall > run.target_transfer_seconds):
+            break
+        selected.append((item, obj, predicted))
+        total_bytes, predicted_sum = projected_bytes, predicted_sum + predicted
+        prediction_samples = max(prediction_samples, samples)
+        if len(selected) == 1 and (total_bytes > run.target_max_bytes
+                                   or projected_wall > run.target_transfer_seconds):
+            exclusive = True
+            break
+    if not selected:
+        return [], {}
+    wall_seconds = predicted_continuous_lane_seconds(
+        total_bytes, predicted_sum, settings, lane_profile,
+    )
+    return selected, {"bytes": total_bytes, "object_count": len(selected),
+                      "predicted_transfer_seconds": math.ceil(wall_seconds),
+                      "prediction_samples": prediction_samples, "exclusive": exclusive}
+
+
+def materialize_import_pipeline_horizon(session: Session, settings: RuntimeSettings,
+                                         run: DynamicPipelineRun,
+                                         now: datetime | None = None) -> list[Wave]:
+    """Materialize only the restore horizon for a validated file import."""
+    refresh_dynamic_pipeline_run(session, run)
+    if run.status in {"COMPLETED", "HISTORICAL", "NEEDS_ATTENTION"}:
+        return []
+    source = session.get(Source, run.source_id) or source_or_404(session, run.source_id)
+    scheduler_now = now or source_scheduler_clock(source).effective_now
+    slots = adaptive_restore_slot_limit(session, run, settings)
+    configured_horizon = int(run.restore_horizon_waves or settings.dynamic_restore_horizon_waves or 1)
+    horizon = configured_horizon if slots == 2 else max(configured_horizon, slots + 1)
+    existing = list(session.scalars(select(Wave).where(Wave.pipeline_run_id == run.id).order_by(
+        Wave.planned_transfer_start_at, Wave.id
+    )))
+    restore_horizon_statuses = {"RESTORE_SCHEDULED", "RESTORE_REQUESTED", "RESTORE_REQUEST_ACCEPTED", "RESTORING"}
+    active = [wave for wave in existing if wave.status in restore_horizon_statuses]
+    created: list[Wave] = []
+    while len(active) < horizon:
+        selected, plan = next_import_pipeline_wave_objects(session, run, settings)
+        if not selected:
+            break
+        restore_first, restore_complete, samples = observed_restore_forecast_seconds(
+            session, source.id, run.restore_tier
+        )
+        restore_at, transfer_at = dynamic_wave_schedule(
+            run, existing, scheduler_now, settings, restore_complete_seconds=restore_complete,
+        )
+        name = automatic_wave_name(session, source, "import-pipeline", run.next_sequence)
+        run.next_sequence += 1
+        wave = Wave(
+            source_id=source.id, name=name, max_bytes=run.target_max_bytes,
+            restore_days=run.restore_days, restore_tier=run.restore_tier,
+            transfer_release_policy="AS_OBJECTS_AVAILABLE", status="RESTORE_SCHEDULED",
+            planner_mode="IMPORT_PIPELINE", predicted_transfer_seconds=plan["predicted_transfer_seconds"],
+            prediction_samples=plan["prediction_samples"], predicted_restore_first_seconds=restore_first,
+            predicted_restore_complete_seconds=restore_complete,
+            predicted_restore_confidence_seconds=restore_forecast_confidence_seconds(
+                restore_first, restore_complete, samples=samples
+            ), planned_restore_at=restore_at, restore_submission_deadline_at=restore_at,
+            planned_transfer_start_at=transfer_at, pipeline_run_id=run.id,
+        )
+        session.add(wave); session.flush()
+        for item, obj, predicted in selected:
+            item.wave_id = wave.id
+            obj.wave_id = wave.id
+            obj.state = ObjectState.WAVE_ASSIGNED
+            obj.planned_transfer_seconds = predicted
+        record_event(
+            session, "IMPORT_PIPELINE_WAVE_MATERIALIZED",
+            f"Import pipeline run {run.id} materialized wave '{wave.name}' with {len(selected)} object(s) and {plan['bytes']} byte(s)",
+            source_id=source.id, wave_id=wave.id,
+        )
+        existing.append(wave); active.append(wave); created.append(wave)
+    refresh_dynamic_pipeline_run(session, run)
+    return created
+
+
 def materialize_dynamic_pipeline_horizon(session: Session, settings: RuntimeSettings,
                                          run: DynamicPipelineRun,
                                          now: datetime | None = None) -> list[Wave]:
     """Keep only a small, adaptive set of waves materialized ahead of the lane."""
+    if import_pipeline_run(run):
+        return materialize_import_pipeline_horizon(session, settings, run, now)
     refresh_dynamic_pipeline_run(session, run)
     if run.status in {"COMPLETED", "HISTORICAL", "NEEDS_ATTENTION"}:
         return []
@@ -12142,6 +12278,56 @@ def create_prioritized_import_waves(source_id: int, payload: PrioritizedWaveImpo
     session.commit()
     return {"waves": len(created), "objects": len(plan["objects"]), "bytes": plan["bytes"],
             "oversized_waves": plan["oversized"], "duplicates_ignored": plan["duplicates"],
+            "names": [wave.name for wave in created]}
+
+
+@app.post("/api/sources/{source_id}/waves/import-pipeline", status_code=201)
+def create_import_continuous_pipeline(source_id: int, payload: PrioritizedWaveImport,
+                                      session: Session = Depends(get_session)) -> dict:
+    """Start a continuous pipeline that can consume only a validated file list."""
+    source = active_source_or_409(session, source_id)
+    require_dynamic_pipeline_rediscovery(session, source)
+    require_non_overlapping_source_scope(session, source)
+    plan = prioritized_wave_import_preview(session, source, payload, lock=True)
+    if plan["missing"] or plan["unavailable"]:
+        raise HTTPException(status_code=409, detail=(
+            "The import is not valid for this discovery: every URI must exist and be available before the pipeline can start."
+        ))
+    if not plan["objects"]:
+        raise HTTPException(status_code=409, detail="No discovered objects are available for this import pipeline")
+    settings = runtime_settings(session)
+    target_transfer_seconds, _reserve_seconds = automatic_dynamic_duration_limit(payload.restore_days)
+    run = DynamicPipelineRun(
+        source_id=source.id, planner_version=IMPORT_PIPELINE_PLANNER_VERSION,
+        status="SCHEDULED", target_max_bytes=payload.max_bytes,
+        target_transfer_seconds=target_transfer_seconds, max_objects=DYNAMIC_PLATFORM_MAX_OBJECTS,
+        restore_safety_seconds=settings.dynamic_restore_safety_seconds,
+        restore_horizon_waves=settings.dynamic_restore_horizon_waves,
+        restore_days=payload.restore_days, restore_tier=payload.restore_tier,
+        transfer_strategy="AS_OBJECTS_AVAILABLE", scheduled_restores=True,
+        discovery_generation=int(source.discovery_generation or 0), next_sequence=1,
+        historical_samples=sum(value["samples"] for value in transfer_history_profiles(
+            session, source.id, settings.multipart_part_size_mib
+        ).values()),
+    )
+    session.add(run); session.flush()
+    session.add_all(ImportPipelineItem(
+        pipeline_run_id=run.id, object_id=item.id, sequence=sequence
+    ) for sequence, item in enumerate(plan["objects"], start=1))
+    session.flush()
+    created = materialize_dynamic_pipeline_horizon(
+        session, settings, run, now=source_scheduler_clock(source).effective_now
+    )
+    release_dynamic_restore_horizon(session, settings)
+    record_event(
+        session, "IMPORT_CONTINUOUS_PIPELINE_STARTED",
+        f"Import pipeline run {run.id} started with {len(plan['objects'])} validated object(s) / "
+        f"{plan['bytes']} byte(s); {len(created)} wave(s) materialized in the initial horizon.",
+        source_id=source.id,
+    )
+    session.commit()
+    return {"pipeline_run_id": run.id, "waves": len(created), "objects": len(plan["objects"]),
+            "bytes": plan["bytes"], "scheduled_restores": True,
             "names": [wave.name for wave in created]}
 
 
@@ -13091,6 +13277,8 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
         DynamicPipelineRun.status.not_in(["COMPLETED", "HISTORICAL"]),
     )))
     for run in runs:
+        if import_pipeline_run(run):
+            continue
         if run.source.migration_project and run.source.migration_project.status == "PAUSED":
             continue
         changes_before_run = changed

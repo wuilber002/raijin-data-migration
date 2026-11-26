@@ -8,12 +8,13 @@ from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 
-PRODUCTION_SCHEMA_VERSION = 3
+PRODUCTION_SCHEMA_VERSION = 4
 REVISION_TABLE = "raijin_schema_revisions"
 MIGRATION_DESCRIPTIONS = {
     1: "Initial versioned Raijin production control-plane schema",
     2: "Add append-only production schema metadata",
     3: "Add immutable checksums to production schema revision history",
+    4: "Add durable import-driven continuous pipeline items",
 }
 
 
@@ -109,6 +110,20 @@ def migrate(engine: Engine, metadata: MetaData) -> int:
                 "checksum": migration_checksum(3, MIGRATION_DESCRIPTIONS[3]),
             })
             revision = 3
+        # The file-import pipeline needs a durable membership list so the
+        # scheduler can materialize only the accepted import objects while
+        # leaving every other discovered object untouched for later work.
+        if revision < 4:
+            import_items = metadata.tables.get("import_pipeline_items")
+            if import_items is not None:
+                import_items.create(connection, checkfirst=True)
+            connection.execute(text(
+                f"INSERT INTO {REVISION_TABLE} (version, description, checksum) VALUES (4, :description, :checksum)"
+            ), {
+                "description": MIGRATION_DESCRIPTIONS[4],
+                "checksum": migration_checksum(4, MIGRATION_DESCRIPTIONS[4]),
+            })
+            revision = 4
         if revision >= 3:
             ensure_revision_checksums(connection)
         if revision != PRODUCTION_SCHEMA_VERSION:

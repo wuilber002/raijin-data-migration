@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MigrationProject, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, ProjectClosureIssueRequest, ProjectClosureReport, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, deep_audits, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, issue_project_closure_report, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, project_closure_readiness, project_closure_snapshot, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, repair_completed_deep_audit_statuses, replan_dynamic_pipeline, reprocess_preview, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_aws_secret_validation_summary, safe_oci_error_summary, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, pause_deep_audit_queue, resume_deep_audit_queue, transfer_queue, wave_cost_estimate
 from app.main import ConsolePresence, ConsolePresenceHeartbeat, console_presence_heartbeat
-from app.main import PrioritizedWaveImport, parse_prioritized_wave_import, prioritized_wave_import_groups, prioritized_wave_import_preview
+from app.main import ImportPipelineItem, PrioritizedWaveImport, parse_prioritized_wave_import, prioritized_wave_import_groups, prioritized_wave_import_preview
 from app.main import app as raijin_app, healthz
 from app.closure_report import build_artifacts, canonical_json, safe_csv_cell, sha256
 from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, RAIKOU_AUDIT_TASK_KINDS, RAIKOU_RESTORE_TASK_KINDS, RAIKOU_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
@@ -78,6 +78,70 @@ def test_prioritized_wave_import_preserves_file_order_and_only_packs_discovered_
 def test_prioritized_wave_import_rejects_uri_from_a_different_bucket():
     with pytest.raises(HTTPException, match="selected source uses"):
         parse_prioritized_wave_import("s3://another-bucket/key", "priority-bucket")
+
+
+def test_import_pipeline_materializes_only_validated_list_items_and_leaves_other_discovery_rows():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="import-pipeline", s3_bucket="priority-bucket", aws_region="us-east-1",
+                        destination_bucket="priority-destination")
+        settings = RuntimeSettings(id=1, dynamic_restore_horizon_waves=1)
+        session.add_all([source, settings]); session.flush()
+        chosen = [
+            ObjectRecord(source_id=source.id, object_key=f"chosen-{index}", size_bytes=6,
+                         state=ObjectState.DISCOVERED)
+            for index in range(3)
+        ]
+        remaining = ObjectRecord(source_id=source.id, object_key="not-in-file", size_bytes=6,
+                                 state=ObjectState.DISCOVERED)
+        session.add_all([*chosen, remaining]); session.flush()
+        run = DynamicPipelineRun(source_id=source.id, planner_version=main.IMPORT_PIPELINE_PLANNER_VERSION,
+                                 status="SCHEDULED", scheduled_restores=True, target_max_bytes=10,
+                                 target_transfer_seconds=3600, max_objects=100, restore_horizon_waves=1,
+                                 restore_days=7, restore_tier="BULK")
+        session.add(run); session.flush()
+        session.add_all(ImportPipelineItem(pipeline_run_id=run.id, object_id=obj.id, sequence=index)
+                        for index, obj in enumerate(chosen, start=1))
+        session.flush()
+
+        waves = materialize_dynamic_pipeline_horizon(session, settings, run)
+
+        assert len(waves) == 1
+        assert waves[0].planner_mode == "IMPORT_PIPELINE"
+        assert chosen[0].wave_id == waves[0].id
+        assert chosen[1].wave_id is None
+        assert remaining.wave_id is None
+        assert remaining.state == ObjectState.DISCOVERED
+
+
+def test_import_pipeline_rejects_the_entire_file_when_any_uri_is_absent():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(name="strict-import", s3_bucket="strict-bucket", aws_region="us-east-1",
+                        destination_bucket="destination")
+        session.add(source); session.flush()
+        discovered = ObjectRecord(source_id=source.id, object_key="present", size_bytes=1,
+                                  state=ObjectState.DISCOVERED)
+        session.add(discovered); session.commit()
+        payload = PrioritizedWaveImport(
+            content="s3://strict-bucket/present\ns3://strict-bucket/absent",
+            max_bytes=10, restore_days=7, restore_tier="BULK",
+        )
+
+        with pytest.raises(HTTPException, match="every URI must exist"):
+            main.create_import_continuous_pipeline(source.id, payload, session)
+
+        assert session.scalar(select(func.count(DynamicPipelineRun.id))) == 0
+        assert discovered.state == ObjectState.DISCOVERED
+        assert discovered.wave_id is None
 
 
 def test_runtime_health_probe_is_available_without_authentication_or_database_access():

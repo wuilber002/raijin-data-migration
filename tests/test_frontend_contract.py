@@ -1617,11 +1617,15 @@ def test_wave_creation_uses_one_shared_action_for_every_method():
     assert "automatic:'#automatic-wave-form'" in page
     assert "prefix:'#prefix-wave-form'" in page
     assert "'priority-import':'#priority-import-wave-form'" in page
+    assert "'import-pipeline':'#import-pipeline-wave-form'" in page
     assert "dynamic:'#dynamic-wave-form'" in page
     assert 'value="priority-import">Importar lista de um arquivo' in page
+    assert 'value="import-pipeline">Pipeline contínuo por import de arquivo' in page
     assert 'id="priority-import-file"' in page
+    assert 'id="import-pipeline-file"' in page
     assert "prioritized-import/preview" in page
     assert "prioritized-import`,{method:'POST'" in page
+    assert "waves/import-pipeline" in page
     assert "Classes de armazenamento S3 na seleção" in page
     assert "d.storage_classes" in page
     assert "<h3>Onda manual</h3>" not in page

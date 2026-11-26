@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine, text
 
+from app.main import Base
 from app.production_migrations import (
     MIGRATION_DESCRIPTIONS,
     PRODUCTION_SCHEMA_VERSION,
@@ -41,7 +42,7 @@ def test_production_schema_checksum_detects_history_tampering():
         raise AssertionError("tampered schema history must be rejected")
 
 
-def test_v2_schema_expands_to_v3_without_recreating_control_plane_tables():
+def test_v2_schema_expands_to_current_revision_without_recreating_control_plane_tables():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     with engine.begin() as connection:
         connection.execute(text(
@@ -53,9 +54,11 @@ def test_v2_schema_expands_to_v3_without_recreating_control_plane_tables():
             connection.execute(text(
                 "INSERT INTO raijin_schema_revisions (version, description) VALUES (:version, :description)"
             ), {"version": version, "description": MIGRATION_DESCRIPTIONS[version]})
-    assert migrate(engine, MetaData()) == 3
+    assert migrate(engine, Base.metadata) == PRODUCTION_SCHEMA_VERSION
     with engine.connect() as connection:
         assert connection.execute(text("SELECT checksum FROM raijin_schema_revisions WHERE version = 3")).scalar_one() == migration_checksum(3, MIGRATION_DESCRIPTIONS[3])
+        assert connection.execute(text("SELECT checksum FROM raijin_schema_revisions WHERE version = 4")).scalar_one() == migration_checksum(4, MIGRATION_DESCRIPTIONS[4])
+        assert connection.dialect.has_table(connection, "import_pipeline_items")
 
 
 def test_newer_production_schema_is_rejected():
