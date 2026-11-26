@@ -36,7 +36,7 @@ from qrcode.image.svg import SvgPathImage
 from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 from urllib.request import Request, urlopen
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, Request as FastAPIRequest
 from fastapi.encoders import jsonable_encoder
@@ -1923,6 +1923,18 @@ class AutomaticWaveCreate(BaseModel):
     restore_days: int = Field(ge=1, le=30)
     restore_tier: str = Field(pattern="^(BULK|STANDARD)$")
     prefix: str = Field(default="", max_length=1024)
+    transfer_release_policy: str = Field(
+        default="AFTER_ALL_RESTORED",
+        pattern="^(AFTER_ALL_RESTORED|AS_OBJECTS_AVAILABLE)$",
+    )
+
+
+class PrioritizedWaveImport(BaseModel):
+    """A plain-text, ordered list of S3 URIs selected for priority waves."""
+    content: str = Field(min_length=1, max_length=8 * 1024 * 1024)
+    max_bytes: int = Field(gt=0, le=10 * 1024**4)
+    restore_days: int = Field(ge=1, le=30)
+    restore_tier: str = Field(pattern="^(BULK|STANDARD)$")
     transfer_release_policy: str = Field(
         default="AFTER_ALL_RESTORED",
         pattern="^(AFTER_ALL_RESTORED|AS_OBJECTS_AVAILABLE)$",
@@ -11100,6 +11112,116 @@ def discovered_object_filters(source_id: int, prefix: str = "") -> list:
     return filters
 
 
+PRIORITIZED_WAVE_IMPORT_MAX_ITEMS = 100_000
+PRIORITIZED_WAVE_IMPORT_QUERY_CHUNK = 500
+
+
+def parse_prioritized_wave_import(content: str, expected_bucket: str) -> tuple[list[str], int]:
+    """Parse ordered ``s3://bucket/key`` lines without treating prefixes as objects.
+
+    The input intentionally carries the bucket in every line.  That makes a
+    cross-source mistake impossible to silently accept when an operator has
+    several sources open in the same project.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+    duplicates = 0
+    for number, raw_line in enumerate(content.splitlines(), start=1):
+        value = raw_line.strip()
+        if not value or value.startswith("#"):
+            continue
+        if not value.startswith("s3://"):
+            raise HTTPException(status_code=422, detail=f"Line {number} must use the s3://bucket/key format")
+        route = value[5:]
+        bucket, separator, encoded_key = route.partition("/")
+        key = unquote(encoded_key)
+        if not separator or not bucket or not key:
+            raise HTTPException(status_code=422, detail=f"Line {number} must identify one S3 object")
+        if bucket != expected_bucket:
+            raise HTTPException(status_code=422, detail=(
+                f"Line {number} belongs to bucket '{bucket}', but the selected source uses '{expected_bucket}'"
+            ))
+        if key in seen:
+            duplicates += 1
+            continue
+        seen.add(key)
+        keys.append(key)
+        if len(keys) > PRIORITIZED_WAVE_IMPORT_MAX_ITEMS:
+            raise HTTPException(status_code=422, detail=(
+                f"The import exceeds the safety limit of {PRIORITIZED_WAVE_IMPORT_MAX_ITEMS:,} unique objects"
+            ))
+    if not keys:
+        raise HTTPException(status_code=422, detail="The import contains no S3 object URIs")
+    return keys, duplicates
+
+
+def prioritized_wave_import_selection(session: Session, source_id: int, keys: list[str], *, lock: bool = False) -> tuple[list[ObjectRecord], list[str], list[ObjectRecord]]:
+    """Return eligible objects in file order plus missing and unavailable entries."""
+    rows_by_key: dict[str, ObjectRecord] = {}
+    for start in range(0, len(keys), PRIORITIZED_WAVE_IMPORT_QUERY_CHUNK):
+        query = select(ObjectRecord).where(
+            ObjectRecord.source_id == source_id,
+            ObjectRecord.is_current_revision.is_(True),
+            ObjectRecord.object_key.in_(keys[start:start + PRIORITIZED_WAVE_IMPORT_QUERY_CHUNK]),
+        )
+        if lock:
+            query = query.with_for_update(skip_locked=True)
+        for row in session.scalars(query):
+            rows_by_key[row.object_key] = row
+    selected: list[ObjectRecord] = []
+    missing: list[str] = []
+    unavailable: list[ObjectRecord] = []
+    for key in keys:
+        row = rows_by_key.get(key)
+        if row is None:
+            missing.append(key)
+        elif row.state != ObjectState.DISCOVERED:
+            unavailable.append(row)
+        else:
+            selected.append(row)
+    return selected, missing, unavailable
+
+
+def prioritized_wave_import_groups(objects: list[ObjectRecord], max_bytes: int) -> tuple[list[tuple[list[ObjectRecord], bool]], int]:
+    """Pack the explicitly ordered selection with the normal wave size rule."""
+    groups: list[tuple[list[ObjectRecord], bool]] = []
+    current: list[ObjectRecord] = []
+    current_bytes = 0
+    oversized = 0
+    for obj in objects:
+        if obj.size_bytes > max_bytes:
+            if current:
+                groups.append((current, False))
+                current, current_bytes = [], 0
+            groups.append(([obj], True))
+            oversized += 1
+            continue
+        if current and current_bytes + obj.size_bytes > max_bytes:
+            groups.append((current, False))
+            current, current_bytes = [], 0
+        current.append(obj)
+        current_bytes += obj.size_bytes
+    if current:
+        groups.append((current, False))
+    return groups, oversized
+
+
+def prioritized_wave_import_preview(session: Session, source: Source, payload: PrioritizedWaveImport, *, lock: bool = False) -> dict:
+    keys, duplicates = parse_prioritized_wave_import(payload.content, source.s3_bucket)
+    selected, missing, unavailable = prioritized_wave_import_selection(session, source.id, keys, lock=lock)
+    groups, oversized = prioritized_wave_import_groups(selected, payload.max_bytes)
+    return {
+        "keys": keys,
+        "objects": selected,
+        "missing": missing,
+        "unavailable": unavailable,
+        "duplicates": duplicates,
+        "groups": groups,
+        "oversized": oversized,
+        "bytes": sum(item.size_bytes for item in selected),
+    }
+
+
 def assign_wave(session: Session, source_id: int, name: str, max_bytes: int, restore_days: int,
                 restore_tier: str, objects: list[ObjectRecord], oversized: bool = False,
                 *, planner_mode: str = "MANUAL", predicted_transfer_seconds: float = 0,
@@ -11896,6 +12018,69 @@ def create_automatic_waves(source_id: int, payload: AutomaticWaveCreate, session
         sequence += 1
     session.commit()
     return {"waves": len(created), "objects": total_objects, "bytes": total_bytes, "oversized_waves": oversized_waves,
+            "names": [wave.name for wave in created]}
+
+
+def prioritized_wave_import_response(plan: dict) -> dict:
+    """Small, operator-friendly response; never return a huge uploaded list."""
+    return {
+        "objects": len(plan["objects"]),
+        "bytes": plan["bytes"],
+        "estimated_waves": len(plan["groups"]),
+        "oversized_objects": plan["oversized"],
+        "duplicates_ignored": plan["duplicates"],
+        "missing": len(plan["missing"]),
+        "missing_examples": plan["missing"][:10],
+        "unavailable": len(plan["unavailable"]),
+        "unavailable_examples": [
+            {"key": item.object_key, "state": item.state, "wave_id": item.wave_id}
+            for item in plan["unavailable"][:10]
+        ],
+    }
+
+
+@app.post("/api/sources/{source_id}/waves/prioritized-import/preview")
+def preview_prioritized_wave_import(source_id: int, payload: PrioritizedWaveImport,
+                                    session: Session = Depends(get_session)) -> dict:
+    source = active_source_or_409(session, source_id)
+    require_dynamic_pipeline_rediscovery(session, source)
+    require_non_overlapping_source_scope(session, source)
+    return prioritized_wave_import_response(prioritized_wave_import_preview(session, source, payload))
+
+
+@app.post("/api/sources/{source_id}/waves/prioritized-import", status_code=201)
+def create_prioritized_import_waves(source_id: int, payload: PrioritizedWaveImport,
+                                    session: Session = Depends(get_session)) -> dict:
+    source = active_source_or_409(session, source_id)
+    require_dynamic_pipeline_rediscovery(session, source)
+    require_non_overlapping_source_scope(session, source)
+    plan = prioritized_wave_import_preview(session, source, payload, lock=True)
+    if plan["missing"] or plan["unavailable"]:
+        raise HTTPException(status_code=409, detail=(
+            "The import changed since its preview: some objects are absent from the current discovery or are already assigned. Refresh the preview before creating waves."
+        ))
+    if not plan["groups"]:
+        raise HTTPException(status_code=409, detail="No discovered objects are available for this priority import")
+    if len(plan["groups"]) > 10_000:
+        raise HTTPException(status_code=422, detail="The import would create more than 10,000 waves; increase the target size")
+    created: list[Wave] = []
+    for sequence, (objects, oversized) in enumerate(plan["groups"], start=1):
+        name = automatic_wave_name(session, source, "priority-import", sequence)
+        created.append(assign_wave(
+            session, source.id, name, payload.max_bytes, payload.restore_days,
+            payload.restore_tier, objects, oversized,
+            planner_mode="PRIORITY_IMPORT",
+            transfer_release_policy=payload.transfer_release_policy,
+        ))
+    record_event(
+        session, "PRIORITIZED_WAVE_IMPORT_CREATED",
+        (f"Priority import created {len(created)} wave(s) with {len(plan['objects'])} object(s) and "
+         f"{plan['bytes']} byte(s); {plan['duplicates']} duplicate line(s) ignored"),
+        source_id=source.id,
+    )
+    session.commit()
+    return {"waves": len(created), "objects": len(plan["objects"]), "bytes": plan["bytes"],
+            "oversized_waves": plan["oversized"], "duplicates_ignored": plan["duplicates"],
             "names": [wave.name for wave in created]}
 
 
