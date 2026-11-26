@@ -1121,6 +1121,13 @@ def test_source_form_opens_in_a_modal_with_a_fixed_prefix_workspace():
     assert "closeSourceModal();await loadSources()" in page
 
 
+def test_source_creation_loads_cached_aws_connections_and_oci_buckets_outside_settings():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "await Promise.all([loadSettings(),loadSources(),loadOciBuckets(),loadAwsConnections()])" in page
+    assert "async function openNewSourceModal()" in page
+    assert "await Promise.all([loadOciBuckets(),loadAwsConnections()]);editingSource=''" in page
+
+
 def test_source_selector_prioritizes_compact_route_and_status_tags_before_name():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "${sourceSelectorTags(selected)}<span class=\"source-select-option-name\">" in page
@@ -1803,7 +1810,7 @@ def test_refresh_restores_the_current_view_and_selected_source_without_duplicate
     assert "showView(initialView,{persist:false,scroll:false,load:false})" in page
     assert "const requested=new URLSearchParams(location.search).get('source')||''" in page
     assert "url.searchParams.set('source',selectedSource)" in page
-    assert "await Promise.all([loadSettings(),loadSources()])" in page
+    assert "await Promise.all([loadSettings(),loadSources(),loadOciBuckets(),loadAwsConnections()])" in page
     assert "else if(view==='migrations'){await Promise.all([loadTasks(),loadEvents()])}" in page
 
 
