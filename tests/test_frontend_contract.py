@@ -381,6 +381,16 @@ def test_update_agent_requires_expand_only_database_manifest():
     assert '"$current" -ge "$required"' in agent
 
 
+def test_update_rejection_identifies_active_discovery_and_transfer_queues():
+    agent = (ROOT / "scripts/process-update-request.sh").read_text(encoding="utf-8")
+    assert "runtime_drain_status()" in agent
+    assert "fila de transferências:" in agent
+    assert "fila de discovery:" in agent
+    assert "transfer_queue_items" in agent
+    assert "discovery_jobs" in agent
+    assert "Atualização rejeitada: a fila não está drenada" in agent
+
+
 def test_selective_update_keeps_console_session_active_in_final_modal():
     script = (ROOT / "app/static/console-auth-ui.js").read_text(encoding="utf-8")
     assert "updateWorkflowSelective" in script

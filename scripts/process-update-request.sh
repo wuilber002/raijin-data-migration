@@ -277,13 +277,53 @@ check_update() {
   printf '%s\n' "$available"
 }
 
+runtime_drain_status() {
+  # Keep the update gate and its explanation derived from the same durable
+  # queues.  A generic “not drained” response forces the operator to guess
+  # whether to wait for discovery, transfers, or restores.
+  local rows transfer_count transfer_sources discovery_count discovery_sources other_task_count wave_count
+  rows="$(podman exec raijin-postgres psql -U migration -d migration -At -F $'\t' -c "
+    with transfer_work as (
+      select q.source_id from transfer_queue_items q
+       where q.state in ('AVAILABLE','READY','LEASED','MULTIPART_RESUME','RETRY_WAIT')
+      union all
+      select w.source_id from tasks t join waves w on w.id = t.wave_id
+       where t.state in ('READY','RUNNING') and t.kind = 'TRANSFER_CONTINUOUS'
+    )
+    select count(*), coalesce(string_agg(distinct s.name, ', '), '')
+      from transfer_work work join sources s on s.id = work.source_id;
+    select count(*), coalesce(string_agg(distinct s.name, ', '), '')
+      from discovery_jobs d join sources s on s.id = d.source_id
+     where d.state in ('READY','RUNNING');
+    select count(*) from tasks
+     where state in ('READY','RUNNING') and kind <> 'TRANSFER_CONTINUOUS';
+    select count(*) from waves
+     where status in ('RESTORE_REQUESTED','RESTORE_REQUEST_ACCEPTED','RESTORING','RESTORE_DRAINING','TRANSFERRING','TRANSFER_DRAINING');
+  " 2>/dev/null || true)"
+  IFS=$'\t' read -r transfer_count transfer_sources <<<"$(sed -n '1p' <<<"$rows")"
+  IFS=$'\t' read -r discovery_count discovery_sources <<<"$(sed -n '2p' <<<"$rows")"
+  other_task_count="$(sed -n '3p' <<<"$rows")"
+  wave_count="$(sed -n '4p' <<<"$rows")"
+  if [[ ! "$transfer_count" =~ ^[0-9]+$ || ! "$discovery_count" =~ ^[0-9]+$ || ! "$other_task_count" =~ ^[0-9]+$ || ! "$wave_count" =~ ^[0-9]+$ ]]; then
+    RUNTIME_DRAIN_DETAIL="não foi possível consultar as filas duráveis da plataforma"
+    return 1
+  fi
+  local detail=()
+  (( transfer_count > 0 )) && detail+=("fila de transferências: ${transfer_count} unidade(s) de trabalho ativa(s)${transfer_sources:+ [${transfer_sources}]}")
+  (( discovery_count > 0 )) && detail+=("fila de discovery: ${discovery_count} job(s) ativo(s)${discovery_sources:+ [${discovery_sources}]}")
+  (( other_task_count > 0 )) && detail+=("tarefas de restore/controle: ${other_task_count}")
+  (( wave_count > 0 )) && detail+=("waves em restore/transferência: ${wave_count}")
+  local item separator=""
+  RUNTIME_DRAIN_DETAIL=""
+  for item in "${detail[@]}"; do
+    RUNTIME_DRAIN_DETAIL+="${separator}${item}"
+    separator="; "
+  done
+  [[ "$transfer_count" == 0 && "$discovery_count" == 0 && "$other_task_count" == 0 && "$wave_count" == 0 ]]
+}
+
 runtime_is_drained() {
-  local counts
-  counts="$(podman exec raijin-postgres psql -U migration -d migration -Atc \
-    "select count(*) from tasks where state in ('READY','RUNNING'); select count(*) from discovery_jobs where state in ('READY','RUNNING'); select count(*) from waves where status in ('RESTORE_REQUESTED','RESTORE_REQUEST_ACCEPTED','RESTORING','RESTORE_DRAINING','TRANSFERRING','TRANSFER_DRAINING');" 2>/dev/null || true)"
-  local task_count discovery_count wave_count
-  task_count="$(sed -n '1p' <<<"$counts")"; discovery_count="$(sed -n '2p' <<<"$counts")"; wave_count="$(sed -n '3p' <<<"$counts")"
-  [[ "$task_count" =~ ^[0-9]+$ && "$discovery_count" =~ ^[0-9]+$ && "$wave_count" =~ ^[0-9]+$ && "$task_count" == 0 && "$discovery_count" == 0 && "$wave_count" == 0 ]]
+  runtime_drain_status
 }
 
 update_strategy() {
@@ -456,7 +496,7 @@ apply_update() {
   fi
   strategy="$(update_strategy "$current" "$available")"
   if [[ "$strategy" != WEB_ONLY_ROLLING && "$strategy" != CONTROLLER_ONLY_ROLLING && "$strategy" != RESTORE_WORKER_ROLLING && "$strategy" != DISCOVERY_WORKER_ROLLING && "$strategy" != AUDIT_WORKER_ROLLING && "$strategy" != TRANSFER_WORKER_ROLLING ]] && ! runtime_is_drained; then
-    write_result REJECTED "Update requires a fully drained queue and no active restore or transfer." "$current" "$available"
+    write_result REJECTED "Atualização rejeitada: a fila não está drenada — ${RUNTIME_DRAIN_DETAIL:-estado da fila indisponível}." "$current" "$available"
     return 0
   fi
   if [[ -n "$(git -C "$install_root" status --porcelain)" ]]; then
