@@ -747,6 +747,33 @@ def test_continuous_transfer_drain_stops_admission_without_losing_queued_work():
         assert session.scalar(select(Task.state).where(Task.kind == "TRANSFER_CONTINUOUS")) == TaskState.READY
 
 
+def test_project_executive_summary_reports_inventory_and_delivered_oci_evidence():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = MigrationProject(name="Executive")
+        source = Source(name="executive-source", s3_bucket="aws-bucket", aws_region="us-east-1",
+                        destination_bucket="oci-bucket", migration_project=project)
+        session.add_all([project, source]); session.flush()
+        session.add_all([
+            ObjectRecord(source_id=source.id, object_key="done", size_bytes=100,
+                         storage_class="STANDARD", state=ObjectState.TRANSFERRED),
+            ObjectRecord(source_id=source.id, object_key="pending", size_bytes=300,
+                         storage_class="GLACIER", state=ObjectState.DISCOVERED),
+        ])
+        session.commit()
+
+        report = main.migration_project_executive_summary(project.id, session=session)
+
+        assert report["source_count"] == 1
+        assert report["total_files"] == 2 and report["total_size_bytes"] == 400
+        assert report["sources"][0]["oci"]["bucket_files"] == 1
+        assert report["sources"][0]["percentage"] == {"files": 50.0, "size": 25.0}
+
+
 def test_verify_wave_execution_renews_its_task_lease():
     worker = (Path(__file__).resolve().parents[1] / "app/real_worker.py").read_text(encoding="utf-8")
     dispatch = worker[worker.index('elif task.kind == "VERIFY_WAVE"'):worker.index('else: raise RuntimeError', worker.index('elif task.kind == "VERIFY_WAVE"'))]

@@ -1819,3 +1819,14 @@ def test_discovery_message_history_opens_as_an_overlay_without_resizing_queue_ro
     assert ".discovery-messages{display:block;position:relative" in page
     assert ".discovery-messages ol{display:none;position:absolute" in page
     assert ".discovery-messages[open] ol{display:grid}" in page
+
+
+def test_project_executive_summary_has_project_button_modal_and_grouped_aws_oci_table():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert 'id="migration-project-executive-summary"' in page
+    assert "openProjectExecutiveSummaryModal()" in page
+    assert "/executive-summary" in page
+    assert "Porcentagem entregue" in page
+    assert 'colspan="5">AWS' in page and 'colspan="5">OCI' in page
+    assert "Total de arquivos" in page and "Total de dados" in page

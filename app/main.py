@@ -8590,6 +8590,70 @@ def migration_project_report(project_id: int, include_costs: bool = False,
                                      include_costs=include_costs)
 
 
+@app.get("/api/migration-projects/{project_id}/executive-summary")
+def migration_project_executive_summary(project_id: int,
+                                        session: Session = Depends(get_session)) -> dict:
+    """Compact per-source migration evidence for an executive status view."""
+    project = migration_project_or_404(session, project_id)
+    sources = list(session.scalars(select(Source).where(
+        Source.migration_project_id == project.id
+    ).order_by(Source.name, Source.id)))
+    source_ids = [source.id for source in sources]
+    totals: dict[int, dict] = {}
+    tiers: dict[int, set[str]] = {}
+    if source_ids:
+        rows = session.execute(select(
+            ObjectRecord.source_id, ObjectRecord.storage_class,
+            func.count(ObjectRecord.id), func.coalesce(func.sum(ObjectRecord.size_bytes), 0),
+            func.coalesce(func.sum(case((ObjectRecord.state.in_([
+                ObjectState.TRANSFERRED, ObjectState.VERIFIED,
+            ]), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((ObjectRecord.state.in_([
+                ObjectState.TRANSFERRED, ObjectState.VERIFIED,
+            ]), ObjectRecord.size_bytes), else_=0)), 0),
+        ).where(
+            ObjectRecord.source_id.in_(source_ids), ObjectRecord.is_current_revision.is_(True)
+        ).group_by(ObjectRecord.source_id, ObjectRecord.storage_class)).all()
+        for source_id, storage_class, objects, size_bytes, delivered, delivered_bytes in rows:
+            entry = totals.setdefault(int(source_id), {
+                "objects": 0, "bytes": 0, "delivered_objects": 0, "delivered_bytes": 0,
+            })
+            entry["objects"] += int(objects or 0)
+            entry["bytes"] += int(size_bytes or 0)
+            entry["delivered_objects"] += int(delivered or 0)
+            entry["delivered_bytes"] += int(delivered_bytes or 0)
+            tiers.setdefault(int(source_id), set()).add(str(storage_class or "UNKNOWN"))
+    source_rows = []
+    for source in sources:
+        inventory = totals.get(source.id, {})
+        source_rows.append({
+            "source_id": source.id, "source_name": source.name,
+            "aws": {"region": source.aws_region, "bucket_name": source.s3_bucket,
+                    "bucket_tier": " / ".join(sorted(tiers.get(source.id, {"—"}))),
+                    "bucket_files": int(inventory.get("objects", 0)),
+                    "bucket_size_bytes": int(inventory.get("bytes", 0))},
+            # The OCI SDK configuration is intentionally not exposed through
+            # RuntimeContext.  Keep this field explicit rather than guessing
+            # a region from the AWS source or a deployment-specific file.
+            "oci": {"region": "—",
+                    "bucket_name": source.destination_bucket, "bucket_tier": "STANDARD (destino)",
+                    "bucket_files": int(inventory.get("delivered_objects", 0)),
+                    "bucket_size_bytes": int(inventory.get("delivered_bytes", 0))},
+            "percentage": {"files": (
+                int(inventory.get("delivered_objects", 0)) / int(inventory.get("objects", 0)) * 100
+                if inventory.get("objects", 0) else 0
+            ), "size": (
+                int(inventory.get("delivered_bytes", 0)) / int(inventory.get("bytes", 0)) * 100
+                if inventory.get("bytes", 0) else 0
+            )},
+        })
+    return {"project_id": project.id, "project_name": project.name,
+            "source_count": len(sources),
+            "total_files": sum(row["aws"]["bucket_files"] for row in source_rows),
+            "total_size_bytes": sum(row["aws"]["bucket_size_bytes"] for row in source_rows),
+            "sources": source_rows}
+
+
 PROJECT_CLOSURE_TERMINAL_WAVE_STATUSES = {"COMPLETED"}
 def _closure_iso(value: datetime | None) -> str | None:
     if value is None:
