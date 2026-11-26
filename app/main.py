@@ -8426,9 +8426,15 @@ def migration_project_completion_evidence(session: Session, project: MigrationPr
     entries: list[dict] = []
     for source in sources:
         count, transferred, verified, accepted, failed = totals.get(source.id, (0, 0, 0, 0, 0))
-        delivered = bool(count) and (verified == count or (transferred == count and accepted == count))
+        # An empty bucket is a valid discovery result.  Object rows prove an
+        # inventory when they exist; for a zero-object source, the durable
+        # discovery completion timestamp is the evidence instead.
+        inventory_observed = bool(count) or source.discovery_completed_at is not None
+        delivered = inventory_observed and (not count or verified == count or (
+            transferred == count and accepted == count
+        ))
         blockers: list[str] = []
-        if not count:
+        if not inventory_observed:
             blockers.append("inventário ausente")
         if failed:
             blockers.append(f"{failed} objeto(s) com falha")
@@ -8701,7 +8707,10 @@ def project_closure_readiness(session: Session, project: MigrationProject) -> di
         data = aggregates.get(source.id, {"objects": 0, "bytes": 0, "delivered": 0,
             "delivered_bytes": 0, "accepted": 0, "failed": 0, "last_transfer": None})
         prefix = f"Source {source.name}: "
-        if not data["objects"]:
+        # Do not confuse a completed empty inventory with an inventory that
+        # was never produced.  The latter has neither object rows nor the
+        # durable discovery-completion evidence.
+        if not data["objects"] and not source.discovery_completed_at:
             blockers.append({"code": "INVENTORY_MISSING", "source_id": source.id,
                              "description": prefix + "inventário final ausente."})
         if source.status != "DISCOVERED" or not source.discovery_completed_at:
