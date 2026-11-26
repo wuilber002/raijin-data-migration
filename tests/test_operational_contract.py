@@ -3014,6 +3014,15 @@ def test_dynamic_planner_uses_scalar_boundaries_and_assigns_every_object_once():
             session,
         )
         assert response["objects"] == 37
+        assert response["waves"] == 0
+        assert response["materialization"] == "SCHEDULED"
+        assert session.scalar(select(ObjectRecord.id).where(
+            ObjectRecord.source_id == source.id,
+            ObjectRecord.wave_id.is_not(None),
+        )) is None
+        run = session.get(DynamicPipelineRun, response["pipeline_run_id"])
+        assert run is not None
+        materialize_dynamic_pipeline_horizon(session, session.get(RuntimeSettings, 1), run)
         assigned = list(session.execute(
             select(ObjectRecord.wave_id, ObjectRecord.state).where(
                 ObjectRecord.source_id == source.id

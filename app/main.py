@@ -13769,22 +13769,20 @@ def create_dynamic_waves(source_id: int, payload: DynamicWaveCreate, session: Se
         ).values()),
     )
     session.add(run); session.flush()
-    created = materialize_dynamic_pipeline_horizon(
-        session, settings, run, now=source_scheduler_clock(source).effective_now
-    )
-    release_dynamic_restore_horizon(session, settings)
-    # The first two horizon waves have just acquired durable submission tasks.
-    # Correct the remaining mutable slice in the same transaction so it is
-    # born behind the occupied restore slots, never briefly at the origin.
-    replan_dynamic_pipeline(session, settings, now=source_scheduler_clock(source).effective_now)
     record_event(session, "DYNAMIC_PIPELINE_STARTED",
-                 f"Dynamic pipeline run {run.id} started with horizon {run.restore_horizon_waves}; {len(created)} wave(s) materialized from {matching_objects} object(s) / {matching_bytes} byte(s). Future waves will be packed after observed transfer results.",
+                 f"Dynamic pipeline run {run.id} scheduled with horizon {run.restore_horizon_waves} for {matching_objects} object(s) / {matching_bytes} byte(s). The controller will materialize the initial waves asynchronously.",
                  source_id=source.id)
     session.commit()
-    return {"waves": len(created), "objects": matching_objects,
+    # Packing and assigning an initial horizon can touch hundreds of
+    # thousands of inventory rows.  It must run in the controller loop, not
+    # in the browser request: otherwise a large discovery leaves the UI in a
+    # misleading "creating" state for minutes and risks a reverse-proxy
+    # timeout.  The durable run is enough for the controller to pick it up
+    # on its next cycle.
+    return {"waves": 0, "objects": matching_objects,
             "bytes": matching_bytes, "scheduled_restores": True,
             "historical_samples": run.historical_samples, "pipeline_run_id": run.id,
-            "names": [wave.name for wave in created]}
+            "names": [], "materialization": "SCHEDULED"}
 
 
 @app.get("/api/sources/{source_id}/waves")
