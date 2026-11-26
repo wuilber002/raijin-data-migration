@@ -4989,6 +4989,29 @@ def test_completed_empty_discovery_is_not_reported_as_missing_inventory():
         assert "inventário ausente" not in entry["blockers"]
 
 
+def test_legacy_discovered_empty_inventory_is_not_reported_as_missing():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = main.MigrationProject(name="programa-vazio-legado")
+        source = Source(
+            name="bucket-vazio-legado", s3_bucket="empty-legacy", aws_region="us-east-1",
+            destination_bucket="destination", migration_project=project,
+            destination_prefix="empty-legacy", status="DISCOVERED",
+        )
+        session.add_all([project, source]); session.flush()
+
+        summary = main.migration_project_summary(session, project)
+
+        entry = summary["completion"]["sources"][0]
+        assert entry["objects"] == 0
+        assert entry["delivery_complete"] is True
+        assert "inventário ausente" not in entry["blockers"]
+
+
 def test_migration_project_summary_aggregates_without_erasing_source_evidence():
     import app.main as main
 

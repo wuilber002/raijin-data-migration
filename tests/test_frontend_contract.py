@@ -1156,13 +1156,13 @@ def test_project_is_required_before_the_ui_can_create_a_source():
     assert 'id="source-destination-prefix"' in page
 
 
-def test_source_selector_is_scoped_by_the_active_project():
+def test_source_selector_shows_all_sources_when_no_project_is_active():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "function projectScopedSources()" in page
-    assert "sources.filter(source=>String(source.migration_project_id||'')===projectId)" in page
+    assert "sources.filter(source=>String(source.migration_project_id||'')===projectId):sources" in page
     assert "async function applyProjectSourceContext()" in page
-    assert "trigger.disabled=requiresProject" in page
-    assert "Selecione um projeto para listar suas sources." in page
+    assert "trigger.disabled=false" in page
+    assert "Mostrando todas as sources; selecione um projeto para cadastrar uma nova origem." in page
     assert "document.addEventListener('raijin:project-changed',()=>applyProjectSourceContext()" in page
 
 
