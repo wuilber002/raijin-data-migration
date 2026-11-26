@@ -1152,6 +1152,9 @@ def test_source_mutation_waits_for_confirmation_without_switching_projects():
     assert "runSourceMutation(" in submit_handler
     assert "selectedSource=moved?'':persistedSourceId" in submit_handler
     assert "sayProjectMoveComplete" in submit_handler
+    assert "const form=event.currentTarget" in submit_handler
+    assert "form.reset()" in submit_handler
+    assert "event.currentTarget.reset()" not in submit_handler
     assert "window.raijinSelectedProjectId=String(d.migration_project_id)" not in submit_handler
     assert "document.dispatchEvent(new CustomEvent('raijin:project-changed'" not in submit_handler
     assert "Abrir projeto destino" in page
