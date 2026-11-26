@@ -1626,7 +1626,7 @@ def test_wave_creation_uses_one_shared_action_for_every_method():
     assert "prioritized-import/preview" in page
     assert "prioritized-import`,{method:'POST'" in page
     assert "waves/import-pipeline" in page
-    assert "Classes de armazenamento S3 na seleção" in page
+    assert "storageClasses=(d.storage_classes||[]).map" in page
     assert "d.storage_classes" in page
     assert "<h3>Onda manual</h3>" not in page
     assert "<h3>Ondas por prefixo S3</h3>" not in page
