@@ -1834,6 +1834,8 @@ def test_project_waves_are_aggregated_without_replacing_source_waves():
     assert "/api/migration-projects/${selected()}/waves" in page
     assert "/api/migration-projects/${selected()}/transfer/${stopped?'resume':'drain'}" in page
     assert "Cópias já em execução serão concluídas" in page
+    assert ".project-waves-filter>span{display:none}" in page
+    assert ".project-waves-header{align-items:center;flex-wrap:nowrap}" in page
 
 
 def test_source_inventory_actions_match_the_compact_operational_layout():
