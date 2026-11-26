@@ -11260,6 +11260,12 @@ def prioritized_wave_import_preview(session: Session, source: Source, payload: P
     keys, duplicates = parse_prioritized_wave_import(payload.content, source.s3_bucket)
     selected, missing, unavailable = prioritized_wave_import_selection(session, source.id, keys, lock=lock)
     groups, oversized = prioritized_wave_import_groups(selected, payload.max_bytes)
+    storage_classes: dict[str, dict[str, int]] = {}
+    for item in selected:
+        storage_class = str(item.storage_class or "UNKNOWN").upper()
+        totals = storage_classes.setdefault(storage_class, {"objects": 0, "bytes": 0})
+        totals["objects"] += 1
+        totals["bytes"] += int(item.size_bytes or 0)
     return {
         "keys": keys,
         "objects": selected,
@@ -11269,6 +11275,10 @@ def prioritized_wave_import_preview(session: Session, source: Source, payload: P
         "groups": groups,
         "oversized": oversized,
         "bytes": sum(item.size_bytes for item in selected),
+        "storage_classes": [
+            {"storage_class": storage_class, **totals}
+            for storage_class, totals in sorted(storage_classes.items())
+        ],
     }
 
 
@@ -12077,6 +12087,7 @@ def prioritized_wave_import_response(plan: dict) -> dict:
         "objects": len(plan["objects"]),
         "bytes": plan["bytes"],
         "estimated_waves": len(plan["groups"]),
+        "storage_classes": plan["storage_classes"],
         "oversized_objects": plan["oversized"],
         "duplicates_ignored": plan["duplicates"],
         "missing": len(plan["missing"]),

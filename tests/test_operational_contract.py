@@ -48,8 +48,10 @@ def test_prioritized_wave_import_preserves_file_order_and_only_packs_discovered_
         session.add(source)
         session.flush()
         session.add_all([
-            ObjectRecord(source_id=source.id, object_key="first", size_bytes=6, state=ObjectState.DISCOVERED),
-            ObjectRecord(source_id=source.id, object_key="second", size_bytes=6, state=ObjectState.DISCOVERED),
+            ObjectRecord(source_id=source.id, object_key="first", size_bytes=6,
+                         storage_class="GLACIER", state=ObjectState.DISCOVERED),
+            ObjectRecord(source_id=source.id, object_key="second", size_bytes=6,
+                         storage_class="DEEP_ARCHIVE", state=ObjectState.DISCOVERED),
             ObjectRecord(source_id=source.id, object_key="already-assigned", size_bytes=1, state=ObjectState.WAVE_ASSIGNED),
         ])
         session.commit()
@@ -67,6 +69,10 @@ def test_prioritized_wave_import_preserves_file_order_and_only_packs_discovered_
         assert [item.object_key for item in plan["unavailable"]] == ["already-assigned"]
         assert plan["duplicates"] == 1
         assert [[item.object_key for item in group] for group, _oversized in plan["groups"]] == [["second"], ["first"]]
+        assert plan["storage_classes"] == [
+            {"storage_class": "DEEP_ARCHIVE", "objects": 1, "bytes": 6},
+            {"storage_class": "GLACIER", "objects": 1, "bytes": 6},
+        ]
 
 
 def test_prioritized_wave_import_rejects_uri_from_a_different_bucket():
