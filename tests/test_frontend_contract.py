@@ -1832,10 +1832,15 @@ def test_project_executive_summary_has_project_button_modal_and_grouped_aws_oci_
     assert "Total de arquivos" in page and "Total de dados" in page
     assert "project-executive-summary-table-wrap{max-width:100%;flex:1 1 auto;min-height:0;overflow:auto" in page
     assert "project-executive-summary-table th:first-child,.project-executive-summary-table td:first-child{position:sticky" in page
-    assert "<td><b>${escape(source.source_name)}</b></td><td>${percent(source.percentage?.files)}</td>" in page
+    assert "const data=await api(`/api/migration-projects/${projectId}/executive-summary`),size=value=>" in page
+    assert '<td class="executive-cell-left"><b>${escape(source.source_name)}</b></td>' in page
+    assert 'class="executive-cell-center">${percent(source.percentage?.files)}</td>' in page
+    assert 'class="executive-cell-right">${fmt(source.aws?.bucket_files||0)}</td>' in page
+    assert "Bucket total size (GB)" not in page
     assert 'class="metric executive-summary-metric"' in page
     assert 'th rowspan="2">Source</th>' in page
     assert ".modal-panel.wide.project-executive-summary-panel{width:min(1800px" in page
     assert "thead tr:first-child th{position:sticky;top:0" in page
     assert "thead tr:nth-child(2) th{position:sticky;top:var(--executive-header-row)" in page
     assert "thead tr:nth-child(2) th:first-child{left:auto" in page
+    assert 'executive-summary-metric"><span class="with-help">Projeto' in page
