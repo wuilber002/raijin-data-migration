@@ -1818,6 +1818,16 @@ def test_continuous_transfer_drain_has_global_and_source_controls_with_completio
     assert ".transfer-stop-icon{color:#ef4444" in page
 
 
+def test_project_waves_are_aggregated_without_replacing_source_waves():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert "Ondas do projeto" in page
+    assert "Filtrar por source" in page
+    assert "/api/migration-projects/${selected()}/waves" in page
+    assert "/api/migration-projects/${selected()}/transfer/${stopped?'resume':'drain'}" in page
+    assert "Cópias já em execução serão concluídas" in page
+
+
 def test_source_inventory_actions_match_the_compact_operational_layout():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
 

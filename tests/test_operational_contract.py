@@ -747,6 +747,41 @@ def test_continuous_transfer_drain_stops_admission_without_losing_queued_work():
         assert session.scalar(select(Task.state).where(Task.kind == "TRANSFER_CONTINUOUS")) == TaskState.READY
 
 
+def test_project_transfer_drain_preserves_source_waves_and_blocks_admission_for_all_sources():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = MigrationProject(name="drain-project")
+        first = Source(name="project-drain-one", s3_bucket="one", aws_region="us-east-1",
+                       destination_bucket="oci-one", migration_project=project)
+        second = Source(name="project-drain-two", s3_bucket="two", aws_region="us-east-1",
+                        destination_bucket="oci-two", migration_project=project)
+        session.add_all([project, first, second]); session.flush()
+        waves = [Wave(source=first, name="one-wave", max_bytes=1, restore_days=1, restore_tier="BULK", status="RESTORED"),
+                 Wave(source=second, name="two-wave", max_bytes=1, restore_days=1, restore_tier="BULK", status="RESTORED")]
+        session.add_all(waves); session.flush()
+        for source, wave in zip([first, second], waves):
+            session.add(Task(wave_id=wave.id, kind="TRANSFER_CONTINUOUS", state=TaskState.READY))
+            session.add(TransferQueueItem(source_id=source.id, project_id=project.id, wave_id=wave.id,
+                                          object_id=wave.id, size_bytes=1, state=TransferQueueState.READY))
+        session.commit()
+
+        drained = main.request_continuous_transfer_drain(session, project_id=project.id)
+        assert drained["scope"] == "PROJECT"
+        assert drained["state"] == "DRAINED"
+        assert all(task.state == TaskState.PAUSED for task in session.scalars(select(Task)))
+        assert main.continuous_transfer_drain_requested(session, first.id) is True
+        assert main.continuous_transfer_drain_requested(session, second.id) is True
+        assert len(main.list_project_waves(project.id, session=session)["waves"]) == 2
+
+        resumed = main.resume_continuous_transfer_drain(session, project_id=project.id)
+        assert resumed["scope"] == "PROJECT"
+        assert resumed["resumed"] == 2
+
+
 def test_project_executive_summary_reports_inventory_and_delivered_oci_evidence():
     import app.main as main
 

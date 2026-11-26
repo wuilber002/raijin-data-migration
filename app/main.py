@@ -310,6 +310,11 @@ class MigrationProject(Base):
     name: Mapped[str] = mapped_column(String(128), unique=True)
     status: Mapped[str] = mapped_column(String(32), default="CONFIGURED", index=True)
     selection_policy: Mapped[str] = mapped_column(String(32), default="DEADLINE_FIRST")
+    # Stops only admission to the shared transfer lane for this project's
+    # sources.  It deliberately does not cancel restores or delete waves.
+    continuous_transfer_drain_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    continuous_transfer_drain_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    continuous_transfer_drain_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -2412,6 +2417,7 @@ def create_schema() -> None:
     wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "restore_submission_deadline_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_observed_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_started_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_completed_at": "TIMESTAMP WITH TIME ZONE", "transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
     existing_runtime_columns = {column["name"] for column in inspect(engine).get_columns("runtime_settings")}
     existing_source_columns = {column["name"] for column in inspect(engine).get_columns("sources")}
+    existing_project_columns = {column["name"] for column in inspect(engine).get_columns("migration_projects")}
     existing_wave_columns = {column["name"] for column in inspect(engine).get_columns("waves")}
     existing_bucket_columns = {column["name"] for column in inspect(engine).get_columns("oci_bucket_cache")}
     existing_cost_pricing_columns = {column["name"] for column in inspect(engine).get_columns("cost_pricing")}
@@ -2458,6 +2464,13 @@ def create_schema() -> None:
         for column, sql_type in source_columns.items():
             if column not in existing_source_columns:
                 connection.execute(text(f"ALTER TABLE sources ADD COLUMN {column} {sql_type}"))
+        for column, sql_type in {
+            "continuous_transfer_drain_requested": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "continuous_transfer_drain_requested_at": "TIMESTAMP WITH TIME ZONE",
+            "continuous_transfer_drain_completed_at": "TIMESTAMP WITH TIME ZONE",
+        }.items():
+            if column not in existing_project_columns:
+                connection.execute(text(f"ALTER TABLE migration_projects ADD COLUMN {column} {sql_type}"))
         lane_columns = {
             "project_id": "BIGINT",
             "dispatch_batch_id": "BIGINT",
@@ -6737,6 +6750,27 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
     global_state = "RUNNING"
     if settings.continuous_transfer_drain_requested:
         global_state = "DRAINING" if global_active else "DRAINED"
+    project_controls = {}
+    project_ids = set(session.scalars(select(Source.migration_project_id).where(
+        source_scope, Source.migration_project_id.is_not(None)
+    )))
+    for scoped_project_id in project_ids:
+        scoped_project = session.get(MigrationProject, scoped_project_id)
+        if scoped_project is None:
+            continue
+        active = int(session.scalar(select(func.count(TransferQueueItem.id)).where(
+            TransferQueueItem.project_id == scoped_project_id,
+            TransferQueueItem.state == TransferQueueState.LEASED,
+        )) or 0)
+        state = "DRAINING" if scoped_project.continuous_transfer_drain_requested and active else (
+            "DRAINED" if scoped_project.continuous_transfer_drain_requested else "RUNNING"
+        )
+        project_controls[str(scoped_project_id)] = {
+            "state": state, "active_items": active,
+            "requested_at": scoped_project.continuous_transfer_drain_requested_at,
+            "completed_at": scoped_project.continuous_transfer_drain_completed_at,
+            "blocked_by_global": bool(settings.continuous_transfer_drain_requested),
+        }
     source_controls = {}
     for source_id, source in session.execute(select(Source.id, Source).where(source_scope)):
         active = int(session.scalar(select(func.count(TransferQueueItem.id)).where(
@@ -6755,6 +6789,9 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
             "requested_at": source.continuous_transfer_drain_requested_at,
             "completed_at": source.continuous_transfer_drain_completed_at,
             "blocked_by_global": bool(settings.continuous_transfer_drain_requested),
+            "blocked_by_project": bool(source.migration_project_id and session.get(
+                MigrationProject, source.migration_project_id
+            ).continuous_transfer_drain_requested),
         }
     return {
         "project_id": project.id if project else None,
@@ -6768,7 +6805,7 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
             "failed_items": int(lane_totals["failed_items"] or 0),
             "requested_at": settings.continuous_transfer_drain_requested_at,
             "completed_at": settings.continuous_transfer_drain_completed_at,
-        }, "sources": source_controls},
+        }, "projects": project_controls, "sources": source_controls},
         "generated_at": now,
     }
 
@@ -7787,18 +7824,26 @@ def resume_deep_audits(session: Session = Depends(get_session)) -> dict:
 
 
 def continuous_transfer_drain_requested(session: Session, source_id: int) -> bool:
-    """Whether global or source-local transfer admission is stopped."""
+    """Whether global, project, or source transfer admission is stopped."""
     global_stop = session.scalar(select(RuntimeSettings.continuous_transfer_drain_requested).limit(1))
-    source_stop = session.scalar(select(Source.continuous_transfer_drain_requested).where(Source.id == source_id))
-    return bool(global_stop or source_stop)
+    source = source_or_404(session, source_id)
+    project_stop = False
+    if source.migration_project_id is not None:
+        project_stop = bool(session.scalar(select(MigrationProject.continuous_transfer_drain_requested).where(
+            MigrationProject.id == source.migration_project_id
+        )))
+    return bool(global_stop or project_stop or source.continuous_transfer_drain_requested)
 
 
-def _pause_ready_transfer_tasks(session: Session, source_id: int | None = None) -> int:
+def _pause_ready_transfer_tasks(session: Session, source_id: int | None = None,
+                                project_id: int | None = None) -> int:
     query = select(Task).join(Wave).where(
         Task.kind == "TRANSFER_CONTINUOUS", Task.state == TaskState.READY,
     )
     if source_id is not None:
         query = query.where(Wave.source_id == source_id)
+    if project_id is not None:
+        query = query.join(Source).where(Source.migration_project_id == project_id)
     tasks = list(session.scalars(query.with_for_update()))
     for task in tasks:
         task.state, task.worker_id, task.lease_expires_at = TaskState.PAUSED, None, None
@@ -7806,8 +7851,11 @@ def _pause_ready_transfer_tasks(session: Session, source_id: int | None = None) 
     return len(tasks)
 
 
-def _transfer_drain_snapshot(session: Session, source_id: int | None = None) -> dict:
+def _transfer_drain_snapshot(session: Session, source_id: int | None = None,
+                             project_id: int | None = None) -> dict:
     scope = [] if source_id is None else [TransferQueueItem.source_id == source_id]
+    if project_id is not None:
+        scope.append(TransferQueueItem.project_id == project_id)
     active = int(session.scalar(select(func.count(TransferQueueItem.id)).where(
         TransferQueueItem.state == TransferQueueState.LEASED, *scope
     )) or 0)
@@ -7818,66 +7866,115 @@ def _transfer_drain_snapshot(session: Session, source_id: int | None = None) -> 
             "state": "DRAINING" if active else "DRAINED"}
 
 
-def request_continuous_transfer_drain(session: Session, source_id: int | None = None) -> dict:
+def complete_project_transfer_drain_if_idle(session: Session, project_id: int | None) -> bool:
+    """Persist one project-level completion event after its last lease settles."""
+    if project_id is None:
+        return False
+    project = session.get(MigrationProject, project_id)
+    if (project is None or not project.continuous_transfer_drain_requested
+            or project.continuous_transfer_drain_completed_at is not None):
+        return False
+    if _transfer_drain_snapshot(session, project_id=project.id)["state"] != "DRAINED":
+        return False
+    project.continuous_transfer_drain_completed_at = utcnow()
+    record_event(session, "CONTINUOUS_TRANSFER_DRAIN_COMPLETED",
+                 f"Continuous transfer drain completed for project {project.id}.",
+                 migration_project_id=project.id)
+    return True
+
+
+def request_continuous_transfer_drain(session: Session, source_id: int | None = None,
+                                      project_id: int | None = None) -> dict:
     """Stop future transfer admission and let already leased objects settle."""
+    if source_id is not None and project_id is not None:
+        raise ValueError("A transfer drain may target a project or a source, not both")
     now = utcnow()
-    label = "global continuous transfer lane" if source_id is None else f"source {source_id}"
-    if source_id is None:
+    label = ("global continuous transfer lane" if source_id is None and project_id is None
+             else f"project {project_id}" if project_id is not None else f"source {source_id}")
+    if source_id is None and project_id is None:
         settings = runtime_settings(session)
         settings.continuous_transfer_drain_requested = True
         settings.continuous_transfer_drain_requested_at = now
         settings.continuous_transfer_drain_completed_at = None
+    elif project_id is not None:
+        project = migration_project_or_404(session, project_id)
+        project.continuous_transfer_drain_requested = True
+        project.continuous_transfer_drain_requested_at = now
+        project.continuous_transfer_drain_completed_at = None
     else:
         source = source_or_404(session, source_id)
         source.continuous_transfer_drain_requested = True
         source.continuous_transfer_drain_requested_at = now
         source.continuous_transfer_drain_completed_at = None
-    paused = _pause_ready_transfer_tasks(session, source_id)
-    snapshot = _transfer_drain_snapshot(session, source_id)
+    paused = _pause_ready_transfer_tasks(session, source_id, project_id)
+    snapshot = _transfer_drain_snapshot(session, source_id, project_id)
     if snapshot["state"] == "DRAINED":
-        if source_id is None:
+        if source_id is None and project_id is None:
             runtime_settings(session).continuous_transfer_drain_completed_at = now
+        elif project_id is not None:
+            migration_project_or_404(session, project_id).continuous_transfer_drain_completed_at = now
         else:
             source_or_404(session, source_id).continuous_transfer_drain_completed_at = now
     record_event(session, "CONTINUOUS_TRANSFER_DRAIN_REQUESTED",
                  f"Operator stopped new admission for {label}; {snapshot['active_items']} leased transfer(s) will drain safely.",
-                 source_id=source_id)
+                 source_id=source_id, migration_project_id=project_id)
     if snapshot["state"] == "DRAINED":
         record_event(session, "CONTINUOUS_TRANSFER_DRAIN_COMPLETED",
-                     f"Continuous transfer drain completed for {label}.", source_id=source_id)
+                     f"Continuous transfer drain completed for {label}.", source_id=source_id,
+                     migration_project_id=project_id)
     session.commit()
-    return {"scope": "GLOBAL" if source_id is None else "SOURCE", "source_id": source_id,
+    scope_name = "PROJECT" if project_id is not None else "GLOBAL" if source_id is None else "SOURCE"
+    return {"scope": scope_name, "source_id": source_id, "project_id": project_id,
             "paused": paused, **snapshot}
 
 
-def resume_continuous_transfer_drain(session: Session, source_id: int | None = None) -> dict:
+def resume_continuous_transfer_drain(session: Session, source_id: int | None = None,
+                                     project_id: int | None = None) -> dict:
     """Resume only work stopped by the selected scope, preserving FIFO order."""
-    if source_id is None:
+    if source_id is not None and project_id is not None:
+        raise ValueError("A transfer resume may target a project or a source, not both")
+    if source_id is None and project_id is None:
         settings = runtime_settings(session)
         settings.continuous_transfer_drain_requested = False
         settings.continuous_transfer_drain_requested_at = None
         settings.continuous_transfer_drain_completed_at = None
         source_filter = Source.continuous_transfer_drain_requested.is_(False)
+    elif project_id is not None:
+        project = migration_project_or_404(session, project_id)
+        project.continuous_transfer_drain_requested = False
+        project.continuous_transfer_drain_requested_at = None
+        project.continuous_transfer_drain_completed_at = None
+        source_filter = Source.migration_project_id == project_id
     else:
         source = source_or_404(session, source_id)
         source.continuous_transfer_drain_requested = False
         source.continuous_transfer_drain_requested_at = None
         source.continuous_transfer_drain_completed_at = None
         source_filter = Wave.source_id == source_id
+        project_is_draining = bool(source.migration_project_id and session.scalar(
+            select(MigrationProject.continuous_transfer_drain_requested).where(
+                MigrationProject.id == source.migration_project_id
+            )
+        ))
+        if project_is_draining:
+            session.commit()
+            return {"scope": "SOURCE", "source_id": source_id, "project_id": source.migration_project_id,
+                    "resumed": 0, "blocked_by_project": True}
     query = select(Task).join(Wave).join(Source).where(
         Task.kind == "TRANSFER_CONTINUOUS", Task.state == TaskState.PAUSED, source_filter,
     )
-    if source_id is not None and runtime_settings(session).continuous_transfer_drain_requested:
+    if (source_id is not None or project_id is not None) and runtime_settings(session).continuous_transfer_drain_requested:
         session.commit()
-        return {"scope": "SOURCE", "source_id": source_id, "resumed": 0, "blocked_by_global": True}
+        return {"scope": "PROJECT" if project_id is not None else "SOURCE", "source_id": source_id,
+                "project_id": project_id, "resumed": 0, "blocked_by_global": True}
     tasks = list(session.scalars(query.with_for_update()))
     for task in tasks:
         task.state, task.worker_id, task.lease_expires_at, task.error = TaskState.READY, None, None, None
     record_event(session, "CONTINUOUS_TRANSFER_DRAIN_RESUMED",
-                 f"Operator resumed continuous transfer admission for {'the global lane' if source_id is None else f'source {source_id}' }.",
-                 source_id=source_id)
+                 f"Operator resumed continuous transfer admission for {'the global lane' if source_id is None and project_id is None else f'project {project_id}' if project_id is not None else f'source {source_id}' }.",
+                 source_id=source_id, migration_project_id=project_id)
     session.commit()
-    return {"scope": "GLOBAL" if source_id is None else "SOURCE", "source_id": source_id,
+    return {"scope": "PROJECT" if project_id is not None else "GLOBAL" if source_id is None else "SOURCE", "source_id": source_id, "project_id": project_id,
             "resumed": len(tasks), "blocked_by_global": False}
 
 
@@ -7899,6 +7996,16 @@ def drain_source_continuous_transfer(source_id: int, session: Session = Depends(
 @app.post("/api/sources/{source_id}/transfer/resume")
 def resume_source_continuous_transfer(source_id: int, session: Session = Depends(get_session)) -> dict:
     return resume_continuous_transfer_drain(session, source_id)
+
+
+@app.post("/api/migration-projects/{project_id}/transfer/drain")
+def drain_project_continuous_transfer(project_id: int, session: Session = Depends(get_session)) -> dict:
+    return request_continuous_transfer_drain(session, project_id=project_id)
+
+
+@app.post("/api/migration-projects/{project_id}/transfer/resume")
+def resume_project_continuous_transfer(project_id: int, session: Session = Depends(get_session)) -> dict:
+    return resume_continuous_transfer_drain(session, project_id=project_id)
 
 
 def repair_completed_deep_audit_statuses(session: Session) -> int:
@@ -13025,6 +13132,37 @@ def list_waves(source_id: int, session: Session = Depends(get_session)) -> list[
              "can_delete": wave.id not in executed_wave_ids and wave.id not in progressed_wave_ids,
              "is_transferring": wave.id in transferring_wave_ids}
             for wave, count, size, started, finished in rows]
+
+
+@app.get("/api/migration-projects/{project_id}/waves")
+def list_project_waves(project_id: int, source_id: int | None = Query(default=None, ge=1),
+                       session: Session = Depends(get_session)) -> dict:
+    """Aggregate project waves without changing their source ownership."""
+    project = migration_project_or_404(session, project_id)
+    # Direct internal/test callers receive FastAPI's Query placeholder when
+    # omitting this argument; requests receive an int or None.
+    source_id = source_id if isinstance(source_id, int) else None
+    source_query = select(Source).where(Source.migration_project_id == project.id)
+    if source_id is not None:
+        source_query = source_query.where(Source.id == source_id)
+    sources = list(session.scalars(source_query.order_by(Source.name, Source.id)))
+    if source_id is not None and not sources:
+        raise HTTPException(status_code=404, detail="Source does not belong to this migration project")
+    waves = []
+    for source in sources:
+        for wave in list_waves(source.id, session):
+            waves.append({"source_id": source.id, "source_name": source.name, **wave})
+    waves.sort(key=lambda item: (item["source_name"].lower(), int(item["id"])))
+    return {
+        "project_id": project.id, "project_name": project.name,
+        "sources": [{"id": source.id, "name": source.name} for source in sources],
+        "waves": waves,
+        "transfer_drain": {
+            "requested": bool(project.continuous_transfer_drain_requested),
+            "requested_at": project.continuous_transfer_drain_requested_at,
+            "completed_at": project.continuous_transfer_drain_completed_at,
+        },
+    }
 
 
 @app.delete("/api/waves/{wave_id}")
