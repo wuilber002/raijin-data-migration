@@ -1828,7 +1828,7 @@ def test_project_executive_summary_has_project_button_modal_and_grouped_aws_oci_
     assert "openProjectExecutiveSummaryModal()" in page
     assert "/executive-summary" in page
     assert "Porcentagem entregue" in page
-    assert 'colspan="5">AWS' in page and 'colspan="5">OCI' in page
+    assert 'colspan="5">AWS (Origem)' in page and 'colspan="5">OCI (Destino)' in page
     assert "Total de arquivos" in page and "Total de dados" in page
     assert "project-executive-summary-table-wrap{max-width:100%;flex:1 1 auto;min-height:0;overflow:auto" in page
     assert "project-executive-summary-table th:first-child,.project-executive-summary-table td:first-child{position:sticky" in page
@@ -1836,6 +1836,8 @@ def test_project_executive_summary_has_project_button_modal_and_grouped_aws_oci_
     assert '<td class="executive-cell-left"><b>${escape(source.source_name)}</b></td>' in page
     assert 'class="executive-cell-center">${percent(source.percentage?.files)}</td>' in page
     assert 'class="executive-cell-right">${fmt(source.aws?.bucket_files||0)}</td>' in page
+    assert "tier=value=>String(value||'—').split(/\\s*\\/\\s*/).map(escape).join('<br>')" in page
+    assert 'class="executive-cell-center executive-tier-cell">${tier(source.aws?.bucket_tier)}</td>' in page
     assert "Bucket total size (GB)" not in page
     assert 'class="metric executive-summary-metric"' in page
     assert 'th rowspan="2">Source</th>' in page
@@ -1844,3 +1846,4 @@ def test_project_executive_summary_has_project_button_modal_and_grouped_aws_oci_
     assert "thead tr:nth-child(2) th{position:sticky;top:var(--executive-header-row)" in page
     assert "thead tr:nth-child(2) th:first-child{left:auto" in page
     assert 'executive-summary-metric"><span class="with-help">Projeto' in page
+    assert ".executive-summary-metric>b{position:absolute;inset:0;display:flex;align-items:center;justify-content:center" in page

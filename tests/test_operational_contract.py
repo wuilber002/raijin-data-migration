@@ -771,6 +771,7 @@ def test_project_executive_summary_reports_inventory_and_delivered_oci_evidence(
         assert report["source_count"] == 1
         assert report["total_files"] == 2 and report["total_size_bytes"] == 400
         assert report["sources"][0]["oci"]["bucket_files"] == 1
+        assert report["sources"][0]["oci"]["bucket_tier"] == "STANDARD"
         assert report["sources"][0]["percentage"] == {"files": 50.0, "size": 25.0}
 
 

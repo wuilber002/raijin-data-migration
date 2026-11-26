@@ -8636,7 +8636,7 @@ def migration_project_executive_summary(project_id: int,
             # RuntimeContext.  Keep this field explicit rather than guessing
             # a region from the AWS source or a deployment-specific file.
             "oci": {"region": "—",
-                    "bucket_name": source.destination_bucket, "bucket_tier": "STANDARD (destino)",
+                    "bucket_name": source.destination_bucket, "bucket_tier": "STANDARD",
                     "bucket_files": int(inventory.get("delivered_objects", 0)),
                     "bucket_size_bytes": int(inventory.get("delivered_bytes", 0))},
             "percentage": {"files": (
