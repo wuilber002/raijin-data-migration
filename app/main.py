@@ -1617,6 +1617,36 @@ def source_route_is_locked(session: Session, source_id: int) -> bool:
     )
 
 
+def source_project_move_eligibility(session: Session, source: Source) -> tuple[bool, str]:
+    """Allow ownership reassignment only after discovery and before execution.
+
+    The source route and inventory are immutable evidence.  Project ownership,
+    however, is a reporting and admission boundary and can safely move while
+    the source has completed discovery but has not entered any wave, queue or
+    pipeline lifecycle.
+    """
+    if source.migration_project_id is None:
+        return False, "A source sem projeto deve ser associada pelo fluxo de adoção"
+    if source.status != "DISCOVERED":
+        return False, "A source precisa ter o discovery concluído antes de trocar de projeto"
+    if session.scalar(select(DiscoveryJob.id).where(
+        DiscoveryJob.source_id == source.id,
+        DiscoveryJob.state.in_([TaskState.READY, TaskState.RUNNING]),
+    ).limit(1)):
+        return False, "Há discovery ativo ou aguardando na fila"
+    if session.scalar(select(Wave.id).where(Wave.source_id == source.id).limit(1)):
+        return False, "A source já possui waves; a associação ao projeto é somente leitura"
+    if session.scalar(select(TransferQueueItem.id).where(
+        TransferQueueItem.source_id == source.id
+    ).limit(1)):
+        return False, "A source já possui itens na fila de transferência"
+    if session.scalar(select(DynamicPipelineRun.id).where(
+        DynamicPipelineRun.source_id == source.id
+    ).limit(1)):
+        return False, "A source já possui execução de pipeline"
+    return True, "Discovery preservado; ainda não há waves, transfers ou pipeline"
+
+
 def migration_project_or_404(session: Session, project_id: int) -> MigrationProject:
     project = session.get(MigrationProject, project_id)
     if project is None:
@@ -1790,6 +1820,11 @@ class SourceProjectAdoption(BaseModel):
 
 class HistoricalSourceProjectAssociation(BaseModel):
     """Attach existing evidence to a project without changing its OCI route."""
+    migration_project_id: int = Field(ge=1)
+
+
+class SourceProjectMove(BaseModel):
+    """Move discovery-only source ownership without rewriting its inventory."""
     migration_project_id: int = Field(ge=1)
 
 
@@ -9443,6 +9478,53 @@ def adopt_source_into_migration_project(project_id: int, source_id: int,
     session.commit()
     return {"source_id": source.id, "migration_project_id": project.id,
             "destination_prefix": destination_prefix}
+
+
+@app.get("/api/sources/{source_id}/project-move-eligibility")
+def get_source_project_move_eligibility(source_id: int,
+                                        session: Session = Depends(get_session)) -> dict:
+    source = source_or_404(session, source_id)
+    eligible, reason = source_project_move_eligibility(session, source)
+    return {"source_id": source.id, "migration_project_id": source.migration_project_id,
+            "eligible": eligible, "reason": reason}
+
+
+@app.post("/api/sources/{source_id}/move-project")
+def move_discovered_source_to_migration_project(source_id: int, payload: SourceProjectMove,
+                                                 session: Session = Depends(get_session)) -> dict:
+    """Move a discovery-only source without touching its inventory or OCI route."""
+    source = active_source_or_409(session, source_id)
+    eligible, reason = source_project_move_eligibility(session, source)
+    if not eligible:
+        raise HTTPException(status_code=409, detail=f"Project move is unavailable: {reason}")
+    target = active_migration_project_or_409(session, payload.migration_project_id)
+    previous = migration_project_or_404(session, int(source.migration_project_id))
+    if target.id == previous.id:
+        return {"source_id": source.id, "migration_project_id": target.id,
+                "migration_project_name": target.name, "moved": False,
+                "message": "A source já pertence ao projeto selecionado"}
+    # Revalidate the existing immutable route under the destination project.
+    # This only checks collisions; it must never rewrite destination keys from
+    # the completed discovery.
+    _, route = normalized_project_destination_route(
+        session, target.id, source.destination_bucket, source.destination_prefix,
+        identity_copy=bool(source.destination_identity_copy), exclude_source_id=source.id,
+    )
+    if route != normalize_destination_prefix(source.destination_prefix):
+        raise HTTPException(status_code=409, detail="Existing OCI route cannot be preserved in the target project")
+    source.migration_project_id = target.id
+    record_event(
+        session,
+        "SOURCE_MOVED_BETWEEN_MIGRATION_PROJECTS",
+        (f"Source '{source.name}' moved from migration project '{previous.name}' to '{target.name}'; "
+         "discovery inventory and OCI route were preserved"),
+        source_id=source.id,
+        migration_project_id=target.id,
+    )
+    session.commit()
+    return {"source_id": source.id, "migration_project_id": target.id,
+            "migration_project_name": target.name, "moved": True,
+            "destination_prefix": normalize_destination_prefix(source.destination_prefix)}
 
 
 @app.post("/api/migration-projects/{project_id}/sources/{source_id}/associate-history")

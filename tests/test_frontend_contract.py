@@ -1131,6 +1131,16 @@ def test_source_form_opens_in_a_modal_with_a_fixed_prefix_workspace():
     assert "closeSourceModal();await loadSources()" in page
 
 
+def test_source_editor_can_move_only_discovery_only_sources_between_projects():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert 'id="source-migration-project-field"' in page
+    assert 'id="source-migration-project"' in page
+    assert "populateSourceMigrationProjectSelector" in page
+    assert "/project-move-eligibility" in page
+    assert "/move-project" in page
+    assert "Discovery preservado; ainda não há waves, transfers ou pipeline" in (ROOT / "app/main.py").read_text(encoding="utf-8")
+
+
 def test_source_creation_loads_cached_aws_connections_and_oci_buckets_outside_settings():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "await Promise.all([loadSettings(),loadSources(),loadOciBuckets(),loadAwsConnections()])" in page

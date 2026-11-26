@@ -4903,6 +4903,62 @@ def test_historical_project_association_preserves_route_and_backfills_queue_cont
         assert event is not None and event.migration_project_id == project.id
 
 
+def test_discovery_only_source_moves_between_projects_without_rewriting_inventory():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        wrong_project = main.MigrationProject(name="projeto-incorreto")
+        target_project = main.MigrationProject(name="projeto-correto")
+        source = Source(
+            name="source-descoberta", s3_bucket="source", aws_region="us-east-1",
+            destination_bucket="destination", destination_prefix="preservado/source",
+            migration_project=wrong_project, status="DISCOVERED",
+        )
+        session.add_all([wrong_project, target_project, source]); session.flush()
+        inventory = ObjectRecord(source_id=source.id, object_key="arquivo-grande.bin",
+                                 size_bytes=5_000_000, destination_object_key="preservado/source/arquivo-grande.bin")
+        session.add(inventory); session.flush()
+
+        moved = main.move_discovered_source_to_migration_project(
+            source.id, main.SourceProjectMove(migration_project_id=target_project.id), session,
+        )
+
+        assert moved["moved"] is True
+        assert source.migration_project_id == target_project.id
+        assert source.destination_prefix == "preservado/source"
+        assert session.get(ObjectRecord, inventory.id).destination_object_key == "preservado/source/arquivo-grande.bin"
+        event = session.scalar(select(Event).where(
+            Event.kind == "SOURCE_MOVED_BETWEEN_MIGRATION_PROJECTS"
+        ))
+        assert event is not None and event.migration_project_id == target_project.id
+
+
+def test_source_project_move_is_blocked_after_a_wave_exists():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        wrong_project = main.MigrationProject(name="projeto-com-wave")
+        target_project = main.MigrationProject(name="projeto-destino")
+        source = Source(name="source-com-wave", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", destination_prefix="preservado/source",
+                        migration_project=wrong_project, status="DISCOVERED")
+        session.add_all([wrong_project, target_project, source]); session.flush()
+        session.add(Wave(source_id=source.id, name="onda-001", max_bytes=1,
+                         restore_days=1, restore_tier="BULK", status="READY_FOR_RESTORE"))
+        session.flush()
+
+        with pytest.raises(HTTPException, match="Project move is unavailable"):
+            main.move_discovered_source_to_migration_project(
+                source.id, main.SourceProjectMove(migration_project_id=target_project.id), session,
+            )
+
+
 def test_new_source_requires_an_existing_active_project():
     import app.main as main
 
