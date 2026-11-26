@@ -759,7 +759,9 @@ def test_project_transfer_drain_preserves_source_waves_and_blocks_admission_for_
                        destination_bucket="oci-one", migration_project=project)
         second = Source(name="project-drain-two", s3_bucket="two", aws_region="us-east-1",
                         destination_bucket="oci-two", migration_project=project)
-        session.add_all([project, first, second]); session.flush()
+        without_waves = Source(name="project-drain-empty", s3_bucket="empty", aws_region="us-east-1",
+                               destination_bucket="oci-empty", migration_project=project)
+        session.add_all([project, first, second, without_waves]); session.flush()
         waves = [Wave(source=first, name="one-wave", max_bytes=1, restore_days=1, restore_tier="BULK", status="RESTORED"),
                  Wave(source=second, name="two-wave", max_bytes=1, restore_days=1, restore_tier="BULK", status="RESTORED")]
         session.add_all(waves); session.flush()
@@ -775,7 +777,11 @@ def test_project_transfer_drain_preserves_source_waves_and_blocks_admission_for_
         assert all(task.state == TaskState.PAUSED for task in session.scalars(select(Task)))
         assert main.continuous_transfer_drain_requested(session, first.id) is True
         assert main.continuous_transfer_drain_requested(session, second.id) is True
-        assert len(main.list_project_waves(project.id, session=session)["waves"]) == 2
+        project_waves = main.list_project_waves(project.id, session=session)
+        assert len(project_waves["waves"]) == 2
+        assert [source["name"] for source in project_waves["sources"]] == [
+            "project-drain-one", "project-drain-two"
+        ]
 
         resumed = main.resume_continuous_transfer_drain(session, project_id=project.id)
         assert resumed["scope"] == "PROJECT"

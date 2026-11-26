@@ -13153,9 +13153,12 @@ def list_project_waves(project_id: int, source_id: int | None = Query(default=No
         for wave in list_waves(source.id, session):
             waves.append({"source_id": source.id, "source_name": source.name, **wave})
     waves.sort(key=lambda item: (item["source_name"].lower(), int(item["id"])))
+    sources_with_waves = [source for source in sources if any(
+        int(wave["source_id"]) == source.id for wave in waves
+    )]
     return {
         "project_id": project.id, "project_name": project.name,
-        "sources": [{"id": source.id, "name": source.name} for source in sources],
+        "sources": [{"id": source.id, "name": source.name} for source in sources_with_waves],
         "waves": waves,
         "transfer_drain": {
             "requested": bool(project.continuous_transfer_drain_requested),
