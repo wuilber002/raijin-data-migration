@@ -1321,10 +1321,10 @@ def test_project_summary_uses_large_values_and_internal_metric_divisions():
     assert 'migration-project-card-footer migration-project-inventory-footer">Tempo de discovery: ${duration(data.discovery_elapsed_seconds||0)}' in page
     assert ".migration-project-inventory-footer{text-align:center}" in page
     assert "migration-project-cost-value" in page
-    assert ".migration-project-dual b{max-width:100%;margin:0;color:#fff;font-size:2.09rem" in page
+    assert ".migration-project-dual b{max-width:100%;margin:0;color:#fff;font-size:clamp(1rem,1.5vw,2.09rem)" in page
     assert "minmax(225px,2fr) minmax(205px,1.85fr)" in page
-    assert "font-size:2.09rem;line-height:1.05;white-space:nowrap" in page
-    assert ".migration-project-cost-value{color:#fff;font-size:2.25rem!important" in page
+    assert "font-size:clamp(1rem,1.5vw,2.09rem);line-height:1.05;white-space:nowrap" in page
+    assert ".migration-project-cost-value{color:#fff;font-size:clamp(1.55rem,2vw,2.25rem)!important" in page
 
 
 def test_project_summary_hides_duplicate_discovery_total_and_shows_delivery_percentages():

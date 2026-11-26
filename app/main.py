@@ -8535,16 +8535,24 @@ def delete_aws_connection(connection_id: int, session: Session = Depends(get_ses
     return {"id": connection_id, "deleted": True}
 
 
-def source_inventory_is_observed(source: Source, object_count: int) -> bool:
+def source_inventory_is_observed(source: Source, object_count: int, *,
+                                 successful_discovery_job: bool = False) -> bool:
     """Return whether a source has durable evidence of a completed inventory.
 
     A source can legitimately contain zero objects.  Newer discoveries persist
     ``discovery_completed_at`` for that case, while inventories completed by
-    earlier releases may only retain the terminal ``DISCOVERED`` status.  Both
-    forms are evidence; sources still configured or actively discovering are
-    deliberately not treated as having an inventory.
+    earlier releases may only retain the terminal ``DISCOVERED`` status.  A
+    durable successful queue job or a completed discovery generation are also
+    authoritative: a later UI/state reset must never turn an empty completed
+    discovery into a false ``inventário ausente`` warning.
     """
-    return bool(object_count) or source.discovery_completed_at is not None or source.status == "DISCOVERED"
+    return bool(
+        object_count
+        or source.discovery_completed_at is not None
+        or source.status == "DISCOVERED"
+        or int(source.discovery_generation or 0) > 0
+        or successful_discovery_job
+    )
 
 
 def migration_project_completion_evidence(session: Session, project: MigrationProject,
@@ -8561,7 +8569,12 @@ def migration_project_completion_evidence(session: Session, project: MigrationPr
     ).order_by(Source.id)))
     source_ids = [source.id for source in sources]
     totals: dict[int, tuple[int, int, int, int, int]] = {}
+    successful_discovery_source_ids: set[int] = set()
     if source_ids:
+        successful_discovery_source_ids = set(session.scalars(select(DiscoveryJob.source_id).where(
+            DiscoveryJob.source_id.in_(source_ids),
+            DiscoveryJob.state == TaskState.SUCCEEDED,
+        ).distinct()))
         for source_id, count, transferred, verified, accepted, failed in session.execute(select(
             ObjectRecord.source_id,
             func.count(ObjectRecord.id),
@@ -8586,7 +8599,9 @@ def migration_project_completion_evidence(session: Session, project: MigrationPr
         # An empty bucket is a valid discovery result.  Object rows prove an
         # inventory when they exist; completed discoveries retain either the
         # current completion timestamp or the legacy DISCOVERED terminal state.
-        inventory_observed = source_inventory_is_observed(source, count)
+        inventory_observed = source_inventory_is_observed(
+            source, count, successful_discovery_job=source.id in successful_discovery_source_ids,
+        )
         delivered = inventory_observed and (not count or verified == count or (
             transferred == count and accepted == count
         ))
@@ -8891,7 +8906,12 @@ def project_closure_readiness(session: Session, project: MigrationProject) -> di
         blockers.append({"code": "NO_SOURCES", "description": "O projeto não possui sources."})
     source_ids = [source.id for source in sources]
     aggregates: dict[int, dict] = {}
+    successful_discovery_source_ids: set[int] = set()
     if source_ids:
+        successful_discovery_source_ids = set(session.scalars(select(DiscoveryJob.source_id).where(
+            DiscoveryJob.source_id.in_(source_ids),
+            DiscoveryJob.state == TaskState.SUCCEEDED,
+        ).distinct()))
         for row in session.execute(select(
             ObjectRecord.source_id,
             func.count(ObjectRecord.id),
@@ -8923,7 +8943,9 @@ def project_closure_readiness(session: Session, project: MigrationProject) -> di
         # Do not confuse a completed empty inventory with an inventory that
         # was never produced.  Legacy discoveries can have DISCOVERED without
         # the timestamp introduced by newer releases.
-        if not source_inventory_is_observed(source, data["objects"]):
+        if not source_inventory_is_observed(
+            source, data["objects"], successful_discovery_job=source.id in successful_discovery_source_ids,
+        ):
             blockers.append({"code": "INVENTORY_MISSING", "source_id": source.id,
                              "description": prefix + "inventário final ausente."})
         if source.status != "DISCOVERED" or not source.discovery_completed_at:
