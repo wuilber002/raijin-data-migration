@@ -1816,6 +1816,16 @@ def test_continuous_transfer_drain_has_global_and_source_controls_with_completio
     assert "if(button.textContent!==text)button.textContent=text" in page
 
 
+def test_source_inventory_actions_match_the_compact_operational_layout():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert ".source-summary-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))" in page
+    assert ".source-summary-actions>button:first-child{grid-column:1}" in page
+    assert ".source-summary-actions>.source-cost-action{grid-column:2}" in page
+    assert ".source-summary-actions>button:not(:first-child):not(.source-cost-action){grid-column:1/-1}" in page
+    assert "id='source-waves-timeline'" in page
+
+
 def test_discovery_message_history_opens_as_an_overlay_without_resizing_queue_rows():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
 
