@@ -1810,6 +1810,7 @@ def test_continuous_transfer_drain_has_global_and_source_controls_with_completio
     assert "/api/transfer-queue/${stopped?'resume':'drain'}" in page
     assert "/api/sources/${sourceId}/transfer/${stopped?'resume':'drain'}" in page
     assert "Drenagem de transferências concluída" in page
+    assert "if(button.textContent!==text)button.textContent=text" in page
 
 
 def test_discovery_message_history_opens_as_an_overlay_without_resizing_queue_rows():
