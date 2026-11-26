@@ -1115,10 +1115,16 @@ def test_project_is_required_before_the_ui_can_create_a_source():
     assert 'id="migration-project-create"' in page
     assert 'id="migration-project-create-modal" class="modal hidden"' in page
     assert 'id="migration-project-create-form"' in page
+    assert 'id="migration-project-rename"' in page
+    assert 'id="migration-project-rename-modal" class="modal hidden"' in page
+    assert "function openMigrationProjectRenameModal()" in page
+    assert "method:'PUT'" in page
+    assert "Renomear projeto:" in page
+    assert 'id="migration-project-refresh" title="Atualizar projetos"' in page
     assert "function syncSourceCreationProjectState()" in page
     assert "action.disabled=!projectId" in page
     assert "payload.migration_project_id=projectId" in page
-    assert "payload.destination_prefix=b('#source-destination-prefix')" in page
+    assert "payload.destination_prefix=payload.destination_identity_copy?'/':b('#source-destination-prefix')" in page
     assert 'id="source-destination-prefix"' in page
 
 

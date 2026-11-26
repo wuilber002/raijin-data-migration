@@ -15,7 +15,7 @@
   const migrationMutationIds = new Set([
     "source-discovery-action", "source-validate-destination", "source-edit-action",
     "source-lifecycle-action", "create-source-action", "source-submit",
-    "wave-create-submit", "waves-queue-all", "migration-project-create",
+    "wave-create-submit", "waves-queue-all", "migration-project-create", "migration-project-rename",
     "migration-project-archive", "migration-project-closure", "project-closure-issue",
   ]);
   const migrationMutationHandlers = /(?:openDiscoveryModal|startEditSource|removeOrDeactivateSource|openNewSourceModal|submitSelectedWaveMethod|queue(?:All)?PlannedWave|waveAction|verifyWave|deleteWave|start(?:Source)?DeepAudit|toggleDeepAuditQueue|reprocessModifiedDiscoveryObjects|openMigrationProjectCreateModal|openProjectClosureModal)/;
