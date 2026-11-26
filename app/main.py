@@ -3711,31 +3711,152 @@ def freeze_source_endpoint_configuration(source: Source, connection: AwsConnecti
     source.aws_endpoint_snapshot_json = json.dumps(connection_endpoint_configuration(connection), sort_keys=True)
 
 
+AWS_S3_ENDPOINT_REGION = re.compile(
+    r"(?:^|\.)s3(?:-fips)?\.(?P<region>[a-z]{2}(?:-gov)?-[a-z0-9-]+-\d)\.(?:vpce\.)?amazonaws\.com(?:\.cn)?$"
+)
+
+
+def source_endpoint_configuration(source: Source) -> dict:
+    """Return the frozen endpoint profile effective for a source.
+
+    A source must keep using the endpoint profile chosen at registration.
+    Falling back field-by-field supports legacy sources created before the
+    immutable snapshot was introduced.
+    """
+    connection = source.aws_connection
+    if connection is None:
+        raise RuntimeError("Source has no AWS connection")
+    try:
+        snapshot = json.loads(source.aws_endpoint_snapshot_json or "{}")
+    except (TypeError, ValueError):
+        snapshot = {}
+    current = connection_endpoint_configuration(connection)
+    return {
+        field: snapshot[field] if field in snapshot else current[field]
+        for field in ("sts_endpoint_url", "s3_endpoint_url", "s3control_endpoint_url",
+                      "s3_addressing_style", "tls_ca_bundle_path")
+    }
+
+
+def aws_s3_endpoint_region(endpoint_url: str | None) -> str | None:
+    """Extract the AWS region from a standard S3 endpoint hostname, if known."""
+    if not endpoint_url:
+        return None
+    try:
+        hostname = urlparse(endpoint_url).hostname
+    except ValueError:
+        return None
+    match = AWS_S3_ENDPOINT_REGION.search((hostname or "").lower())
+    return match.group("region") if match else None
+
+
 def source_s3_transfer_endpoint_mode(source: Source) -> str:
     """Classify the S3 data-plane route effective for one source.
 
     The snapshot is authoritative whenever it includes the field. Older
     sources without a snapshot retain the connection value used by the worker.
     """
-    try:
-        snapshot = json.loads(source.aws_endpoint_snapshot_json or "{}")
-    except (TypeError, ValueError):
-        snapshot = {}
-    endpoint = (snapshot.get("s3_endpoint_url") if "s3_endpoint_url" in snapshot
-                else (source.aws_connection.s3_endpoint_url if source.aws_connection else None))
+    endpoint = source_endpoint_configuration(source)["s3_endpoint_url"]
     return "PRIVATE" if isinstance(endpoint, str) and endpoint.strip() else "PUBLIC"
+
+
+def aws_client_options_from_endpoint_configuration(endpoint_configuration: dict, service: str, config):
+    """Build SDK options from a source's frozen endpoint profile."""
+    from botocore.config import Config
+    merged = config.merge(Config(s3={"addressing_style": endpoint_configuration["s3_addressing_style"]}))
+    return {
+        "config": merged,
+        "endpoint_url": endpoint_configuration[f"{service}_endpoint_url"],
+        "verify": endpoint_configuration["tls_ca_bundle_path"] or True,
+    }
 
 
 def aws_client_options(connection: AwsConnection, service: str, config):
     """Return neutral boto3 kwargs for public or explicitly configured endpoints."""
-    endpoint = {
-        "sts": connection.sts_endpoint_url,
-        "s3": connection.s3_endpoint_url,
-        "s3control": connection.s3control_endpoint_url,
-    }[service]
-    from botocore.config import Config
-    merged = config.merge(Config(s3={"addressing_style": connection.s3_addressing_style}))
-    return {"config": merged, "endpoint_url": endpoint, "verify": connection.tls_ca_bundle_path or True}
+    return aws_client_options_from_endpoint_configuration(
+        connection_endpoint_configuration(connection), service, config,
+    )
+
+
+def reported_s3_bucket_region(client, bucket: str) -> str:
+    """Read HeadBucket's region header, including a wrong-endpoint redirect."""
+    try:
+        response = client.head_bucket(Bucket=bucket)
+        headers = response.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+    except Exception as error:
+        headers = (getattr(error, "response", {}) or {}).get("ResponseMetadata", {}).get("HTTPHeaders", {})
+        if not headers.get("x-amz-bucket-region"):
+            raise
+    region = headers.get("x-amz-bucket-region")
+    if not region:
+        raise RuntimeError(f"AWS did not return a region for bucket '{bucket}'")
+    return "eu-west-1" if region == "EU" else region
+
+
+def precheck_source_aws_topology(source: Source) -> dict:
+    """Validate one source against its role and frozen S3 endpoint profile.
+
+    ``HeadBucket`` is deliberately used instead of listing data.  It obtains
+    the authoritative bucket region and exposes a wrong regional endpoint via
+    its redirect header, without starting discovery or changing inventory.
+    """
+    connection = source.aws_connection
+    if connection is None:
+        raise RuntimeError("Source has no AWS connection")
+    try:
+        payload = aws_secret_payload(connection.secret_ocid)
+        import boto3
+        from botocore.config import Config
+
+        endpoints = source_endpoint_configuration(source)
+        config = Config(connect_timeout=10, read_timeout=30, retries={"max_attempts": 3, "mode": "standard"})
+        bootstrap = boto3.Session(
+            aws_access_key_id=payload["bootstrap_access_key_id"],
+            aws_secret_access_key=payload["bootstrap_secret_access_key"],
+            region_name=source.aws_region,
+        )
+        assumed = bootstrap.client(
+            "sts", **aws_client_options_from_endpoint_configuration(endpoints, "sts", config)
+        ).assume_role(
+            RoleArn=payload["migration_role_arn"], RoleSessionName="raijin-source-precheck", DurationSeconds=900,
+        )["Credentials"]
+        role = boto3.Session(
+            aws_access_key_id=assumed["AccessKeyId"], aws_secret_access_key=assumed["SecretAccessKey"],
+            aws_session_token=assumed["SessionToken"], region_name=source.aws_region,
+        )
+        account_id = role.client(
+            "sts", **aws_client_options_from_endpoint_configuration(endpoints, "sts", config)
+        ).get_caller_identity()["Account"]
+        if account_id != connection.aws_account_id or account_id != payload["aws_account_id"]:
+            raise RuntimeError("Assumed account does not match the registered AWS connection")
+        bucket_region = reported_s3_bucket_region(role.client(
+            "s3", **aws_client_options_from_endpoint_configuration(endpoints, "s3", config)
+        ), source.s3_bucket)
+    except RuntimeError:
+        raise
+    except Exception as error:
+        raise RuntimeError(f"AWS source pre-check failed: {safe_aws_error_summary(error)}") from error
+
+    # Keep the observed AWS fact even when a following topology comparison
+    # fails.  The explicit source pre-check then leaves the operator the real
+    # bucket region needed to select the correct connection.
+    source.aws_bucket_region = bucket_region
+    endpoint_region = aws_s3_endpoint_region(endpoints["s3_endpoint_url"])
+    if bucket_region != source.aws_region:
+        raise RuntimeError(
+            f"Source AWS region mismatch: connection is {source.aws_region}, bucket '{source.s3_bucket}' is {bucket_region}"
+        )
+    if endpoints["s3_endpoint_url"] and endpoint_region and endpoint_region != bucket_region:
+        raise RuntimeError(
+            f"S3 private endpoint region mismatch: endpoint is {endpoint_region}, bucket '{source.s3_bucket}' is {bucket_region}"
+        )
+    return {
+        "bucket_region": bucket_region,
+        "connection_region": source.aws_region,
+        "s3_endpoint_url": endpoints["s3_endpoint_url"],
+        "s3_endpoint_region": endpoint_region,
+        "endpoint_mode": "PRIVATE" if endpoints["s3_endpoint_url"] else "PUBLIC",
+    }
 
 
 PRICING_RATE_FIELDS = (
@@ -9775,12 +9896,20 @@ def create_source(payload: SourceCreate, session: Session = Depends(get_session)
     session.add(source)
     session.flush()
     session.add_all(SourcePrefix(source_id=source.id, prefix=prefix) for prefix in prefixes)
+    try:
+        topology = precheck_source_aws_topology(source)
+    except RuntimeError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    source.aws_bucket_region = topology["bucket_region"]
     record_event(
-        session, "SOURCE_CREATED", f"Source '{source.name}' configured",
+        session, "SOURCE_CREATED",
+        (f"Source '{source.name}' configured; bucket region {topology['bucket_region']}; "
+         f"S3 endpoint mode {topology['endpoint_mode']}"),
         source_id=source.id, migration_project_id=(project.id if project else None),
     )
     session.commit()
-    return {"id": source.id, "name": source.name, "status": source.status}
+    return {"id": source.id, "name": source.name, "status": source.status,
+            "aws_bucket_region": source.aws_bucket_region}
 
 
 @app.put("/api/sources/{source_id}")
@@ -9844,12 +9973,41 @@ def update_source(source_id: int, payload: SourceUpdate, session: Session = Depe
     source.s3_prefix = prefixes[0]
     session.query(SourcePrefix).filter(SourcePrefix.source_id == source.id).delete(synchronize_session=False)
     session.add_all(SourcePrefix(source_id=source.id, prefix=prefix) for prefix in prefixes)
+    try:
+        topology = precheck_source_aws_topology(source)
+    except RuntimeError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    source.aws_bucket_region = topology["bucket_region"]
     record_event(
-        session, "SOURCE_UPDATED", f"Source '{source.name}' configuration updated",
+        session, "SOURCE_UPDATED",
+        (f"Source '{source.name}' configuration updated; bucket region {topology['bucket_region']}; "
+         f"S3 endpoint mode {topology['endpoint_mode']}"),
         source_id=source.id, migration_project_id=(project.id if project else None),
     )
     session.commit()
-    return {"id": source.id, "name": source.name, "status": source.status}
+    return {"id": source.id, "name": source.name, "status": source.status,
+            "aws_bucket_region": source.aws_bucket_region}
+
+
+@app.post("/api/sources/{source_id}/aws-precheck")
+def precheck_source_aws(source_id: int, session: Session = Depends(get_session)) -> dict:
+    """Revalidate one selected source without listing or changing its inventory."""
+    source = active_source_or_409(session, source_id)
+    try:
+        topology = precheck_source_aws_topology(source)
+    except RuntimeError as error:
+        record_event(session, "SOURCE_AWS_PRECHECK_FAILED", str(error), source_id=source.id)
+        session.commit()
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    source.aws_bucket_region = topology["bucket_region"]
+    record_event(
+        session, "SOURCE_AWS_PRECHECK_VALIDATED",
+        (f"Source bucket '{source.s3_bucket}' confirmed in {topology['bucket_region']}; "
+         f"connection region {topology['connection_region']}; S3 endpoint mode {topology['endpoint_mode']}"),
+        source_id=source.id,
+    )
+    session.commit()
+    return {"source_id": source.id, **topology}
 
 
 @app.post("/api/sources/{source_id}/migrate-aws-connection")

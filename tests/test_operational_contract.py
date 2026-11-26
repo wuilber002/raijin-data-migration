@@ -2400,6 +2400,24 @@ def test_restore_preflight_blocks_source_region_mismatch_before_batch_submission
         validate_restore_preflight(None, source, Client(), {"control_bucket": "control"})
 
 
+def test_source_precheck_reads_private_endpoint_region_and_is_available_before_discovery():
+    import app.main as main
+
+    assert main.aws_s3_endpoint_region(
+        "https://bucket.vpce-095c1db0ebd51cdd0-lq7qxvq7.s3.sa-east-1.vpce.amazonaws.com"
+    ) == "sa-east-1"
+    assert main.aws_s3_endpoint_region("https://s3.us-east-1.amazonaws.com") == "us-east-1"
+    assert main.aws_s3_endpoint_region("https://s3.internal.example") is None
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    assert "def precheck_source_aws_topology" in source
+    assert '@app.post("/api/sources/{source_id}/aws-precheck")' in source
+    assert "precheck_source_aws_topology(source)" in source[source.index("def create_source"):]
+    worker = Path("app/real_worker.py").read_text(encoding="utf-8")
+    remote = worker[worker.index("def remote_discover"):worker.index("\n\ndef ", worker.index("def remote_discover"))]
+    assert "reported_bucket_region(s3, source.s3_bucket)" in remote
+    assert "Source AWS region mismatch" in remote
+
+
 def test_obsolete_source_region_sync_endpoint_is_not_exposed():
     source = Path("app/main.py").read_text(encoding="utf-8")
     assert "/sync-aws-region" not in source

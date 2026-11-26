@@ -1377,6 +1377,17 @@ def import_s3_inventory_manifest(session, source: Source, settings, job: Discove
 
 def remote_discover(session, source: Source, settings, job: DiscoveryJob | None = None) -> None:
     s3, _, _ = aws_clients(settings, source.aws_region, source)
+    # Discovering through a regional S3 endpoint without checking the bucket
+    # region first produces a vague PermanentRedirect during ListObjectsV2.
+    # Persist the observed region and stop before listing any inventory so the
+    # operator can choose the correct regional connection/VPCE safely.
+    bucket_region = reported_bucket_region(s3, source.s3_bucket)
+    source.aws_bucket_region = bucket_region
+    if bucket_region != source.aws_region:
+        raise RuntimeError(
+            f"Source AWS region mismatch: connection is {source.aws_region}, "
+            f"bucket '{source.s3_bucket}' is {bucket_region}"
+        )
     inserted = 0
     continuation_token = source.discovery_continuation_token
     prefixes = source_prefix_values(source)

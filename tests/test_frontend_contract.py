@@ -1337,6 +1337,15 @@ def test_project_summary_hides_duplicate_discovery_total_and_shows_delivery_perc
     assert "minimumFractionDigits:2,maximumFractionDigits:2" in page
 
 
+def test_selected_source_shows_its_observed_s3_bucket_region_next_to_discovery_origin():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "bucket-region-tag" in page
+    assert "Bucket: ${observed}" in page
+    assert "Região real retornada pelo S3 HeadBucket" in page
+    assert "loadSummaryWithBucketRegionTag" in page
+    assert "discovery.insertAdjacentHTML('afterend',tag)" in page
+
+
 def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="source-context-tags"' in page
