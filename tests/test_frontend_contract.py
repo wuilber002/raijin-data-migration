@@ -1810,3 +1810,11 @@ def test_continuous_transfer_drain_has_global_and_source_controls_with_completio
     assert "/api/transfer-queue/${stopped?'resume':'drain'}" in page
     assert "/api/sources/${sourceId}/transfer/${stopped?'resume':'drain'}" in page
     assert "Drenagem de transferências concluída" in page
+
+
+def test_discovery_message_history_opens_as_an_overlay_without_resizing_queue_rows():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert ".discovery-messages{display:block;position:relative" in page
+    assert ".discovery-messages ol{display:none;position:absolute" in page
+    assert ".discovery-messages[open] ol{display:grid}" in page
