@@ -1126,6 +1126,8 @@ def test_source_creation_loads_cached_aws_connections_and_oci_buckets_outside_se
     assert "await Promise.all([loadSettings(),loadSources(),loadOciBuckets(),loadAwsConnections()])" in page
     assert "async function openNewSourceModal()" in page
     assert "await Promise.all([loadOciBuckets(),loadAwsConnections()]);editingSource=''" in page
+    assert 'ociBuckets.map(b=>`<option value="${escape(b.name)}"></option>`)' in page
+    assert 'label="${escape(`${b.name} (${compartment})`)}"' not in page
 
 
 def test_source_selector_prioritizes_compact_route_and_status_tags_before_name():
