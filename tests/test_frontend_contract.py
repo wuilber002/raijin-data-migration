@@ -876,6 +876,8 @@ def test_aws_connection_configuration_opens_in_a_dismissible_modal():
     handler = page[page.index("async function viewAwsConnectionConfiguration"):page.index("async function syncAwsConnection")]
     assert "modal-actions" not in handler
     assert "ACTIONABLE_FAILED" in page
+    assert ".aws-connection-configuration-grid .metric>b{position:absolute;top:50%;left:50%" in page
+    assert "font-size:clamp(1.05rem,1.45vw,1.35rem)!important" in page
 
 
 def test_wave_report_is_a_scrollable_modal():
