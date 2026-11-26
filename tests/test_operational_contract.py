@@ -84,6 +84,11 @@ def test_runtime_health_probe_is_available_without_authentication_or_database_ac
     }
 
 
+def test_operational_alert_ticker_has_a_dedicated_lightweight_endpoint():
+    route = next(route for route in raijin_app.routes if route.path == "/api/operational-alerts")
+    assert route.methods == {"GET"}
+
+
 def test_anonymous_console_presence_counts_sessions_and_expires_stale_heartbeats():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

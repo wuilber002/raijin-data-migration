@@ -1618,6 +1618,15 @@ def test_wave_creation_uses_one_shared_action_for_every_method():
     assert "<h3>Criação dinâmica</h3>" not in page
 
 
+def test_global_operational_ticker_uses_lightweight_alert_endpoint():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    start = page.index("async function refreshOperationalMessages")
+    handler = page[start:page.index("\nlet activeSettingsTopic", start)]
+    assert "api('/api/operational-alerts')" in handler
+    assert "api('/api/operations')" not in handler
+    assert "api('/api/observability')" not in handler
+
+
 def test_dynamic_wave_creation_gives_immediate_busy_feedback():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "function setDynamicWaveCreationBusy(busy)" in page

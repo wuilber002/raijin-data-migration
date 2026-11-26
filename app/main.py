@@ -6159,6 +6159,54 @@ def operations_overview(session: Session = Depends(get_session),
     }
 
 
+@app.get("/api/operational-alerts")
+def operational_alerts(session: Session = Depends(get_session)) -> dict:
+    """Cheap global ticker data; safe to poll while a huge discovery writes.
+
+    The detailed operations and observability views intentionally aggregate
+    object inventory.  The persistent header ticker needs only actionable
+    work, so it must never force repeated scans of millions of discovered
+    rows while Raikou is committing a discovery batch.
+    """
+    now = utcnow()
+    latest_task = aliased(Task)
+    latest_task_id = (
+        select(func.max(latest_task.id))
+        .where(latest_task.wave_id == Wave.id)
+        .correlate(Wave)
+        .scalar_subquery()
+    )
+    failed = int(session.scalar(
+        select(func.count(Task.id)).join(Wave).join(Source, Source.id == Wave.source_id).where(
+            Task.state == TaskState.FAILED,
+            Task.id == latest_task_id,
+            Source.archived_at.is_(None),
+            Wave.status != "COMPLETED",
+        )
+    ) or 0)
+    stale_leases = int(session.scalar(
+        select(func.count(Task.id)).join(Wave).join(Source, Source.id == Wave.source_id).where(
+            Task.state == TaskState.RUNNING,
+            Task.lease_expires_at < now,
+            Source.archived_at.is_(None),
+        )
+    ) or 0)
+    stalled_transfers = int(session.scalar(
+        select(func.count(TransferQueueItem.id))
+        .join(ObjectRecord, ObjectRecord.id == TransferQueueItem.object_id)
+        .join(Source, Source.id == ObjectRecord.source_id)
+        .where(
+            TransferQueueItem.state == TransferQueueState.LEASED,
+            ObjectRecord.state == ObjectState.TRANSFERRING,
+            ObjectRecord.transfer_progress_at.is_not(None),
+            ObjectRecord.transfer_progress_at < now - timedelta(minutes=10),
+            Source.archived_at.is_(None),
+        )
+    ) or 0)
+    return {"tasks": {"failed": failed, "stale_leases": stale_leases},
+            "transfers": {"stalled": stalled_transfers}}
+
+
 def restore_timing(session: Session, wave_id: int) -> dict:
     """Summarize durable per-object S3 restore timestamps and availability."""
     (requested_at, first_available_at, last_available_at, earliest_expiry_at,
