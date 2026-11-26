@@ -879,6 +879,15 @@ def test_new_source_defaults_to_identity_copy_and_queues_discovery_when_requeste
     assert "`/api/sources/${persistedSourceId}/discovery`" in page
 
 
+def test_new_source_uses_the_project_snapshot_taken_when_the_modal_opens():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "function selectedSourceCreationProject()" in page
+    assert "sourceCreationProjectId=project.id" in page
+    assert "creationProjectId=Number(sourceCreationProjectId||0)" in page
+    assert "payload.migration_project_id=creationProjectId" in page
+    assert "Number(response.migration_project_id)!==creationProjectId" in page
+
+
 def test_aws_connection_sync_and_safe_configuration_controls_are_available():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "viewAwsConnectionConfiguration" in page

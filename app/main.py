@@ -9969,6 +9969,8 @@ def create_source(payload: SourceCreate, session: Session = Depends(get_session)
     )
     session.commit()
     return {"id": source.id, "name": source.name, "status": source.status,
+            "migration_project_id": source.migration_project_id,
+            "migration_project_name": project.name if project else None,
             "aws_bucket_region": source.aws_bucket_region}
 
 
