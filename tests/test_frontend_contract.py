@@ -863,6 +863,7 @@ def test_new_source_defaults_to_identity_copy_and_queues_discovery_when_requeste
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="source-identity-copy" type="checkbox" checked' in page
     assert 'id="source-auto-discovery" type="checkbox" checked' in page
+    assert "textContent='Executar discovery remoto'" in page
     assert "$('#source-auto-discovery').checked=true" in page
     assert "autoDiscovery=creating&&$('#source-auto-discovery').checked" in page
     assert "`/api/sources/${d.id}/discovery`" in page
