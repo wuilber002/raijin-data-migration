@@ -1609,7 +1609,7 @@ def test_wave_creation_uses_one_shared_action_for_every_method():
     assert "prefix:'#prefix-wave-form'" in page
     assert "'priority-import':'#priority-import-wave-form'" in page
     assert "dynamic:'#dynamic-wave-form'" in page
-    assert 'value="priority-import">Importar lista prioritária' in page
+    assert 'value="priority-import">Importar lista de um arquivo' in page
     assert 'id="priority-import-file"' in page
     assert "prioritized-import/preview" in page
     assert "prioritized-import`,{method:'POST'" in page
