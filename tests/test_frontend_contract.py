@@ -1349,7 +1349,18 @@ def test_console_uses_sse_invalidation_with_targeted_refresh_and_polling_fallbac
     assert "if(view==='queue')" in page and "loadDiscoveryQueue()" in page
     assert "sourceEditorOpen()" in page
     # SSE supplements rather than replaces the resilient polling path.
-    assert "setInterval(refreshOperationalMessages,30000)" in page
+    assert "function pollOperationalMessages()" in page
+    assert "setInterval(pollOperationalMessages,30000)" in page
+
+
+def test_console_phase_two_releases_hidden_realtime_work_and_bounds_api_reads():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "const API_READ_CACHE_MS=5_000,API_READ_TIMEOUT_MS=30_000" in page
+    assert "timeoutError.code='API_READ_TIMEOUT'" in page
+    assert "if(apiReadCache.get(requestPath)===cacheEntry)apiReadCache.delete(requestPath)" in page
+    assert "const disconnect=()=>{if(!stream)return;stream.close();stream=null;window.raijinOperationalStream='paused'}" in page
+    assert "schedule({topics:['operations','sources','waves','queue','tasks','events','discovery']})" in page
+    assert "const sourceId=String(selectedSource||'');if(!sourceId)return;const d=await api(`/api/sources/${sourceId}/summary`);if(String(selectedSource||'')!==sourceId)return" in page
 
 
 def test_project_summary_cards_fill_the_available_width_without_manual_gaps():
@@ -1727,7 +1738,7 @@ def test_migration_tools_are_contextual_footer_modals_with_critical_ticker():
     assert '<section class="card"><h2>Histórico operacional</h2>' not in page
     assert "function syncStatusbarContext(view)" in page
     assert "function updateOperationalMessages(operations,platform,observability)" in page
-    assert "setInterval(refreshOperationalMessages,30000)" in page
+    assert "setInterval(pollOperationalMessages,30000)" in page
     assert "operationalMessages.length" in page
 
 
