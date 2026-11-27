@@ -19,6 +19,7 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 from app.real_worker import (
     AWS_CLIENT_CONFIG,
     actionable_aws_error_summary,
+    aws_transfer_error_evidence,
     batch_manifest_fields,
     classify_task_error,
     permanent_transfer_error_message,
@@ -217,6 +218,28 @@ def test_access_denied_get_object_becomes_an_actionable_non_retryable_transfer_e
     message = permanent_transfer_error_message(denied, summary)
     assert "s3:GetObject" in message
     assert "s3:GetObjectVersion" in message
+
+
+def test_aws_transfer_error_evidence_preserves_actionable_context_and_redacts_bearer_values():
+    from app.main import ObjectRecord, Source
+
+    denied = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": (
+            'User: arn:aws:sts::123456789012:assumed-role/migration/worker is not authorized to perform: '
+            's3:GetObject on resource: "arn:aws:s3:::example/path"; token=secret-value')},
+         "ResponseMetadata": {"HTTPStatusCode": 403, "RequestId": "request-123"}},
+        "GetObject",
+    )
+    evidence = aws_transfer_error_evidence(
+        denied, Source(s3_bucket="example"), ObjectRecord(object_key="sensitive/path.txt"),
+    )
+
+    assert evidence["operation"] == "GetObject"
+    assert evidence["http_status"] == 403
+    assert evidence["error_code"] == "AccessDenied"
+    assert "arn:aws:s3:::example/path" in evidence["provider_message"]
+    assert "secret-value" not in evidence["provider_message"]
+    assert evidence["object_key_sha256"] == hashlib.sha256(b"sensitive/path.txt").hexdigest()
 
 
 def test_unknown_worker_errors_fail_instead_of_looping_indefinitely():

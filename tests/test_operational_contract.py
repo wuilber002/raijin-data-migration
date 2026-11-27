@@ -1428,12 +1428,15 @@ def test_diagnostic_queue_export_uses_current_queue_evidence_fields_and_tolerate
         wave = Wave(source_id=source.id, name="diagnostic-wave", max_bytes=1, restore_days=1, restore_tier="BULK")
         session.add(wave); session.flush()
         item = TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=1, size_bytes=10,
-                                 decision_reason="eligible after restore")
+                                 state=TransferQueueState.FAILED, decision_reason="eligible after restore",
+                                 priority_details_json=json.dumps({"last_transfer_error": {"message": "AWS denied", "aws": {"operation": "GetObject", "error_code": "AccessDenied"}}}))
         session.add(item); session.commit()
 
         rows = main.diagnostic_rows(session, TransferQueueItem, ("id", "decision_reason", "entry_reason"))
+        failures = main.diagnostic_transfer_failures(session)
 
     assert rows == [{"id": item.id, "decision_reason": "eligible after restore"}]
+    assert failures[0]["last_transfer_error"]["aws"]["operation"] == "GetObject"
 
 
 def test_global_actionable_failure_banner_ignores_archived_sources():

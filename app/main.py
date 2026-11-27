@@ -5191,6 +5191,32 @@ def diagnostic_rows(session: Session, model, fields: tuple[str, ...], limit: int
     ]
 
 
+def diagnostic_transfer_failures(session: Session, limit: int = 1000) -> list[dict]:
+    """Export durable, sanitized provider evidence for failed copy items."""
+    rows = session.execute(
+        select(TransferQueueItem, Source, Wave)
+        .join(Source, Source.id == TransferQueueItem.source_id)
+        .join(Wave, Wave.id == TransferQueueItem.wave_id)
+        .where(TransferQueueItem.state == TransferQueueState.FAILED)
+        .order_by(TransferQueueItem.id.desc()).limit(limit)
+    ).all()
+    evidence_rows = []
+    for item, source, wave in rows:
+        try:
+            details = json.loads(item.priority_details_json or "{}")
+        except (TypeError, ValueError):
+            details = {}
+        last_error = details.get("last_transfer_error") if isinstance(details, dict) else None
+        evidence_rows.append({
+            "queue_item_id": item.id, "source_id": source.id, "source_name": source.name,
+            "source_bucket": source.s3_bucket, "wave_id": wave.id, "wave_name": wave.name,
+            "state": item.state, "attempts": int(item.attempts or 0),
+            "decision_reason": redact_diagnostic_text(item.decision_reason or ""),
+            "last_transfer_error": last_error,
+        })
+    return evidence_rows
+
+
 def build_diagnostic_bundle(session: Session) -> tuple[bytes, str, dict]:
     """Create a bounded, credential-free operational evidence archive."""
     generated_at = utcnow()
@@ -5215,6 +5241,7 @@ def build_diagnostic_bundle(session: Session) -> tuple[bytes, str, dict]:
             ("id", "source_id", "mode", "state", "attempts", "checkpoint_pages_completed", "checkpoint_objects_observed", "error", "created_at", "completed_at")),
         "transfer-queue.json": diagnostic_rows(session, TransferQueueItem,
             ("id", "project_id", "source_id", "wave_id", "object_id", "size_bytes", "state", "attempts", "priority_score", "priority_band", "retry_at", "lease_expires_at", "decision_reason", "priority_details_json", "created_at", "updated_at")),
+        "transfer-failures.json": diagnostic_transfer_failures(session),
         "events.json": diagnostic_rows(session, Event,
             ("id", "source_id", "wave_id", "migration_project_id", "kind", "message", "created_at")),
         "application-log.txt": redact_diagnostic_text(str(app_logs.get("content") or "No application log collection is available.")),
@@ -14386,6 +14413,26 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
                 ))
             ),
         }
+    transfer_failure_groups: dict[str, dict] = {}
+    failed_queue_items = session.scalars(select(TransferQueueItem).where(
+        TransferQueueItem.wave_id == wave.id,
+        TransferQueueItem.state == TransferQueueState.FAILED,
+    ).order_by(TransferQueueItem.id.desc()).limit(1000)).all()
+    for item in failed_queue_items:
+        try:
+            details = json.loads(item.priority_details_json or "{}")
+        except (TypeError, ValueError):
+            details = {}
+        evidence = details.get("last_transfer_error") if isinstance(details, dict) else None
+        if not isinstance(evidence, dict):
+            evidence = {"message": item.decision_reason or "Permanent transfer failure"}
+        signature = json.dumps(evidence, sort_keys=True, default=str)
+        group = transfer_failure_groups.setdefault(signature, {
+            "evidence": evidence, "objects": 0, "sample_queue_item_ids": [],
+        })
+        group["objects"] += 1
+        if len(group["sample_queue_item_ids"]) < 5:
+            group["sample_queue_item_ids"].append(item.id)
     return {"wave_id": wave_id, "status": wave.status, "objects": total_objects, "bytes": total_bytes, "object_states": by_state,
             "restore_requirement": {
                 "required": bool(archive_objects),
@@ -14434,6 +14481,7 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
                                        "completion_report_list_requests": int(sum(attempt.completion_report_list_requests or 0 for attempt in attempts)),
                                        "completion_report_get_requests": int(sum(attempt.completion_report_get_requests or 0 for attempt in attempts))},
             "integrity": {"verified": integrity_verified, "failed": integrity_failed, "pending": total_objects - integrity_verified - integrity_failed},
+            "transfer_failure_evidence": list(transfer_failure_groups.values()),
             "continuous_lane": {
                 "dispatch_batches": [{
                     "id": batch.id, "state": batch.state,

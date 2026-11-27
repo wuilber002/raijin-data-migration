@@ -1096,6 +1096,27 @@ refreshAll();
   .wave-identity-prefix{font-size:inherit;font-weight:700;color:#dbeafe;white-space:nowrap}
 </style>
 <script>
+  // Failure evidence is deliberately loaded from the durable wave report,
+  // rather than browser logs, so it survives worker restarts and is exportable.
+  (() => {
+    const baseReport = report;
+    report = async function(id) {
+      await baseReport(id);
+      const data = await api(`/api/waves/${id}/report`);
+      const groups = data.transfer_failure_evidence || [];
+      if (!groups.length || document.querySelector('#wave-report-content .transfer-failure-evidence')) return;
+      const markup = groups.map(group => {
+        const evidence = group.evidence || {}, aws = evidence.aws || {};
+        const fields = [['Operação', aws.operation], ['HTTP', aws.http_status], ['Código AWS', aws.error_code], ['Bucket', aws.source_bucket], ['Mensagem AWS', aws.provider_message], ['Request ID', aws.request_id], ['Chave (hash SHA-256)', aws.object_key_sha256]]
+          .filter(([, value]) => value !== undefined && value !== null && value !== '')
+          .map(([label, value]) => `<dt>${escape(label)}</dt><dd>${escape(String(value))}</dd>`).join('');
+        return `<section class="transfer-failure-evidence"><h3>Evidência da falha de transferência</h3><p><b>${fmt(group.objects)}</b> objeto(s) afetado(s) · itens de fila: ${escape((group.sample_queue_item_ids || []).join(', ') || '—')}</p><p>${escape(evidence.message || 'Falha permanente de transferência.')}</p>${fields ? `<dl>${fields}</dl>` : '<p class="hint">Esta falha foi registrada por uma versão anterior sem detalhes estruturados do provedor.</p>'}</section>`;
+      }).join('');
+      document.querySelector('#wave-report-content')?.insertAdjacentHTML('afterbegin', markup);
+    };
+  })();
+</script>
+<script>
   (()=>{
     const marker=/^#(\d+)$/;
     function prefixWaveIdentity(scope){

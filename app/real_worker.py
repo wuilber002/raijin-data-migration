@@ -2774,7 +2774,35 @@ def _continuous_global_leased_count(session) -> int:
     ).where(Source.archived_at.is_(None), TransferQueueItem.state == TransferQueueState.LEASED)) or 0)
 
 
-def _remember_transfer_error(item: TransferQueueItem, message: str) -> None:
+def _safe_aws_provider_message(value: object) -> str:
+    """Preserve AWS authorization context without persisting bearer material."""
+    message = str(value or "")
+    message = re.sub(r"(?i)(x-amz-security-token|signature|credential|token)=([^\s&]+)", r"\1=[REDACTED]", message)
+    message = re.sub(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", "[AWS_ACCESS_KEY_REDACTED]", message)
+    return message[:8000]
+
+
+def aws_transfer_error_evidence(error: Exception, source: Source, obj: ObjectRecord | None) -> dict:
+    """Create durable, operator-actionable evidence for one failed S3 read."""
+    response = getattr(error, "response", None) or {}
+    detail = response.get("Error", {}) if isinstance(response, dict) else {}
+    metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+    evidence = {
+        "provider": "AWS",
+        "operation": str(getattr(error, "operation_name", "") or type(error).__name__),
+        "http_status": metadata.get("HTTPStatusCode"),
+        "error_code": detail.get("Code"),
+        "provider_message": _safe_aws_provider_message(detail.get("Message")),
+        "request_id": metadata.get("RequestId"),
+        "source_bucket": source.s3_bucket,
+        # Keys can contain sensitive business identifiers. The stable digest
+        # lets an operator correlate a failed record without exporting it.
+        "object_key_sha256": hashlib.sha256((obj.object_key if obj else "").encode("utf-8")).hexdigest() if obj else None,
+    }
+    return {key: value for key, value in evidence.items() if value not in (None, "")}
+
+
+def _remember_transfer_error(item: TransferQueueItem, message: str, *, evidence: dict | None = None) -> None:
     """Persist failure evidence separately from mutable scheduling rationale."""
     try:
         details = json.loads(item.priority_details_json or "{}")
@@ -2787,6 +2815,8 @@ def _remember_transfer_error(item: TransferQueueItem, message: str) -> None:
         "at": utcnow().isoformat(),
         "attempt": int(item.attempts or 0),
     }
+    if evidence:
+        details["last_transfer_error"]["aws"] = evidence
     item.priority_details_json = json.dumps(details, sort_keys=True)
 
 
@@ -2805,13 +2835,14 @@ def permanent_transfer_error_message(error: Exception, summary: str) -> str:
     return f"Permanent transfer error: {summary}"
 
 
-def mark_transfer_item_failed(session, item: TransferQueueItem, obj: ObjectRecord | None, message: str) -> None:
+def mark_transfer_item_failed(session, item: TransferQueueItem, obj: ObjectRecord | None, message: str,
+                              *, evidence: dict | None = None) -> None:
     """Make a non-retryable object failure visible without creating retry churn."""
     item.state = TransferQueueState.FAILED
     item.retry_at = item.lease_expires_at = None
     item.lease_token = item.lease_owner = None
     item.decision_reason = message[:8000]
-    _remember_transfer_error(item, item.decision_reason)
+    _remember_transfer_error(item, item.decision_reason, evidence=evidence)
     if obj:
         obj.state = ObjectState.FAILED
         obj.integrity_error = message[:8000]
@@ -3752,7 +3783,8 @@ def transfer_continuous(session, task: Task, settings) -> None:
             disposition, summary = classify_task_error(error or RuntimeError("transfer did not complete"))
             if disposition == "failed":
                 reason = permanent_transfer_error_message(error or RuntimeError("transfer did not complete"), summary)
-                mark_transfer_item_failed(session, item, obj, reason)
+                evidence = aws_transfer_error_evidence(error, source, obj) if isinstance(error, ClientError) else None
+                mark_transfer_item_failed(session, item, obj, reason, evidence=evidence)
                 wave = session.get(Wave, item.wave_id)
                 if wave and not session.scalar(select(Event.id).where(
                     Event.wave_id == wave.id,
@@ -3762,7 +3794,9 @@ def transfer_continuous(session, task: Task, settings) -> None:
                         session, "CONTINUOUS_TRANSFER_PERMISSION_REQUIRED", reason,
                         source_id=wave.source_id, wave_id=wave.id,
                     )
-                print(f"continuous transfer permanently failed for queue item {item.id}: {reason}", flush=True)
+                print(json.dumps({"event": "continuous_transfer_permanent_failure", "queue_item_id": item.id,
+                                  "wave_id": item.wave_id, "source_id": item.source_id,
+                                  "reason": reason, "aws": evidence}, sort_keys=True), flush=True)
                 if segment:
                     segment.exit_reason = "permanent transfer error; operator action required"
             else:
