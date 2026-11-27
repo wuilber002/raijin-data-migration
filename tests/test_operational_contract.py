@@ -3765,6 +3765,10 @@ def test_source_summary_keeps_final_report_out_of_selection_path():
         assert summary["completion_statistics_available"] is True
         assert "completion_statistics" not in summary
         assert summary["storage_classes"] == ["DEEP_ARCHIVE", "STANDARD"]
+        assert summary["storage_class_sizes"] == [
+            {"storage_class": "DEEP_ARCHIVE", "objects": 1, "bytes": 2},
+            {"storage_class": "STANDARD", "objects": 1, "bytes": 1},
+        ]
         assert "available" in source_completion_report(source.id, session=session)
 
 

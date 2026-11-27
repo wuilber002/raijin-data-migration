@@ -11240,12 +11240,28 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
     source_or_404(session, source_id)
     current = ObjectRecord.is_current_revision.is_(True)
     count, bytes_total = session.execute(select(func.count(ObjectRecord.id), func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(ObjectRecord.source_id == source_id, current)).one()
-    storage_classes = [str(storage_class or "UNKNOWN").upper() for storage_class in session.scalars(
-        select(ObjectRecord.storage_class)
-        .where(ObjectRecord.source_id == source_id, current)
-        .distinct()
-        .order_by(ObjectRecord.storage_class)
-    )]
+    # This replaces the former distinct-only query with the same scoped scan,
+    # retaining the class names while also supplying the compact tier badges
+    # with their actual inventory volume.  It is deliberately restricted to
+    # the selected source and its current discovery revision.
+    storage_class_sizes = [
+        {
+            "storage_class": str(storage_class or "UNKNOWN").upper(),
+            "objects": int(objects or 0),
+            "bytes": int(class_bytes or 0),
+        }
+        for storage_class, objects, class_bytes in session.execute(
+            select(
+                ObjectRecord.storage_class,
+                func.count(ObjectRecord.id),
+                func.coalesce(func.sum(ObjectRecord.size_bytes), 0),
+            )
+            .where(ObjectRecord.source_id == source_id, current)
+            .group_by(ObjectRecord.storage_class)
+            .order_by(ObjectRecord.storage_class)
+        ).all()
+    ]
+    storage_classes = [item["storage_class"] for item in storage_class_sizes]
     states = dict(session.execute(
         select(ObjectRecord.state, func.count(ObjectRecord.id))
         .where(ObjectRecord.source_id == source_id, current)
@@ -11283,7 +11299,8 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
         .order_by(DynamicPipelineRun.id.desc()).limit(1)
     )
     return {"source_id": source_id, "objects": count, "bytes": bytes_total,
-            "storage_classes": storage_classes, "object_states": states, "migration_status": migration_status,
+            "storage_classes": storage_classes, "storage_class_sizes": storage_class_sizes,
+            "object_states": states, "migration_status": migration_status,
             # Source selection must stay inexpensive. The final report has its
             # own endpoint and is calculated only when the operator opens it.
             "completion_statistics_available": migration_status == "COMPLETED",

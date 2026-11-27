@@ -1415,6 +1415,8 @@ def test_selected_source_shows_compact_storage_tiers_below_the_s3_to_oci_route()
     assert "function sourceStorageTierPanel(storageClasses)" in page
     assert "source-storage-tiers" in page
     assert "source-storage-tier-deep-archive" in page
+    assert "summary.storage_class_sizes||summary.storage_classes" in page
+    assert "${escape(tier.name)}${tier.bytes===null?'':`: ${bytes(tier.bytes)}`}" in page
     assert "route.insertAdjacentHTML('afterend',panel)" in page
     assert "$('#source-context-tags .source-transfer-mode-tag')?.remove()" in page
 
