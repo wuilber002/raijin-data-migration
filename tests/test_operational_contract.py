@@ -1407,7 +1407,7 @@ def test_completed_empty_inventory_is_done_but_zero_byte_objects_remain_discover
                                    aws_account_id="123456789012", default_region="us-east-1", control_bucket="control")
         empty = Source(name="empty-inventory", s3_bucket="empty", aws_region="us-east-1", destination_bucket="destination",
                        status="DISCOVERED", discovery_completed_at=datetime.now(timezone.utc),
-                       discovery_objects_inserted=0, discovery_size_bytes=0)
+                       discovery_objects_inserted=0, discovery_size_bytes=None)
         zero_byte_file = Source(name="zero-byte-file", s3_bucket="zero-byte", aws_region="us-east-1", destination_bucket="destination",
                                 status="DISCOVERED", discovery_completed_at=datetime.now(timezone.utc),
                                 discovery_objects_inserted=1, discovery_size_bytes=0)

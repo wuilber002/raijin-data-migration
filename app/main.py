@@ -10273,16 +10273,17 @@ def list_sources(session: Session = Depends(get_session),
     def completed_empty_inventory(source: Source) -> bool:
         """Whether discovery completed and found no objects at all.
 
-        Zero is the durable cache value for an empty inventory; ``None``
-        means that an older source has not had its size cache populated yet.
-        Buckets containing zero-byte objects retain a positive object count,
-        so they remain available for migration.
+        Zero is the durable cache value for an empty inventory.  ``None`` is
+        also accepted for discoveries that predate that cache: their completed
+        discovery counter is still authoritative.  Buckets containing
+        zero-byte objects retain a positive object count, so they remain
+        available for migration.
         """
         return (
             source.status == "DISCOVERED"
             and source.discovery_completed_at is not None
             and int(source.discovery_objects_inserted or 0) == 0
-            and source.discovery_size_bytes == 0
+            and source.discovery_size_bytes in (None, 0)
         )
 
     def migration_status(source: Source) -> str:
