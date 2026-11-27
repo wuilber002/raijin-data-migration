@@ -12857,6 +12857,19 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
         waves = list(session.scalars(select(Wave).where(Wave.pipeline_run_id == run.id).order_by(
             Wave.planned_restore_at, Wave.id
         )))
+        # A file-import pipeline starts with a configuration gate: before
+        # releasing a second Batch restore, one initial wave must have passed
+        # the control-bucket/IAM preflight and received an AWS Batch job id.
+        # A bad control bucket or permission must cost at most one failed
+        # submission attempt, never fan out across the imported list.
+        import_bootstrap_accepted = (not import_pipeline_run(run) or any(
+            wave.status in {
+                "RESTORE_REQUESTED", "RESTORE_REQUEST_ACCEPTED", "RESTORING",
+                "RESTORED", "TRANSFERRING", "TRANSFER_DRAINING", "TRANSFERRED",
+                "COMPLETED", "VERIFIED",
+            }
+            for wave in waves
+        ))
         occupied = sum(1 for wave in waves if wave.status in active_statuses or (
             wave.status == "RESTORE_SCHEDULED" and session.scalar(select(Task.id).where(
                 Task.wave_id == wave.id, Task.kind == "SUBMIT_BATCH_RESTORE",
@@ -12869,6 +12882,8 @@ def release_dynamic_restore_horizon(session: Session, settings: RuntimeSettings,
         project_id = run.source.migration_project_id
         project_grant = project_slots_available.get(project_id, global_slots_available)
         release_capacity = min(source_release_capacity, occupied + project_grant)
+        if not import_bootstrap_accepted:
+            release_capacity = min(release_capacity, 1)
         blocked_older_waves: list[Wave] = []
 
         def record_restore_deferral(wave: Wave, reason: str) -> None:
@@ -14576,6 +14591,26 @@ def reprocess_wave(wave_id: int, payload: WaveReprocessRequest | None = None, se
     wave.restore_reapproval_detected_at = None
     if wave.pipeline_run_id is None:
         session.add(Task(wave_id=wave.id, kind="SUBMIT_BATCH_RESTORE"))
+    else:
+        # A permanent submission failure halts the whole pipeline and cancels
+        # any queued sibling submissions.  Reprocessing is the explicit
+        # operator acknowledgement that the shared configuration was fixed;
+        # only resume once every failed sibling has received the same review.
+        run = session.get(DynamicPipelineRun, wave.pipeline_run_id)
+        remaining_failure = session.scalar(select(Wave.id).where(
+            Wave.pipeline_run_id == wave.pipeline_run_id,
+            Wave.id != wave.id,
+            Wave.status.in_(["FAILED", "RESTORE_REQUEST_FAILED", "VERIFICATION_FAILED"]),
+        ).limit(1))
+        if run and run.status == "NEEDS_ATTENTION" and remaining_failure is None:
+            run.status, run.completed_at = "SCHEDULED", None
+            record_event(
+                session,
+                "DYNAMIC_PIPELINE_RESUMED",
+                f"Pipeline run {run.id} resumed by explicit reprocessing of wave '{wave.name}' after operator correction.",
+                source_id=wave.source_id,
+                wave_id=wave.id,
+            )
     affected_bytes = session.scalar(select(func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(
         ObjectRecord.id.in_(reset_object_ids)
     )) or 0

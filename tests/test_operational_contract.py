@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MigrationProject, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, ProjectClosureIssueRequest, ProjectClosureReport, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, deep_audits, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, issue_project_closure_report, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, project_closure_readiness, project_closure_snapshot, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, repair_completed_deep_audit_statuses, replan_dynamic_pipeline, reprocess_preview, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_aws_secret_validation_summary, safe_oci_error_summary, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, pause_deep_audit_queue, resume_deep_audit_queue, transfer_queue, wave_cost_estimate
 from app.main import ConsolePresence, ConsolePresenceHeartbeat, console_presence_heartbeat
-from app.main import ImportPipelineItem, PrioritizedWaveImport, parse_prioritized_wave_import, prioritized_wave_import_groups, prioritized_wave_import_preview
+from app.main import IMPORT_PIPELINE_PLANNER_VERSION, ImportPipelineItem, PrioritizedWaveImport, parse_prioritized_wave_import, prioritized_wave_import_groups, prioritized_wave_import_preview
 from app.main import app as raijin_app, healthz
 from app.closure_report import build_artifacts, canonical_json, safe_csv_cell, sha256
 from app.real_worker import CONTINUOUS_SETTLEMENT_GRACE_SECONDS, ContinuousBandwidthPlan, CriticalConcurrencyController, RAIKOU_AUDIT_TASK_KINDS, RAIKOU_RESTORE_TASK_KINDS, RAIKOU_TASK_KINDS, TRANSFER_TASK_KINDS, choose_cooperative_preemption_target, ensure_transfer_task, reconcile_completed_continuous_item_leases, reconcile_continuous_lane_history, restore_expiry_from_head_response, restored_from_head_response, restored_pending_archives_from_head, should_poll_restore_with_head, stalled_transfer_future_item_ids, task_kinds_for_role, validate_restore_preflight
@@ -4466,6 +4466,72 @@ def test_failed_dynamic_wave_stops_future_restore_releases():
         assert refresh_dynamic_pipeline_run(session, run) == "NEEDS_ATTENTION"
         assert release_dynamic_restore_horizon(session, settings, now=initial + timedelta(days=3)) == 0
         assert session.scalar(select(Task.id).where(Task.wave_id == future.id, Task.kind == "SUBMIT_BATCH_RESTORE")) is None
+
+
+def test_permanent_restore_submission_failure_halts_pipeline_and_cancels_queued_siblings():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        source = Source(id=1084, name="halt-on-control-bucket-error", s3_bucket="source",
+                        aws_region="us-east-1", destination_bucket="destination")
+        run = DynamicPipelineRun(id=1085, source_id=source.id, status="SCHEDULED", scheduled_restores=True)
+        failed = Wave(id=1086, source_id=source.id, pipeline_run_id=run.id, name="wave-001", max_bytes=1,
+                      restore_days=7, restore_tier="BULK", status="RESTORE_REQUESTED")
+        queued = Wave(id=1087, source_id=source.id, pipeline_run_id=run.id, name="wave-002", max_bytes=1,
+                      restore_days=7, restore_tier="BULK", status="RESTORE_SCHEDULED")
+        failed_task = Task(id=1088, wave_id=failed.id, kind="SUBMIT_BATCH_RESTORE", state=TaskState.RUNNING)
+        queued_task = Task(id=1089, wave_id=queued.id, kind="SUBMIT_BATCH_RESTORE", state=TaskState.READY)
+        session.add_all([source, run, failed, queued, failed_task, queued_task]); session.commit()
+
+        real_worker.fail_permanently(
+            session, failed_task,
+            "Restore preflight failed: RuntimeError: Control bucket region mismatch",
+        )
+
+        assert session.get(DynamicPipelineRun, run.id).status == "NEEDS_ATTENTION"
+        assert session.get(Task, queued_task.id).state == TaskState.CANCELLED
+        assert session.scalar(select(Event.id).where(
+            Event.kind == "DYNAMIC_PIPELINE_HALTED", Event.wave_id == failed.id,
+        )) is not None
+
+
+def test_import_pipeline_releases_only_one_bootstrap_restore_before_preflight_succeeds():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    initial = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    with Session() as session:
+        source = Source(id=1090, name="import-bootstrap-gate", s3_bucket="source",
+                        aws_region="us-east-1", destination_bucket="destination")
+        settings = RuntimeSettings(id=1, dynamic_restore_max_slots=2)
+        run = DynamicPipelineRun(
+            id=1091, source_id=source.id, planner_version=IMPORT_PIPELINE_PLANNER_VERSION,
+            status="SCHEDULED", scheduled_restores=True, restore_horizon_waves=3,
+            restore_days=7, restore_tier="BULK",
+        )
+        waves = [
+            Wave(id=1092 + index, source_id=source.id, pipeline_run_id=run.id, name=f"wave-{index + 1}",
+                 max_bytes=1, restore_days=7, restore_tier="BULK", status="RESTORE_SCHEDULED",
+                 planner_mode="IMPORT_PIPELINE", planned_restore_at=initial,
+                 planned_transfer_start_at=initial + timedelta(hours=48),
+                 predicted_restore_first_seconds=48 * 3600, predicted_transfer_seconds=3600)
+            for index in range(2)
+        ]
+        session.add_all([source, settings, run, *waves]); session.flush()
+        session.add_all([
+            ObjectRecord(id=1094 + index, source_id=source.id, wave_id=wave.id,
+                         object_key=f"archive-{index}.bin", size_bytes=1,
+                         state=ObjectState.WAVE_ASSIGNED)
+            for index, wave in enumerate(waves)
+        ])
+        session.flush()
+
+        assert release_dynamic_restore_horizon(session, settings, now=initial) == 1
+        released = list(session.scalars(select(Task.wave_id).where(
+            Task.kind == "SUBMIT_BATCH_RESTORE", Task.state == TaskState.READY,
+        )))
+        assert released == [waves[0].id]
 
 
 def test_long_restore_polling_heartbeats_its_lease_and_checkpoints_progress():

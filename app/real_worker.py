@@ -1192,8 +1192,45 @@ def fail_permanently(session, task: Task, error: str) -> None:
             )[:8000]
     if wave and wave.status not in {"PAUSED", "VERIFIED", "RESTORE_REQUEST_FAILED", "RESTORE_REAPPROVAL_REQUIRED"}:
         wave.status = "FAILED"
+    if wave and task.kind == "SUBMIT_BATCH_RESTORE" and wave.pipeline_run_id is not None:
+        halt_pipeline_after_permanent_restore_failure(session, wave, task.error)
     record_permanent_task_failure_incident(session, task)
     session.commit()
+
+
+def halt_pipeline_after_permanent_restore_failure(session, wave: Wave, error: str) -> None:
+    """Stop a pipeline before a permanent restore error can create more cost.
+
+    A submission preflight failure is normally connection, control-bucket or
+    IAM configuration, therefore it is source-wide rather than a property of
+    one object.  Cancelling only not-yet-claimed submissions is intentional:
+    an already running worker must finish and record its own durable outcome.
+    """
+    run = session.get(DynamicPipelineRun, wave.pipeline_run_id)
+    if run is None:
+        return
+    first_halt = run.status != "NEEDS_ATTENTION"
+    run.status, run.completed_at = "NEEDS_ATTENTION", None
+    cancelled = session.execute(update(Task).where(
+        Task.kind == "SUBMIT_BATCH_RESTORE",
+        Task.state == TaskState.READY,
+        Task.wave_id.in_(select(Wave.id).where(Wave.pipeline_run_id == run.id)),
+    ).values(
+        state=TaskState.CANCELLED,
+        worker_id=None,
+        lease_expires_at=None,
+        error="Cancelled because this pipeline requires operator action after a permanent restore-submission failure.",
+    )).rowcount or 0
+    if first_halt:
+        event(
+            session,
+            "DYNAMIC_PIPELINE_HALTED",
+            f"Pipeline run {run.id} halted after permanent restore-submission failure in wave "
+            f"'{wave.name}'; cancelled {cancelled} queued restore submission(s). "
+            f"Operator action is required before reprocessing. Cause: {error[:500]}",
+            source_id=wave.source_id,
+            wave_id=wave.id,
+        )
 
 
 def record_permanent_task_failure_incident(session, task: Task) -> None:
