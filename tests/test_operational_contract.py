@@ -950,10 +950,10 @@ def test_project_executive_summary_reports_inventory_and_delivered_oci_evidence(
         assert report["sources"][0]["percentage"] == {"files": 50.0, "size": 25.0}
 
 
-def test_project_executive_summary_exports_the_same_source_evidence_as_xlsx():
-    from io import BytesIO
+def test_project_executive_summary_exports_the_same_source_evidence_as_csv():
+    import csv
+    from io import StringIO
     import app.main as main
-    from openpyxl import load_workbook
 
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -969,14 +969,14 @@ def test_project_executive_summary_exports_the_same_source_evidence_as_xlsx():
         session.commit()
 
         response = main.export_migration_project_executive_summary(project.id, session=session)
-        workbook = load_workbook(BytesIO(response.body))
-        sheet = workbook["Resumo executivo"]
+        rows = list(csv.reader(StringIO(response.body.decode("utf-8-sig"))))
 
-        assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        assert response.headers["content-disposition"].endswith('"Executive-export-resumo-executivo.xlsx"')
-        assert sheet["B1"].value == "Executive export"
-        assert sheet["A7"].value == "export-source"
-        assert sheet["G7"].value == 1 and sheet["L7"].value == 1
+        assert response.media_type == "text/csv"
+        assert response.charset == "utf-8"
+        assert response.headers["content-disposition"].endswith('"Executive-export-resumo-executivo.csv"')
+        assert rows[0] == ["Projeto", "Executive export"]
+        assert rows[6][0] == "export-source"
+        assert rows[6][6] == "1" and rows[6][11] == "1"
 
 
 def test_verify_wave_execution_renews_its_task_lease():
