@@ -439,6 +439,11 @@ class Source(Base):
     discovery_prefix_index: Mapped[int] = mapped_column(Integer, default=0)
     discovery_pages_completed: Mapped[int] = mapped_column(Integer, default=0)
     discovery_objects_inserted: Mapped[int] = mapped_column(BigInteger, default=0)
+    # Cached only when an inventory generation completes.  The source picker
+    # must never aggregate millions of object rows just to render its labels.
+    # ``None`` means an older inventory has not been backfilled yet; zero is a
+    # valid completed empty inventory.
+    discovery_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # The data origin is operational evidence, not presentation-only state.
     # A later controlled rediscovery advances the generation without erasing
     # the prior inventory or the migration history attached to it.
@@ -2549,7 +2554,7 @@ def create_schema() -> None:
         "restore_forecast_standard_first_seconds": "INTEGER NOT NULL DEFAULT 14400",
         "restore_forecast_standard_complete_seconds": "INTEGER NOT NULL DEFAULT 64800",
     }
-    source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "migration_project_id": "BIGINT", "destination_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''", "destination_identity_copy": "BOOLEAN NOT NULL DEFAULT FALSE", "business_priority": "INTEGER NOT NULL DEFAULT 999", "continuous_transfer_drain_requested": "BOOLEAN NOT NULL DEFAULT FALSE", "continuous_transfer_drain_requested_at": "TIMESTAMP WITH TIME ZONE", "continuous_transfer_drain_completed_at": "TIMESTAMP WITH TIME ZONE"}
+    source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_size_bytes": "BIGINT", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "migration_project_id": "BIGINT", "destination_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''", "destination_identity_copy": "BOOLEAN NOT NULL DEFAULT FALSE", "business_priority": "INTEGER NOT NULL DEFAULT 999", "continuous_transfer_drain_requested": "BOOLEAN NOT NULL DEFAULT FALSE", "continuous_transfer_drain_requested_at": "TIMESTAMP WITH TIME ZONE", "continuous_transfer_drain_completed_at": "TIMESTAMP WITH TIME ZONE"}
     source_columns["archived_at"] = "TIMESTAMP WITH TIME ZONE"
     source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION", "completion_estimate_json": "TEXT NOT NULL DEFAULT '{}'"})
     wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "restore_submission_deadline_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_observed_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_started_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_completed_at": "TIMESTAMP WITH TIME ZONE", "transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
@@ -5391,7 +5396,9 @@ def build_diagnostic_bundle(session: Session) -> tuple[bytes, str, dict]:
         "host-resource-history.json": platform_status_history(),
         "postgres-diagnostics.json": postgres_diagnostic_snapshot(session),
         "api-latency.json": api_latency_snapshot(),
-        "sources.json": list_sources(session),
+        # Never make a diagnostic collection aggregate every inventory row.
+        # The compact source view carries the persisted discovery-size cache.
+        "sources.json": list_sources(session, compact=True),
         "projects.json": diagnostic_rows(session, MigrationProject,
             ("id", "name", "status", "continuous_transfer_drain_requested", "created_at", "updated_at")),
         "waves.json": diagnostic_rows(session, Wave,
@@ -10338,9 +10345,9 @@ def list_sources(session: Session = Depends(get_session),
              "discovery_objects_inserted": s.discovery_objects_inserted,
              # Null means that a completed inventory is not available yet;
              # zero is a valid discovered inventory and is deliberately kept.
-             "inventory_size_bytes": (None if compact else
-                                      (totals.get(s.id, (0, 0, 0, 0, 0))[4]
-                                       if s.status == "DISCOVERED" else None)),
+             "inventory_size_bytes": ((s.discovery_size_bytes if compact else
+                                         totals.get(s.id, (0, 0, 0, 0, 0))[4])
+                                      if s.status == "DISCOVERED" else None),
              "last_discovery_mode": s.last_discovery_mode, "discovery_generation": s.discovery_generation,
              "discovery_can_resume": bool(s.discovery_continuation_token),
              "deactivated": s.archived_at is not None, "deactivated_at": s.archived_at,
@@ -10902,6 +10909,7 @@ def upload_inventory_file(source_id: int, inventory_file: UploadFile = File(...)
         source.discovery_continuation_token = None
         source.discovery_pages_completed = 0
         source.discovery_objects_inserted = inserted
+        refresh_source_inventory_size_cache(session, source)
         source.last_discovery_mode = "INVENTORY_FILE"
         source.discovery_generation = int(source.discovery_generation or 0) + 1
         operation = "Rediscovery merged" if rediscovery else "Imported"
@@ -10953,6 +10961,7 @@ def queue_discovery(source: Source, session: Session, *, mode: str = "REMOTE_LIS
         source.discovery_prefix_index = 0
         source.discovery_pages_completed = 0
         source.discovery_objects_inserted = 0
+        source.discovery_size_bytes = None
         source.discovery_started_at = None
         source.discovery_elapsed_seconds = 0
     job = DiscoveryJob(source_id=source.id, mode=mode, inventory_manifest_uri=manifest_uri,
@@ -11003,6 +11012,15 @@ def request_inventory_manifest_rediscovery(source_id: int, payload: RediscoveryM
     return {"source_id": source.id, "status": source.status, "job_id": job.id, "mode": job.mode, "rediscovery": True}
 
 
+def refresh_source_inventory_size_cache(session: Session, source: Source) -> int:
+    """Persist one completed inventory total for compact source-list rendering."""
+    total = session.scalar(select(func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(
+        ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True),
+    ))
+    source.discovery_size_bytes = int(total or 0)
+    return int(source.discovery_size_bytes)
+
+
 @app.get("/api/sources/{source_id}/summary")
 def source_summary(source_id: int, session: Session = Depends(get_session)) -> dict:
     source_or_404(session, source_id)
@@ -11020,6 +11038,12 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
         .group_by(ObjectRecord.state)
     ).all())
     source = source_or_404(session, source_id)
+    # Older discoveries predate the compact-list cache. This request already
+    # calculated the exact total for the selected source, so persist it here
+    # without adding any background/global inventory aggregation.
+    if source.status == "DISCOVERED" and source.discovery_size_bytes is None:
+        source.discovery_size_bytes = int(bytes_total or 0)
+        session.commit()
     change_counts = dict(session.execute(
         select(DiscoveryChange.change_type, func.count(DiscoveryChange.id))
         .where(DiscoveryChange.source_id == source_id).group_by(DiscoveryChange.change_type)

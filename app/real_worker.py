@@ -40,7 +40,7 @@ from sqlalchemy import and_, case, delete, func, or_, select, update
 from app.duration_format import format_duration
 from app.oci_runtime import resolve_object_storage_namespace
 from app.main import (
-    AwsConnection, DiscoveryJob, Event, MigrationProject, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, RuntimeLaneControlState, RuntimeLaneMeasurement, TransferQueueItem, TransferQueueState, merge_discovery_rows, source_key_in_scope, source_prefix_values,
+    AwsConnection, DiscoveryJob, Event, MigrationProject, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, RuntimeLaneControlState, RuntimeLaneMeasurement, TransferQueueItem, TransferQueueState, merge_discovery_rows, refresh_source_inventory_size_cache, source_key_in_scope, source_prefix_values,
     DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, complete_project_transfer_drain_if_idle, continuous_transfer_drain_requested, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, resolve_destination_object_key, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, select_global_transfer_lane_candidate, transfer_priority, utcnow,
 )
 
@@ -1430,6 +1430,7 @@ def import_s3_inventory_manifest(session, source: Source, settings, job: Discove
         source.discovery_elapsed_seconds = float(source.discovery_elapsed_seconds or 0) + max(0, (finished_at - source.discovery_started_at).total_seconds())
     source.discovery_started_at, source.discovery_completed_at, source.status = None, finished_at, "DISCOVERED"
     source.last_discovery_mode, source.discovery_generation = job.mode, int(source.discovery_generation or 0) + 1
+    refresh_source_inventory_size_cache(session, source)
     job.state, job.error, job.lease_expires_at, job.completed_at = TaskState.SUCCEEDED, None, None, finished_at
     detail = f"new {job.objects_new}, updated {job.objects_updated}, changed {job.objects_changed}" if job.is_rediscovery else f"{inserted} object(s) in this run"
     event(session, "INVENTORY_MANIFEST_IMPORTED", f"S3 Inventory manifest import completed: {detail}; {source.discovery_objects_inserted} new object(s) across {source.discovery_pages_completed} shard(s)", source_id=source.id)
@@ -1534,6 +1535,7 @@ def remote_discover(session, source: Source, settings, job: DiscoveryJob | None 
     source.discovery_continuation_token, source.discovery_prefix_index = None, 0
     source.status, source.discovery_completed_at = "DISCOVERED", finished_at
     source.last_discovery_mode, source.discovery_generation = "REMOTE_LIST", int(source.discovery_generation or 0) + 1
+    refresh_source_inventory_size_cache(session, source)
     if job:
         job.state, job.error, job.lease_expires_at, job.completed_at = TaskState.SUCCEEDED, None, None, finished_at
     detail = f"new {job.objects_new}, updated {job.objects_updated}, changed {job.objects_changed}" if job and job.is_rediscovery else f"inserted {inserted} object(s)"

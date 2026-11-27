@@ -1384,9 +1384,13 @@ def test_compact_source_selector_avoids_inventory_aggregation_but_preserves_oper
         session.commit()
 
         row = list_sources(session, compact=True)[0]
+        source.discovery_size_bytes = 123
+        session.commit()
+        cached_row = list_sources(session, compact=True)[0]
 
     assert row["operational_status"] == "DISCOVERED"
     assert row["inventory_size_bytes"] is None
+    assert cached_row["inventory_size_bytes"] == 123
 
 
 def test_diagnostic_par_is_encrypted_prefix_scoped_and_preflighted_without_leaking_url(monkeypatch):
@@ -1470,6 +1474,7 @@ def test_diagnostic_bundle_captures_sanitized_postgres_and_host_pressure_evidenc
     assert '"host-resource-history.json": platform_status_history()' in source
     assert '"postgres-diagnostics.json": postgres_diagnostic_snapshot(session)' in source
     assert '"api-latency.json": api_latency_snapshot()' in source
+    assert '"sources.json": list_sources(session, compact=True)' in source
     assert "pg_stat_database" in source
     assert "pg_stat_activity" in source
     assert "pg_locks" in source
