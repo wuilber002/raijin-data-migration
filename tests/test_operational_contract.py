@@ -1439,6 +1439,46 @@ def test_diagnostic_queue_export_uses_current_queue_evidence_fields_and_tolerate
     assert failures[0]["last_transfer_error"]["aws"]["operation"] == "GetObject"
 
 
+def test_diagnostic_bundle_captures_sanitized_postgres_and_host_pressure_evidence():
+    from app import main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with sessionmaker(bind=engine)() as session:
+        snapshot = main.postgres_diagnostic_snapshot(session)
+
+    assert snapshot["dialect"] == "sqlite"
+    assert snapshot["available"] is False
+    assert "SQL text" in snapshot["redaction"]
+    with main.API_TIMING_LOCK:
+        previous_samples = list(main.API_TIMING_SAMPLES)
+        main.API_TIMING_SAMPLES.clear()
+        main.API_TIMING_SAMPLES.extend([
+            {"at": "2026-01-01T00:00:00+00:00", "method": "GET", "path": "/api/sources/:id/waves", "status_code": 200, "elapsed_ms": 120.0},
+            {"at": "2026-01-01T00:00:01+00:00", "method": "GET", "path": "/api/sources/:id/waves", "status_code": 200, "elapsed_ms": 420.0},
+        ])
+    try:
+        latency = main.api_latency_snapshot()
+    finally:
+        with main.API_TIMING_LOCK:
+            main.API_TIMING_SAMPLES.clear()
+            main.API_TIMING_SAMPLES.extend(previous_samples)
+    assert latency["endpoints"][0]["path"] == "/api/sources/:id/waves"
+    assert latency["endpoints"][0]["p95_ms"] == 420.0
+    assert "query strings" in latency["redaction"]
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    assert '"host-status.json": platform_status()' in source
+    assert '"host-resource-history.json": platform_status_history()' in source
+    assert '"postgres-diagnostics.json": postgres_diagnostic_snapshot(session)' in source
+    assert '"api-latency.json": api_latency_snapshot()' in source
+    assert "pg_stat_database" in source
+    assert "pg_stat_activity" in source
+    assert "pg_locks" in source
+    assert "pg_stat_statements" in source
+    status_collector = Path("scripts/write-platform-status.sh").read_text(encoding="utf-8")
+    assert "status-history.json" in status_collector
+    assert "history[-120:]" in status_collector
+
+
 def test_global_actionable_failure_banner_ignores_archived_sources():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

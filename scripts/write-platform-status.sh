@@ -79,3 +79,30 @@ printf '{"available":true,"generated_at":"%s","resources":{"cpu_percent":%s,"cpu
   "$real_backup_json" >"$temporary_file"
 chmod 644 "$temporary_file"
 mv "$temporary_file" "$status_file"
+
+# Keep a small host-pressure timeline for diagnostic bundles.  The web/API
+# container has this directory mounted read-only, so this is both safer and
+# more representative than asking the browser to infer VM pressure.  It is
+# deliberately capped: one sample/minute for two hours is enough to correlate
+# console stalls with CPU or memory pressure without becoming a local log.
+history_file="$runtime_root/status-history.json"
+history_temporary="$(mktemp "$runtime_root/status-history.XXXXXX")"
+if python3 - "$status_file" "$history_file" "$history_temporary" <<'PY'
+import json, sys
+status_path, history_path, output_path = sys.argv[1:]
+try:
+    history = json.load(open(history_path, encoding="utf-8"))
+    if not isinstance(history, list):
+        history = []
+except Exception:
+    history = []
+current = json.load(open(status_path, encoding="utf-8"))
+history.append(current)
+json.dump(history[-120:], open(output_path, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+then
+  chmod 644 "$history_temporary"
+  mv "$history_temporary" "$history_file"
+else
+  rm -f "$history_temporary"
+fi

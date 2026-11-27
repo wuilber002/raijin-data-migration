@@ -15,6 +15,8 @@ except ImportError:  # pragma: no cover - exercised only on Python < 3.11
     class StrEnum(str, Enum):
         pass
 from typing import Generator
+from collections import deque
+from threading import Lock
 import os
 import csv
 import hmac
@@ -2121,6 +2123,60 @@ class IntegrityEvidence(BaseModel):
 
 app = FastAPI(title="S3 to OCI Migration", version=RAIJIN_SERVICE_VERSION)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+# Bounded in-memory request timing is intentionally separate from the audit
+# trail. It captures whether a perceived console stall was API/database-side
+# without retaining request bodies, query strings, client addresses or tokens.
+API_TIMING_SAMPLES: deque[dict] = deque(maxlen=2_000)
+API_TIMING_LOCK = Lock()
+
+
+def diagnostic_api_path(path: str) -> str:
+    """Normalize only numeric identifiers; never retain a query string."""
+    return re.sub(r"(?<=/)[0-9]+(?=/|$)", ":id", path)
+
+
+def api_latency_snapshot(limit: int = 1_000) -> dict:
+    with API_TIMING_LOCK:
+        samples = list(API_TIMING_SAMPLES)[-limit:]
+    grouped: dict[tuple[str, str], list[float]] = {}
+    for sample in samples:
+        grouped.setdefault((sample["method"], sample["path"]), []).append(float(sample["elapsed_ms"]))
+    endpoints = []
+    for (method, path), elapsed in grouped.items():
+        ordered = sorted(elapsed)
+        percentile = lambda ratio: ordered[min(len(ordered) - 1, max(0, math.ceil(len(ordered) * ratio) - 1))]
+        endpoints.append({
+            "method": method, "path": path, "requests": len(elapsed),
+            "mean_ms": round(sum(elapsed) / len(elapsed), 2),
+            "p50_ms": round(percentile(.50), 2), "p95_ms": round(percentile(.95), 2),
+            "max_ms": round(max(elapsed), 2),
+        })
+    return {
+        "captured_at": utcnow(), "sample_capacity": API_TIMING_SAMPLES.maxlen,
+        "samples": samples,
+        "endpoints": sorted(endpoints, key=lambda row: row["max_ms"], reverse=True),
+        "redaction": "Request bodies, query strings, client addresses, cookies and tokens are excluded.",
+    }
+
+
+@app.middleware("http")
+async def api_timing_capture(request: FastAPIRequest, call_next):
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = int(response.status_code)
+        return response
+    finally:
+        if request.url.path.startswith("/api/"):
+            sample = {
+                "at": utcnow().isoformat(), "method": request.method.upper(),
+                "path": diagnostic_api_path(request.url.path), "status_code": status_code,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            }
+            with API_TIMING_LOCK:
+                API_TIMING_SAMPLES.append(sample)
 
 
 @app.middleware("http")
@@ -5217,6 +5273,107 @@ def diagnostic_transfer_failures(session: Session, limit: int = 1000) -> list[di
     return evidence_rows
 
 
+def postgres_diagnostic_snapshot(session: Session) -> dict:
+    """Return bounded PostgreSQL pressure evidence without exposing SQL text.
+
+    A bundle is often collected after the visible symptom.  Cumulative database
+    counters, wait categories, locks and table bloat estimates remain useful
+    then, while query text, client addresses and user names would be needless
+    operational data exposure.  Each query is isolated in a savepoint so an
+    optional PostgreSQL view never turns bundle creation into an incident.
+    """
+    captured_at = utcnow()
+    snapshot: dict = {
+        "captured_at": captured_at,
+        "dialect": session.bind.dialect.name if session.bind else "unknown",
+        "available": False,
+        "queries": {},
+        "errors": {},
+        "redaction": "SQL text, client addresses, usernames and application names are excluded.",
+    }
+    if snapshot["dialect"] != "postgresql":
+        snapshot["reason"] = "PostgreSQL diagnostic views are unavailable for this database dialect."
+        return snapshot
+
+    def collect(name: str, statement: str) -> None:
+        try:
+            with session.begin_nested():
+                rows = [dict(row) for row in session.execute(text(statement)).mappings()]
+            snapshot["queries"][name] = rows
+        except Exception as error:  # optional views/columns vary by PostgreSQL deployment
+            snapshot["errors"][name] = type(error).__name__
+
+    collect("database", """
+        SELECT pg_database_size(current_database()) AS database_size_bytes,
+               numbackends, xact_commit, xact_rollback, blks_read, blks_hit,
+               tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted,
+               temp_files, temp_bytes, deadlocks, conflicts, stats_reset
+        FROM pg_stat_database WHERE datname = current_database()
+    """)
+    collect("sessions_by_state_and_wait", """
+        SELECT COALESCE(state, 'unknown') AS state,
+               COALESCE(wait_event_type, 'CPU') AS wait_event_type,
+               COALESCE(wait_event, '') AS wait_event,
+               count(*)::bigint AS sessions
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+        GROUP BY 1, 2, 3 ORDER BY sessions DESC, state, wait_event_type
+    """)
+    collect("locks", """
+        SELECT mode, granted, count(*)::bigint AS locks
+        FROM pg_locks WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        GROUP BY mode, granted ORDER BY granted, locks DESC, mode
+    """)
+    collect("largest_tables", """
+        SELECT relname AS table_name, n_live_tup, n_dead_tup,
+               seq_scan, idx_scan, n_mod_since_analyze,
+               pg_total_relation_size(relid) AS total_size_bytes
+        FROM pg_stat_user_tables
+        ORDER BY pg_total_relation_size(relid) DESC NULLS LAST, relname
+        LIMIT 25
+    """)
+    collect("settings", """
+        SELECT current_setting('server_version') AS server_version,
+               current_setting('max_connections') AS max_connections,
+               current_setting('shared_buffers') AS shared_buffers,
+               current_setting('work_mem') AS work_mem,
+               current_setting('effective_cache_size') AS effective_cache_size,
+               current_setting('track_io_timing', true) AS track_io_timing
+    """)
+    # pg_stat_statements is optional.  Query fingerprints quantify expensive
+    # work without disclosing user data embedded in application SQL.
+    collect("statement_fingerprints", """
+        SELECT queryid::text AS query_id, calls, total_exec_time, mean_exec_time,
+               max_exec_time, rows
+        FROM pg_stat_statements
+        WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+        ORDER BY total_exec_time DESC NULLS LAST
+        LIMIT 20
+    """)
+    snapshot["available"] = bool(snapshot["queries"])
+    return snapshot
+
+
+def platform_status_history(limit: int = 120) -> dict:
+    """Read the host's bounded resource history when its read-only mount exists."""
+    history_file = Path(platform_status_file).with_name("status-history.json")
+    try:
+        values = json.loads(history_file.read_text(encoding="utf-8"))
+        if not isinstance(values, list):
+            raise ValueError("history is not a list")
+        # Host samples contain only CPU/memory/service state. Keep their shape
+        # explicit instead of forwarding accidental future host fields.
+        samples = [{
+            "generated_at": value.get("generated_at"),
+            "available": bool(value.get("available")),
+            "resources": value.get("resources") or {},
+            "services": value.get("services") or {},
+        } for value in values[-limit:] if isinstance(value, dict)]
+        return {"available": True, "samples": samples}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {"available": False, "samples": []}
+
+
 def build_diagnostic_bundle(session: Session) -> tuple[bytes, str, dict]:
     """Create a bounded, credential-free operational evidence archive."""
     generated_at = utcnow()
@@ -5230,6 +5387,10 @@ def build_diagnostic_bundle(session: Session) -> tuple[bytes, str, dict]:
             "host": {"platform": os.uname().sysname, "release": os.uname().release},
             "settings": settings_dict(settings),
         },
+        "host-status.json": platform_status(),
+        "host-resource-history.json": platform_status_history(),
+        "postgres-diagnostics.json": postgres_diagnostic_snapshot(session),
+        "api-latency.json": api_latency_snapshot(),
         "sources.json": list_sources(session),
         "projects.json": diagnostic_rows(session, MigrationProject,
             ("id", "name", "status", "continuous_transfer_drain_requested", "created_at", "updated_at")),
