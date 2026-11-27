@@ -10057,7 +10057,8 @@ def remove_source_from_migration_project(project_id: int, source_id: int,
 
 
 @app.get("/api/sources")
-def list_sources(session: Session = Depends(get_session)) -> list[dict]:
+def list_sources(session: Session = Depends(get_session),
+                 compact: bool = Query(default=False)) -> list[dict]:
     # Deactivated sources remain selectable so their inventory, waves and
     # audit trail can still be consulted.  Execution paths continue to use
     # ``archived_at IS NULL`` as the backward-compatible active predicate.
@@ -10077,7 +10078,12 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
             .order_by(DynamicPipelineRun.source_id, DynamicPipelineRun.id.desc())
         ):
             latest_pipeline_by_source.setdefault(run.source_id, run)
-    total_rows = session.execute(
+    # The source combobox is refreshed often. On a multi-million-object
+    # discovery, aggregating every ObjectRecord here can monopolize Postgres
+    # and make navigation itself time out. The compact view relies on
+    # source/wave state; the selected source still gets exact totals from
+    # /summary.
+    total_rows = [] if compact else (session.execute(
         select(ObjectRecord.source_id, func.count(ObjectRecord.id),
                func.coalesce(func.sum(case((ObjectRecord.state == ObjectState.VERIFIED, 1), else_=0)), 0),
                func.coalesce(func.sum(case((ObjectRecord.state.in_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]), 1), else_=0)), 0),
@@ -10087,10 +10093,15 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
                # summary, without issuing one summary request per source.
                func.coalesce(func.sum(case((ObjectRecord.is_current_revision.is_(True), ObjectRecord.size_bytes), else_=0)), 0))
         .where(ObjectRecord.source_id.in_([s.id for s in sources])).group_by(ObjectRecord.source_id)
-    ).all() if sources else []
+    ).all() if sources else [])
     totals = {source_id: (int(total), int(verified), int(transferred), int(delivery_verified), int(inventory_bytes))
               for source_id, total, verified, transferred, delivery_verified, inventory_bytes in total_rows}
     def migration_status(source: Source) -> str:
+        if compact:
+            statuses = wave_statuses.get(source.id, set())
+            if statuses and statuses <= {"COMPLETED", "VERIFIED"}:
+                return "COMPLETED"
+            return "IN_PROGRESS" if source.status == "DISCOVERED" else "NOT_STARTED"
         total, verified, transferred, delivery_verified, _inventory_bytes = totals.get(source.id, (0, 0, 0, 0, 0))
         if source.destination_validation_status == "DIFFERENT":
             return "DESTINATION_DIVERGENT"
@@ -10139,8 +10150,9 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
              "discovery_objects_inserted": s.discovery_objects_inserted,
              # Null means that a completed inventory is not available yet;
              # zero is a valid discovered inventory and is deliberately kept.
-             "inventory_size_bytes": (totals.get(s.id, (0, 0, 0, 0, 0))[4]
-                                      if s.status == "DISCOVERED" else None),
+             "inventory_size_bytes": (None if compact else
+                                      (totals.get(s.id, (0, 0, 0, 0, 0))[4]
+                                       if s.status == "DISCOVERED" else None)),
              "last_discovery_mode": s.last_discovery_mode, "discovery_generation": s.discovery_generation,
              "discovery_can_resume": bool(s.discovery_continuation_token),
              "deactivated": s.archived_at is not None, "deactivated_at": s.archived_at,

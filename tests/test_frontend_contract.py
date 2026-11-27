@@ -599,6 +599,7 @@ def test_console_application_logs_support_periods_and_download():
     bootstrap = (ROOT / "scripts/bootstrap.sh").read_text(encoding="utf-8")
     runtime = (ROOT / "scripts/start-runtime.sh").read_text(encoding="utf-8")
     assert "console-application-logs-section" in script
+    assert 'data-settings-section="console-application-logs-section"' in page
     for label in ("1 hora", "6 horas", "12 horas", "1 dia", "Customizado"):
         assert label in script
     for component in ("console-log-component", "Todos os containers", "Worker de restore", "Worker de transferência", "Runtime da VM", "console-log-level", "Todos os tipos", "CRITICAL"):

@@ -499,12 +499,18 @@
     logLevelField.innerHTML = '<span data-console-i18n="Tipo"></span><select id="console-log-level"><option value="all" data-console-i18n="Todos os tipos"></option><option value="debug">DEBUG</option><option value="info">INFO</option><option value="warning">WARNING</option><option value="error">ERROR</option><option value="critical">CRITICAL</option></select>';
     query("#console-log-component")?.closest("label")?.after(logLevelField);
     applyAuthTranslations(logLevelField);
-    const logMenuItem = document.createElement("button");
-    logMenuItem.type = "button"; logMenuItem.setAttribute("role", "menuitem");
-    logMenuItem.innerHTML = '<span class="settings-menu-icon">▤</span><strong data-console-i18n="Logs"></strong><small data-console-i18n="Visualizar e baixar logs"></small>';
+    // The shell owns this menu entry so it remains visible even when the
+    // asynchronous settings installer is still waiting for the API.
+    let logMenuItem = document.querySelector('#settings-menu-options [data-settings-section="console-application-logs-section"]');
+    if (!logMenuItem) {
+      logMenuItem = document.createElement("button");
+      logMenuItem.type = "button"; logMenuItem.setAttribute("role", "menuitem");
+      logMenuItem.dataset.settingsSection = "console-application-logs-section";
+      logMenuItem.innerHTML = '<span class="settings-menu-icon">▤</span><strong data-console-i18n="Logs"></strong><small data-console-i18n="Visualizar e baixar logs"></small>';
+      document.querySelector("#settings-menu-options button[onclick*=\"settings-oci\"]")?.after(logMenuItem);
+    }
     applyAuthTranslations(logMenuItem);
     logMenuItem.addEventListener("click", () => window.openSettingsSection?.("console-application-logs-section"));
-    document.querySelector("#settings-menu-options button[onclick*=\"settings-oci\"]")?.after(logMenuItem);
     const updateModal = document.createElement("section");
     updateModal.id = "console-update-workflow-modal";
     updateModal.className = "modal hidden";

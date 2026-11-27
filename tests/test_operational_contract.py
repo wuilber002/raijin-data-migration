@@ -1371,6 +1371,24 @@ def test_source_selector_keeps_deactivated_sources_visible_with_explicit_state()
     assert 'source.archived_at, source.status = utcnow(), "DEACTIVATED"' not in app_source
 
 
+def test_compact_source_selector_avoids_inventory_aggregation_but_preserves_operational_state():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as session:
+        connection = AwsConnection(label="compact-selector-connection", secret_ocid="ocid1.vaultsecret.oc1..compact-selector",
+                                   aws_account_id="123456789012", default_region="us-east-1", control_bucket="control")
+        source = Source(name="compact-selector", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination", status="DISCOVERED")
+        source.aws_connection = connection
+        session.add(source); session.flush()
+        session.add(ObjectRecord(source_id=source.id, object_key="large-inventory-object", size_bytes=123, state=ObjectState.DISCOVERED))
+        session.commit()
+
+        row = list_sources(session, compact=True)[0]
+
+    assert row["operational_status"] == "DISCOVERED"
+    assert row["inventory_size_bytes"] is None
+
+
 def test_diagnostic_par_is_encrypted_prefix_scoped_and_preflighted_without_leaking_url(monkeypatch):
     from app import main
 
