@@ -18,6 +18,7 @@ os.environ.setdefault("OCI_RUNTIME_CONFIG_FILE", "/tmp/raijin-test-oci-runtime.j
 
 from app.real_worker import (
     AWS_CLIENT_CONFIG,
+    actionable_aws_error_summary,
     batch_manifest_fields,
     classify_task_error,
     permanent_transfer_error_message,
@@ -187,6 +188,23 @@ def test_aws_task_errors_retry_only_for_transient_service_pressure():
     assert classify_task_error(malformed)[0] == "failed"
     assert classify_task_error(TimeoutError("provider request timed out"))[0] == "retry"
     assert classify_task_error(ConnectionResetError("connection reset by peer"))[0] == "retry"
+
+
+def test_actionable_aws_error_keeps_iam_action_and_resource_but_redacts_tokens():
+    denied = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": (
+            "User: arn:aws:sts::339713075848:assumed-role/role-oracle-s3-migration/worker "
+            "is not authorized to perform: s3:CreateJob on resource: '*' "
+            "because no identity-based policy allows it. token=secret-value"
+        )}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+        "CreateJob",
+    )
+    summary = actionable_aws_error_summary(denied)
+    assert "403 AccessDenied CreateJob" in summary
+    assert "s3:CreateJob" in summary
+    assert "resource: '*'" in summary
+    assert "token=[REDACTED]" in summary
+    assert "secret-value" not in summary
 
 
 def test_access_denied_get_object_becomes_an_actionable_non_retryable_transfer_error():

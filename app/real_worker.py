@@ -650,6 +650,30 @@ PERMANENT_AWS_CODES = {
 }
 
 
+def actionable_aws_error_summary(error: Exception) -> str:
+    """Keep AWS IAM/action evidence for an operator without retaining secrets.
+
+    The generic health views deliberately expose only status and service code.
+    A terminal worker task is different: AWS often states the exact missing
+    IAM action and resource in ``Error.Message``.  Preserve that bounded
+    evidence after redacting values which can occur in signed URLs/headers.
+    """
+    response = getattr(error, "response", None) or {}
+    metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+    detail = response.get("Error", {}) if isinstance(response, dict) else {}
+    status, code = metadata.get("HTTPStatusCode"), detail.get("Code")
+    operation = str(getattr(error, "operation_name", "") or "").strip()
+    context = " ".join(str(value) for value in (status, code, operation) if value)
+    summary = f"{type(error).__name__}{f' ({context})' if context else ''}"
+    message = str(detail.get("Message") or "").strip()
+    if not message:
+        return summary
+    message = re.sub(r"(?i)(x-amz-security-token|x-amz-signature|authorization|credential|signature|token)=([^\s&]+)", r"\1=[REDACTED]", message)
+    message = re.sub(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", "[REDACTED_ACCESS_KEY]", message)
+    message = " ".join(message.split())[:1200]
+    return f"{summary}: {message}"
+
+
 def classify_task_error(error: Exception) -> tuple[str, str]:
     """Classify an external worker failure without exposing AWS response text.
 
@@ -1781,7 +1805,7 @@ def submit_restore(session, task: Task, settings) -> None:
         s3, s3control, account_id = aws_clients(settings, source.aws_region, source)
         validate_restore_preflight(session, source, s3, operation)
     except Exception as error:
-        _, summary = classify_task_error(error)
+        summary = actionable_aws_error_summary(error)
         raise RuntimeError(f"Restore preflight failed: {summary}") from error
     attempt = RestoreAttempt(wave_id=wave.id, aws_region=source.aws_region, expected_objects=len(archives))
     session.add(attempt)
@@ -1798,7 +1822,7 @@ def submit_restore(session, task: Task, settings) -> None:
     try:
         response = s3.put_object(Bucket=operation["control_bucket"], Key=manifest_key, Body=output.getvalue().encode("utf-8"), ContentType="text/csv")
     except Exception as error:
-        _, summary = classify_task_error(error)
+        summary = actionable_aws_error_summary(error)
         raise RuntimeError(f"Control-bucket manifest upload failed: {summary}") from error
     fields = batch_manifest_fields(has_versions)
     try:
@@ -1815,7 +1839,7 @@ def submit_restore(session, task: Task, settings) -> None:
             ClientRequestToken=f"odmt-wave-{wave.id}-task-{task.id}",
         )
     except Exception as error:
-        _, summary = classify_task_error(error)
+        summary = actionable_aws_error_summary(error)
         raise RuntimeError(f"S3 Batch Operations job creation failed: {summary}") from error
     attempt.job_id, attempt.job_status, attempt.manifest_key, attempt.manifest_etag = job["JobId"], "Preparing", manifest_key, response["ETag"].strip('"')
     wave.batch_job_id, wave.batch_job_status, wave.manifest_key, wave.manifest_etag, wave.status = job["JobId"], "Preparing", manifest_key, response["ETag"].strip('"'), "RESTORE_REQUESTED"
@@ -1864,7 +1888,7 @@ def poll_restore(session, task: Task, settings) -> None:
                 attempt.completion_report_list_requests = int(attempt.completion_report_list_requests or 0) + report_metrics["list_requests"]
                 attempt.completion_report_get_requests = int(attempt.completion_report_get_requests or 0) + report_metrics["get_requests"]
             except Exception as error:
-                _, summary = classify_task_error(error)
+                summary = actionable_aws_error_summary(error)
                 raise RuntimeError(f"S3 Batch completion-report processing failed: {summary}") from error
             if not report_available:
                 wave.status = "RESTORE_REQUESTED"
