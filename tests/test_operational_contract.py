@@ -1399,6 +1399,25 @@ def test_diagnostic_par_is_encrypted_prefix_scoped_and_preflighted_without_leaki
     assert all("token" in url for _, url, _ in calls)  # sent only to OCI, never returned by helpers
 
 
+def test_diagnostic_queue_export_uses_current_queue_evidence_fields_and_tolerates_retired_fields():
+    from app import main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as session:
+        source = Source(name="diagnostic-queue", s3_bucket="source", aws_region="us-east-1", destination_bucket="destination")
+        session.add(source); session.flush()
+        wave = Wave(source_id=source.id, name="diagnostic-wave", max_bytes=1, restore_days=1, restore_tier="BULK")
+        session.add(wave); session.flush()
+        item = TransferQueueItem(source_id=source.id, wave_id=wave.id, object_id=1, size_bytes=10,
+                                 decision_reason="eligible after restore")
+        session.add(item); session.commit()
+
+        rows = main.diagnostic_rows(session, TransferQueueItem, ("id", "decision_reason", "entry_reason"))
+
+    assert rows == [{"id": item.id, "decision_reason": "eligible after restore"}]
+
+
 def test_global_actionable_failure_banner_ignores_archived_sources():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

@@ -5177,6 +5177,12 @@ def redact_diagnostic_text(value: str) -> str:
 
 
 def diagnostic_rows(session: Session, model, fields: tuple[str, ...], limit: int = 1000) -> list[dict]:
+    # A diagnostic export must remain available even when a later model change
+    # removes a non-essential observability field.  Keep only mapped fields;
+    # the bundle is evidence collection, not a reason to turn an operational
+    # incident into a 500 response.
+    mapped_fields = set(model.__mapper__.attrs.keys())
+    fields = tuple(field for field in fields if field in mapped_fields)
     rows = session.scalars(select(model).order_by(model.id.desc()).limit(limit)).all()
     return [
         {field: redact_diagnostic_text(value) if isinstance(value := getattr(row, field), str) else value
@@ -5208,7 +5214,7 @@ def build_diagnostic_bundle(session: Session) -> tuple[bytes, str, dict]:
         "discovery-jobs.json": diagnostic_rows(session, DiscoveryJob,
             ("id", "source_id", "mode", "state", "attempts", "checkpoint_pages_completed", "checkpoint_objects_observed", "error", "created_at", "completed_at")),
         "transfer-queue.json": diagnostic_rows(session, TransferQueueItem,
-            ("id", "project_id", "source_id", "wave_id", "size_bytes", "state", "attempts", "priority_score", "priority_band", "retry_at", "lease_expires_at", "entry_reason", "exit_reason")),
+            ("id", "project_id", "source_id", "wave_id", "object_id", "size_bytes", "state", "attempts", "priority_score", "priority_band", "retry_at", "lease_expires_at", "decision_reason", "priority_details_json", "created_at", "updated_at")),
         "events.json": diagnostic_rows(session, Event,
             ("id", "source_id", "wave_id", "migration_project_id", "kind", "message", "created_at")),
         "application-log.txt": redact_diagnostic_text(str(app_logs.get("content") or "No application log collection is available.")),
