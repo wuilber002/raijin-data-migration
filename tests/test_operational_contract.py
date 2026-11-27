@@ -3567,13 +3567,19 @@ def test_source_summary_keeps_final_report_out_of_selection_path():
         source = Source(name="final-report-on-demand", s3_bucket="source", aws_region="us-east-1",
                         destination_bucket="destination", status="DISCOVERED")
         session.add(source); session.flush()
-        session.add(ObjectRecord(source_id=source.id, object_key="done", size_bytes=1,
-                                 state=ObjectState.VERIFIED,
-                                 delivery_integrity_status="OCI_ACCEPTED"))
+        session.add_all([
+            ObjectRecord(source_id=source.id, object_key="done", size_bytes=1,
+                         storage_class="STANDARD", state=ObjectState.VERIFIED,
+                         delivery_integrity_status="OCI_ACCEPTED"),
+            ObjectRecord(source_id=source.id, object_key="archive", size_bytes=2,
+                         storage_class="DEEP_ARCHIVE", state=ObjectState.VERIFIED,
+                         delivery_integrity_status="OCI_ACCEPTED"),
+        ])
         session.commit()
         summary = source_summary(source.id, session=session)
         assert summary["completion_statistics_available"] is True
         assert "completion_statistics" not in summary
+        assert summary["storage_classes"] == ["DEEP_ARCHIVE", "STANDARD"]
         assert "available" in source_completion_report(source.id, session=session)
 
 

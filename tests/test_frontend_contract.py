@@ -1382,6 +1382,16 @@ def test_source_selector_uses_name_only_and_context_tags_are_in_the_heading():
     assert "<b>Prefixos S3</b>" in page
 
 
+def test_selected_source_shows_compact_storage_tiers_below_the_s3_to_oci_route():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+
+    assert "function sourceStorageTierPanel(storageClasses)" in page
+    assert "source-storage-tiers" in page
+    assert "source-storage-tier-deep-archive" in page
+    assert "route.insertAdjacentHTML('afterend',panel)" in page
+    assert "$('#source-context-tags .source-transfer-mode-tag')?.remove()" in page
+
+
 def test_deactivating_a_source_keeps_it_selected_and_visible_for_history():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     handler = page[page.index("async function removeOrDeactivateSource"):page.index("let sourceMessageRotationTimer")]

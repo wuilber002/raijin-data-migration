@@ -10582,6 +10582,12 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
     source_or_404(session, source_id)
     current = ObjectRecord.is_current_revision.is_(True)
     count, bytes_total = session.execute(select(func.count(ObjectRecord.id), func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(ObjectRecord.source_id == source_id, current)).one()
+    storage_classes = [str(storage_class or "UNKNOWN").upper() for storage_class in session.scalars(
+        select(ObjectRecord.storage_class)
+        .where(ObjectRecord.source_id == source_id, current)
+        .distinct()
+        .order_by(ObjectRecord.storage_class)
+    )]
     states = dict(session.execute(
         select(ObjectRecord.state, func.count(ObjectRecord.id))
         .where(ObjectRecord.source_id == source_id, current)
@@ -10612,7 +10618,8 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
         select(DynamicPipelineRun).where(DynamicPipelineRun.source_id == source_id)
         .order_by(DynamicPipelineRun.id.desc()).limit(1)
     )
-    return {"source_id": source_id, "objects": count, "bytes": bytes_total, "object_states": states, "migration_status": migration_status,
+    return {"source_id": source_id, "objects": count, "bytes": bytes_total,
+            "storage_classes": storage_classes, "object_states": states, "migration_status": migration_status,
             # Source selection must stay inexpensive. The final report has its
             # own endpoint and is calculated only when the operator opens it.
             "completion_statistics_available": migration_status == "COMPLETED",
