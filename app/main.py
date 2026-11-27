@@ -308,6 +308,9 @@ class Base(DeclarativeBase):
 
 class ObjectState(StrEnum):
     DISCOVERED = "DISCOVERED"
+    # The OCI destination already contained this discovered source key.  It
+    # was adopted through destination reconciliation, not copied by Raijin.
+    PRESENT_IN_DESTINATION = "PRESENT_IN_DESTINATION"
     WAVE_ASSIGNED = "WAVE_ASSIGNED"
     RESTORE_REQUESTED = "RESTORE_REQUESTED"
     RESTORE_REQUEST_ACCEPTED = "RESTORE_REQUEST_ACCEPTED"
@@ -6514,6 +6517,37 @@ def destination_provenance_matches(obj: ObjectRecord, headers: dict) -> bool:
     return True
 
 
+def destination_requires_raijin_provenance(obj: ObjectRecord) -> bool:
+    """Whether OCI metadata must prove that Raijin performed this copy.
+
+    Fresh discovery rows have no Raijin upload history.  A matching OCI key
+    and size may therefore be adopted as an externally completed copy (for
+    example, rclone) without pretending that the source ETag metadata exists.
+    Once Raijin has assigned, transferred, or integrity-accepted an object,
+    its immutable provenance remains mandatory on every later reconciliation.
+    """
+    return bool(
+        obj.wave_id is not None
+        or obj.transferred_at is not None
+        or obj.delivery_integrity_status == "OCI_ACCEPTED"
+        or obj.state in {
+            ObjectState.WAVE_ASSIGNED, ObjectState.RESTORE_REQUESTED,
+            ObjectState.RESTORE_REQUEST_ACCEPTED, ObjectState.RESTORING,
+            ObjectState.RESTORED, ObjectState.TRANSFERRING,
+            ObjectState.TRANSFERRED, ObjectState.VERIFIED, ObjectState.FAILED,
+        }
+    )
+
+
+def destination_is_adoptable_external_copy(obj: ObjectRecord) -> bool:
+    """Only unplanned discovery rows may be adopted from an external copy."""
+    return (
+        obj.wave_id is None
+        and obj.state in {ObjectState.DISCOVERED, ObjectState.PRESENT_IN_DESTINATION}
+        and not destination_requires_raijin_provenance(obj)
+    )
+
+
 def normalized_etag(value: str | None) -> str:
     """Compare ETags across providers without confusing presentation quotes.
 
@@ -10551,6 +10585,10 @@ def list_sources(session: Session = Depends(get_session),
     def migration_status(source: Source) -> str:
         if completed_empty_inventory(source):
             return "COMPLETED"
+        # A VALID reconciliation covers every current discovery row.  It is
+        # a completed source even when some or all objects predate Raijin.
+        if source.destination_validation_status == "VALID" and source.status == "DISCOVERED":
+            return "COMPLETED"
         if compact_mode:
             statuses = wave_statuses.get(source.id, set())
             if statuses and statuses <= {"COMPLETED", "VERIFIED"}:
@@ -10873,7 +10911,10 @@ def source_has_executed_wave(session: Session, source_id: int) -> bool:
     ) or 0
     progressed_object = session.scalar(select(func.count(ObjectRecord.id)).where(
         ObjectRecord.source_id == source_id,
-        ObjectRecord.state.not_in([ObjectState.DISCOVERED, ObjectState.WAVE_ASSIGNED]),
+        ObjectRecord.state.not_in([
+            ObjectState.DISCOVERED, ObjectState.PRESENT_IN_DESTINATION,
+            ObjectState.WAVE_ASSIGNED,
+        ]),
     )) or 0
     submitted_batch = session.scalar(select(func.count(Wave.id)).where(
         Wave.source_id == source_id, Wave.batch_job_id.is_not(None)
@@ -11341,14 +11382,15 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
         discovery_duration_seconds += max(0, (utcnow() - source.discovery_started_at).total_seconds())
     delivery_verified = session.scalar(select(func.count(ObjectRecord.id)).where(ObjectRecord.source_id == source_id, ObjectRecord.delivery_integrity_status == "OCI_ACCEPTED")) or 0
     all_transferred = (states.get(ObjectState.TRANSFERRED, 0) + states.get(ObjectState.VERIFIED, 0)) == count
-    migration_status = "DESTINATION_DIVERGENT" if source.destination_validation_status == "DIFFERENT" else "COMPLETED" if source.status == "DISCOVERED" and count and (states.get(ObjectState.VERIFIED, 0) == count or (all_transferred and delivery_verified == count)) else "AWAITING_INTEGRITY_VERIFICATION" if source.status == "DISCOVERED" and count and all_transferred else "IN_PROGRESS" if count else "NOT_STARTED"
+    adopted = states.get(ObjectState.PRESENT_IN_DESTINATION, 0)
+    migration_status = "DESTINATION_DIVERGENT" if source.destination_validation_status == "DIFFERENT" else "COMPLETED" if source.status == "DISCOVERED" and count and (source.destination_validation_status == "VALID" or states.get(ObjectState.VERIFIED, 0) == count or (all_transferred and delivery_verified == count)) else "AWAITING_INTEGRITY_VERIFICATION" if source.status == "DISCOVERED" and count and all_transferred else "IN_PROGRESS" if count else "NOT_STARTED"
     pipeline = session.scalar(
         select(DynamicPipelineRun).where(DynamicPipelineRun.source_id == source_id)
         .order_by(DynamicPipelineRun.id.desc()).limit(1)
     )
     return {"source_id": source_id, "objects": count, "bytes": bytes_total,
             "storage_classes": storage_classes, "storage_class_sizes": storage_class_sizes,
-            "object_states": states, "migration_status": migration_status,
+            "object_states": states, "adopted_objects": adopted, "migration_status": migration_status,
             # Source selection must stay inexpensive. The final report has its
             # own endpoint and is calculated only when the operator opens it.
             "completion_statistics_available": migration_status == "COMPLETED",
@@ -11778,11 +11820,14 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
     missing = sorted(key for key in expected if key not in found)
     mismatched = sorted(key for key, obj in expected.items() if key in found and found[key] != obj.size_bytes)
     # The listing establishes coverage cheaply.  HeadObject is performed only
-    # for matching objects and verifies source provenance metadata that the
-    # worker persisted at upload time; no S3 call and no object-body read occur.
+    # for matching objects already handled by Raijin and verifies the source
+    # provenance metadata persisted at upload time. Fresh discovery rows may
+    # instead be adopted from an external copy (such as rclone) by exact key
+    # and size; that evidence is deliberately recorded as pre-existing rather
+    # than being represented as a Raijin transfer.
     metadata_mismatched: list[str] = []
     for key, obj in expected.items():
-        if key not in found or found[key] != obj.size_bytes or not obj.etag:
+        if key not in found or found[key] != obj.size_bytes or not destination_requires_raijin_provenance(obj):
             continue
         try:
             assert client is not None and namespace is not None
@@ -11796,6 +11841,22 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
     source.destination_missing_count, source.destination_size_mismatch_count = len(missing), len(mismatched)
     source.destination_metadata_mismatch_count, source.destination_extra_count = len(metadata_mismatched), len(extras)
     source.destination_validation_status = "VALID" if not missing and not mismatched and not metadata_mismatched else "DIFFERENT"
+    adopted_keys = [
+        key for key, obj in expected.items()
+        if key in found and found[key] == obj.size_bytes
+        and key not in metadata_mismatched and destination_is_adoptable_external_copy(obj)
+    ]
+    adopted_at = source.destination_validation_at
+    for offset in range(0, len(adopted_keys), 1000):
+        for obj in session.scalars(select(ObjectRecord).where(
+            ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True),
+            ObjectRecord.destination_object_key.in_(adopted_keys[offset:offset + 1000])
+        )):
+            if destination_is_adoptable_external_copy(obj):
+                obj.state = ObjectState.PRESENT_IN_DESTINATION
+                obj.delivery_integrity_status = "OCI_PREEXISTING"
+                obj.delivery_integrity_verified_at = adopted_at
+                obj.integrity_error = None
     affected_wave_counts: dict[int, int] = {}
     divergent_keys = sorted(set(missing + mismatched + metadata_mismatched))
     for offset in range(0, len(divergent_keys), 1000):
@@ -11821,9 +11882,9 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
         wave.availability_throttle_retries = 0
         wave.last_availability_poll_objects, wave.last_availability_poll_seconds = 0, 0
         record_event(session, "DESTINATION_DIVERGENCE_REOPENED_WAVE", f"Wave reopened after OCI destination validation; {affected_objects} object(s) require reprocessing", source_id=source.id, wave_id=wave.id)
-    record_event(session, "DESTINATION_VALIDATED", f"OCI destination reconciliation: {len(missing)} missing, {len(mismatched)} size mismatch(es), {len(metadata_mismatched)} metadata mismatch(es), {len(extras)} extra object(s)", source_id=source.id)
+    record_event(session, "DESTINATION_VALIDATED", f"OCI destination reconciliation: {len(adopted_keys)} pre-existing object(s) adopted by key and size, {len(missing)} missing, {len(mismatched)} size mismatch(es), {len(metadata_mismatched)} Raijin provenance mismatch(es), {len(extras)} extra object(s)", source_id=source.id)
     session.commit()
-    return {"source_id": source.id, "status": source.destination_validation_status, "expected": len(expected), "found": len(found), "missing": len(missing), "size_mismatches": len(mismatched), "metadata_mismatches": len(metadata_mismatched), "extras": len(extras), "missing_examples": missing[:50], "size_mismatch_examples": mismatched[:50], "metadata_mismatch_examples": metadata_mismatched[:50], "extra_examples": extras[:50], "validated_at": source.destination_validation_at}
+    return {"source_id": source.id, "status": source.destination_validation_status, "expected": len(expected), "found": len(found), "adopted": len(adopted_keys), "missing": len(missing), "size_mismatches": len(mismatched), "metadata_mismatches": len(metadata_mismatched), "extras": len(extras), "missing_examples": missing[:50], "size_mismatch_examples": mismatched[:50], "metadata_mismatch_examples": metadata_mismatched[:50], "extra_examples": extras[:50], "validated_at": source.destination_validation_at}
 
 
 @app.get("/api/sources/{source_id}/inventory")
@@ -11916,10 +11977,11 @@ def export_inventory(source_id: int, session: Session = Depends(get_session)) ->
     source_or_404(session, source_id)
     content = io.StringIO()
     writer = csv.writer(content, lineterminator="\n")
-    writer.writerow(["object_key", "destination_object_key", "version_id", "size_bytes", "etag", "storage_class", "archive_status", "last_modified", "state", "wave_id", "metadata_json", "tags_json"])
+    writer.writerow(["object_key", "destination_object_key", "version_id", "size_bytes", "etag", "storage_class", "archive_status", "last_modified", "state", "delivery_evidence", "delivery_evidence_at", "wave_id", "metadata_json", "tags_json"])
     for obj in session.scalars(select(ObjectRecord).where(ObjectRecord.source_id == source_id, ObjectRecord.is_current_revision.is_(True)).order_by(ObjectRecord.object_key)):
         writer.writerow([obj.object_key, object_destination_key(obj), obj.version_id or "", obj.size_bytes, obj.etag or "", obj.storage_class or "", obj.archive_status or "",
-                         obj.last_modified.isoformat() if obj.last_modified else "", obj.state, obj.wave_id or "", obj.metadata_json, obj.tags_json])
+                         obj.last_modified.isoformat() if obj.last_modified else "", obj.state, obj.delivery_integrity_status or "",
+                         obj.delivery_integrity_verified_at.isoformat() if obj.delivery_integrity_verified_at else "", obj.wave_id or "", obj.metadata_json, obj.tags_json])
     return StreamingResponse(iter([content.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="source-{source_id}-inventory.csv"'})
 
 

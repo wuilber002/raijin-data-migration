@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MigrationProject, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, ProjectClosureIssueRequest, ProjectClosureReport, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, deep_audits, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, issue_project_closure_report, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, project_closure_readiness, project_closure_snapshot, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, repair_completed_deep_audit_statuses, replan_dynamic_pipeline, reprocess_preview, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_aws_secret_validation_summary, safe_oci_error_summary, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, pause_deep_audit_queue, resume_deep_audit_queue, transfer_queue, wave_cost_estimate
 from app.main import ConsolePresence, ConsolePresenceHeartbeat, console_presence_heartbeat
 from app.main import object_requires_restore
+from app.main import destination_is_adoptable_external_copy, destination_requires_raijin_provenance, validate_destination
 from app.main import IMPORT_PIPELINE_PLANNER_VERSION, ImportPipelineItem, PrioritizedWaveImport, parse_prioritized_wave_import, prioritized_wave_import_groups, prioritized_wave_import_preview
 from app.main import app as raijin_app, healthz
 from app.closure_report import build_artifacts, canonical_json, safe_csv_cell, sha256
@@ -2863,6 +2864,60 @@ def test_destination_provenance_requires_s3_etag_and_last_modified_when_known():
     assert destination_provenance_matches(obj, headers)
     headers["opc-meta-raijin-source-last-modified"] = "2026-08-17T12:01:00+00:00"
     assert not destination_provenance_matches(obj, headers)
+
+
+def test_destination_validation_adopts_matching_external_copy_without_raijin_metadata(monkeypatch):
+    """A rclone copy can be controlled without being mislabeled as Raijin work."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    source = Source(name="external-copy", s3_bucket="source-bucket", aws_region="us-east-1",
+                    destination_bucket="destination-bucket", status="DISCOVERED")
+    session.add(source)
+    session.flush()
+    obj = ObjectRecord(source_id=source.id, object_key="already-there.dat",
+                       destination_object_key="already-there.dat", size_bytes=42,
+                       etag="aws-etag", state=ObjectState.DISCOVERED)
+    session.add(obj)
+    session.commit()
+
+    class Client:
+        def list_objects(self, *_args, **_kwargs):
+            item = SimpleNamespace(name="already-there.dat", size=42)
+            return SimpleNamespace(data=SimpleNamespace(objects=[item], next_start_with=None))
+
+        def head_object(self, *_args, **_kwargs):
+            raise AssertionError("external adoption must not require Raijin provenance metadata")
+
+    fake_oci = SimpleNamespace(auth=SimpleNamespace(signers=SimpleNamespace(
+        InstancePrincipalsSecurityTokenSigner=lambda: object()
+    )))
+    monkeypatch.setitem(__import__("sys").modules, "oci", fake_oci)
+    monkeypatch.setattr("app.main.read_oci_runtime_config", lambda: object())
+    monkeypatch.setattr("app.main.oci_object_storage_client", lambda *_args, **_kwargs: Client())
+    monkeypatch.setattr("app.main.resolve_object_storage_namespace", lambda *_args, **_kwargs: ("namespace", "tenancy"))
+
+    result = validate_destination(source.id, session)
+    session.refresh(obj)
+    assert result["status"] == "VALID"
+    assert result["adopted"] == 1
+    assert obj.state == ObjectState.PRESENT_IN_DESTINATION
+    assert obj.delivery_integrity_status == "OCI_PREEXISTING"
+    assert destination_is_adoptable_external_copy(obj)
+    assert not destination_requires_raijin_provenance(obj)
+    summary = source_summary(source.id, session)
+    assert summary["migration_status"] == "COMPLETED"
+    assert summary["object_states"][ObjectState.PRESENT_IN_DESTINATION] == 1
+    session.close()
+
+
+def test_destination_validation_keeps_raijin_provenance_requirement_after_wave_assignment():
+    obj = type("Object", (), {
+        "wave_id": 10, "transferred_at": None, "delivery_integrity_status": None,
+        "state": ObjectState.WAVE_ASSIGNED,
+    })()
+    assert destination_requires_raijin_provenance(obj)
+    assert not destination_is_adoptable_external_copy(obj)
 
 
 def test_multipart_size_runtime_setting_has_safe_bounds():
