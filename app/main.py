@@ -9467,25 +9467,23 @@ def export_migration_project_executive_summary(project_id: int,
     # on Windows while remaining valid UTF-8 for other consumers.
     content.write("\ufeff")
     writer = csv.writer(content, lineterminator="\n")
-    writer.writerow(["Projeto", data["project_name"]])
-    writer.writerow(["Sources", data["source_count"]])
-    writer.writerow(["Total de arquivos", data["total_files"]])
-    writer.writerow(["Total de dados (bytes)", data["total_size_bytes"]])
-    writer.writerow([])
-    headers = [
-        "Source", "Entrega de arquivos (%)", "Entrega de tamanho (%)",
-        "AWS região", "AWS bucket name", "AWS bucket tier", "AWS bucket files",
-        "AWS bucket total size (bytes)", "OCI região", "OCI bucket name",
-        "OCI bucket tier", "OCI bucket files", "OCI bucket total size (bytes)",
-    ]
-    writer.writerow(headers)
+    # Two header rows mirror the side-by-side AWS / OCI layout used by the
+    # operational spreadsheet, so this can be pasted into Excel unchanged.
+    writer.writerow(["AWS", "", "", "", "", "OCI", "", "", "", ""])
+    writer.writerow([
+        "Region", "Bucket Name", "Bucket Files", "Bucket Tier", "Bucket Size (GB)",
+        "Region", "Bucket Name", "Bucket Files", "Bucket Tier", "Bucket Size (GB)",
+    ])
+
+    def gigabytes(value: int) -> str:
+        return f"{max(0, int(value or 0)) / 1000 ** 3:.6f}".rstrip("0").rstrip(".") or "0"
+
     for source in data["sources"]:
-        aws, oci, percentage = source["aws"], source["oci"], source["percentage"]
+        aws, oci = source["aws"], source["oci"]
         writer.writerow([
-            source["source_name"], f'{float(percentage["files"]):.2f}', f'{float(percentage["size"]):.2f}',
-            aws["region"], aws["bucket_name"], aws["bucket_tier"], aws["bucket_files"],
-            aws["bucket_size_bytes"], oci["region"], oci["bucket_name"], oci["bucket_tier"],
-            oci["bucket_files"], oci["bucket_size_bytes"],
+            aws["region"], aws["bucket_name"], aws["bucket_files"], aws["bucket_tier"],
+            gigabytes(aws["bucket_size_bytes"]), oci["region"], oci["bucket_name"],
+            oci["bucket_files"], oci["bucket_tier"], gigabytes(oci["bucket_size_bytes"]),
         ])
     filename = f'{safe_filename(data["project_name"])}-resumo-executivo.csv'
     return Response(content.getvalue(), media_type="text/csv",

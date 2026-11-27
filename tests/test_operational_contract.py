@@ -974,9 +974,15 @@ def test_project_executive_summary_exports_the_same_source_evidence_as_csv():
         assert response.media_type == "text/csv"
         assert response.charset == "utf-8"
         assert response.headers["content-disposition"].endswith('"Executive-export-resumo-executivo.csv"')
-        assert rows[0] == ["Projeto", "Executive export"]
-        assert rows[6][0] == "export-source"
-        assert rows[6][6] == "1" and rows[6][11] == "1"
+        assert rows[0] == ["AWS", "", "", "", "", "OCI", "", "", "", ""]
+        assert rows[1] == [
+            "Region", "Bucket Name", "Bucket Files", "Bucket Tier", "Bucket Size (GB)",
+            "Region", "Bucket Name", "Bucket Files", "Bucket Tier", "Bucket Size (GB)",
+        ]
+        assert rows[2] == [
+            "us-east-1", "aws-bucket", "1", "STANDARD", "0",
+            "—", "oci-bucket", "1", "STANDARD", "0",
+        ]
 
 
 def test_verify_wave_execution_renews_its_task_lease():
