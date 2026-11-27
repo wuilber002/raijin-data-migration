@@ -2042,7 +2042,7 @@ refreshAll();
       const global=transferControls.global||{state:'RUNNING'};
       const button=global.state==='RUNNING'?'Parar novas transferências e drenar':'Retomar transferências';
       const target=$('#global-transfer-drain-button');
-      if(target){const stopped=global.state!=='RUNNING';target.textContent=button;target.className=`${stopped?'secondary transfer-drain-resume-attention':'warn'} queue-global-transfer-drain`;target.dataset.drainHelp=stopped?'A fila global está bloqueada para novas transferências. Clique para retomar as admissões e permitir que o Raijin volte a iniciar cópias.':'Bloqueia novas admissões em toda a fila contínua e drena apenas as cópias já em execução. Restores AWS não são cancelados e nenhum item é removido.';target.setAttribute('aria-label',button);target.onclick=()=>toggleTransferDrain('global')}
+      if(target){const stopped=global.state!=='RUNNING';target.textContent=button;target.className=`${stopped?'secondary transfer-drain-resume-attention':'secondary'} queue-global-transfer-drain`;target.dataset.drainHelp=stopped?'A fila global está bloqueada para novas transferências. Clique para retomar as admissões e permitir que o Raijin volte a iniciar cópias.':'Bloqueia novas admissões em toda a fila contínua e drena apenas as cópias já em execução. Restores AWS não são cancelados e nenhum item é removido.';target.setAttribute('aria-label',button);target.onclick=()=>toggleTransferDrain('global')}
       notifyCompleted('global',global,'fila global');
       addSourceTransferDrainButton();
     };

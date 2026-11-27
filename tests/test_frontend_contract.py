@@ -1932,6 +1932,7 @@ def test_continuous_transfer_drain_has_global_and_source_controls_with_completio
     assert "transfer-drain-resume-attention" in page
     assert "data-drain-help" in page
     assert "Retomar transferências globais" in page
+    assert "${stopped?'secondary transfer-drain-resume-attention':'secondary'} queue-global-transfer-drain" in page
 
 
 def test_project_waves_are_aggregated_without_replacing_source_waves():
