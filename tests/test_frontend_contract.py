@@ -1662,12 +1662,15 @@ def test_global_operational_ticker_uses_lightweight_alert_endpoint():
 
 def test_dynamic_wave_creation_gives_immediate_busy_feedback():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-    assert "function setDynamicWaveCreationBusy(busy)" in page
+    assert "function setDynamicWaveCreationBusy(busy,message=" in page
     assert "Criando waves…" in page
     assert "Criando waves dinâmicas e preparando o pipeline" in page
     handler = page[page.rindex("async function submitDynamicWaves"):page.index("saveSettings=", page.rindex("async function submitDynamicWaves"))]
     assert "setDynamicWaveCreationBusy(true)" in handler
-    assert "finally{setDynamicWaveCreationBusy(false)}" in handler
+    assert "waitForInitialDynamicPipelineWave" in handler
+    assert "Materializando a primeira wave pelo controlador" in page
+    assert "/pipeline-history" in page
+    assert "setDynamicWaveCreationBusy(false)" in handler
     assert ".wave-create-busy::before" in page
 
 
