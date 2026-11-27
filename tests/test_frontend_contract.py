@@ -1333,6 +1333,13 @@ def test_project_state_card_reflects_status_without_error_red():
     assert "#7f1d1d" not in project_styles
 
 
+def test_source_selector_distinguishes_completed_empty_inventories_and_uses_done_label():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "COMPLETED:['DONE','completed']" in page
+    assert "COMPLETED_EMPTY:['DONE','completed-empty']" in page
+    assert ".source-status-completed-empty" in page
+
+
 def test_project_summary_cards_fill_the_available_width_without_manual_gaps():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     styles = page[page.index('.migration-project-summary{'):page.index('.migration-project-centered-card .migration-project-state')]

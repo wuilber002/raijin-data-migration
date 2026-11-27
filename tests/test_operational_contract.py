@@ -1393,6 +1393,30 @@ def test_compact_source_selector_avoids_inventory_aggregation_but_preserves_oper
     assert cached_row["inventory_size_bytes"] == 123
 
 
+def test_completed_empty_inventory_is_done_but_zero_byte_objects_remain_discovered():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as session:
+        connection = AwsConnection(label="empty-inventory-connection", secret_ocid="ocid1.vaultsecret.oc1..empty-inventory",
+                                   aws_account_id="123456789012", default_region="us-east-1", control_bucket="control")
+        empty = Source(name="empty-inventory", s3_bucket="empty", aws_region="us-east-1", destination_bucket="destination",
+                       status="DISCOVERED", discovery_completed_at=datetime.now(timezone.utc),
+                       discovery_objects_inserted=0, discovery_size_bytes=0)
+        zero_byte_file = Source(name="zero-byte-file", s3_bucket="zero-byte", aws_region="us-east-1", destination_bucket="destination",
+                                status="DISCOVERED", discovery_completed_at=datetime.now(timezone.utc),
+                                discovery_objects_inserted=1, discovery_size_bytes=0)
+        empty.aws_connection = connection
+        zero_byte_file.aws_connection = connection
+        session.add_all([empty, zero_byte_file])
+        session.commit()
+
+        rows = {row["name"]: row for row in list_sources(session, compact=True)}
+
+    assert rows["empty-inventory"]["migration_status"] == "COMPLETED"
+    assert rows["empty-inventory"]["operational_status"] == "COMPLETED_EMPTY"
+    assert rows["zero-byte-file"]["operational_status"] == "DISCOVERED"
+
+
 def test_diagnostic_par_is_encrypted_prefix_scoped_and_preflighted_without_leaking_url(monkeypatch):
     from app import main
 

@@ -10291,7 +10291,25 @@ def list_sources(session: Session = Depends(get_session),
     ).all() if sources else [])
     totals = {source_id: (int(total), int(verified), int(transferred), int(delivery_verified), int(inventory_bytes))
               for source_id, total, verified, transferred, delivery_verified, inventory_bytes in total_rows}
+
+    def completed_empty_inventory(source: Source) -> bool:
+        """Whether discovery completed and found no objects at all.
+
+        Zero is the durable cache value for an empty inventory; ``None``
+        means that an older source has not had its size cache populated yet.
+        Buckets containing zero-byte objects retain a positive object count,
+        so they remain available for migration.
+        """
+        return (
+            source.status == "DISCOVERED"
+            and source.discovery_completed_at is not None
+            and int(source.discovery_objects_inserted or 0) == 0
+            and source.discovery_size_bytes == 0
+        )
+
     def migration_status(source: Source) -> str:
+        if completed_empty_inventory(source):
+            return "COMPLETED"
         if compact:
             statuses = wave_statuses.get(source.id, set())
             if statuses and statuses <= {"COMPLETED", "VERIFIED"}:
@@ -10308,6 +10326,8 @@ def list_sources(session: Session = Depends(get_session),
 
     def operational_status(source: Source) -> str:
         """Return one stable, operator-facing state for the source selector."""
+        if completed_empty_inventory(source):
+            return "COMPLETED_EMPTY"
         completed = migration_status(source) == "COMPLETED"
         statuses = wave_statuses.get(source.id, set())
         if completed:
