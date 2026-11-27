@@ -1089,7 +1089,8 @@ def test_all_application_messages_use_raijin_notification_windows():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert 'id="notification-stack"' in page
     assert "function dismissNotification" in page
-    assert "className=`notification ${bad?'error':'ok'}`" in page
+    assert "warning=severity==='warning'" in page
+    assert "className=`notification ${bad?'error':warning?'warning':'ok'}`" in page
     assert "stack.append(item)" in page
 
 
