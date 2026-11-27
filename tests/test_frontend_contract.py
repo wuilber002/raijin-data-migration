@@ -1191,6 +1191,10 @@ def test_source_selector_prioritizes_compact_route_and_status_tags_before_name()
     assert "font-size:.61rem" in page
     assert "source.inventory_size_bytes==null" in page
     assert "source-select-option-size" in page
+    assert "privateRoute?`${transfer}${status}`:`${status}${transfer}`" in page
+    assert "function sourceInventorySize(value)" in page
+    assert "minimumIntegerDigits:2,minimumFractionDigits:1,maximumFractionDigits:1" in page
+    assert "[${sourceInventorySize(source.inventory_size_bytes)}]" in page
 
 
 def test_project_is_required_before_the_ui_can_create_a_source():
