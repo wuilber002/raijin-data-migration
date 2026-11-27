@@ -1340,6 +1340,18 @@ def test_source_selector_distinguishes_completed_empty_inventories_and_uses_done
     assert ".source-status-completed-empty" in page
 
 
+def test_console_uses_sse_invalidation_with_targeted_refresh_and_polling_fallback():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "new EventSource('/api/stream/operations')" in page
+    assert "stream.addEventListener('change'" in page
+    assert "apiReadCache.clear()" in page
+    assert "setTimeout(flush,350)" in page
+    assert "if(view==='queue')" in page and "loadDiscoveryQueue()" in page
+    assert "sourceEditorOpen()" in page
+    # SSE supplements rather than replaces the resilient polling path.
+    assert "setInterval(refreshOperationalMessages,30000)" in page
+
+
 def test_project_summary_cards_fill_the_available_width_without_manual_gaps():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     styles = page[page.index('.migration-project-summary{'):page.index('.migration-project-centered-card .migration-project-state')]

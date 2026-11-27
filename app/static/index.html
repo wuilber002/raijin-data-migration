@@ -1080,6 +1080,50 @@ refreshAll();
     introduction:'Linha do tempo persistida desta execução. A lane consolida transferências observadas; seu trecho listrado, quando existir, é calculado exclusivamente da fila de objetos restaurados aguardando Raiju.',
     emptyMessage:'Não há waves registradas nesta execução.'},{initial:true})};
 </script>
+<script>
+  /* Server-Sent Events carry only small invalidation hints.  State still
+     comes from the existing authenticated HTTP endpoints, which preserves a
+     durable polling fallback during a stream or PostgreSQL interruption. */
+  (()=>{
+    if(!window.EventSource)return;
+    let refreshTimer=null;
+    const pending={topics:new Set(),sourceIds:new Set(),projectIds:new Set()};
+    const activeView=()=>document.querySelector('.view.active')?.id?.replace('view-','')||'dashboard';
+    const sourceEditorOpen=()=>!$('#source-modal')?.classList.contains('hidden');
+    const relevantToSelectedSource=()=>!pending.sourceIds.size||pending.sourceIds.has(String(selectedSource||''));
+    const flush=()=>{
+      refreshTimer=null;
+      apiReadCache.clear();
+      if(document.hidden)return;
+      const view=activeView(),topics=pending.topics,relevant=relevantToSelectedSource();
+      const queue=topics.has('queue'),discovery=topics.has('discovery'),tasks=topics.has('tasks'),sourcesChanged=topics.has('sources'),waves=topics.has('waves'),events=topics.has('events');
+      pending.topics=new Set();pending.sourceIds=new Set();pending.projectIds=new Set();
+      if(view==='dashboard'){Promise.all([loadHealth(),loadDaily()]).catch(()=>{});return}
+      if(view==='queue'){const work=[loadHealth(),loadDaily()];if(discovery)work.push(loadDiscoveryQueue());if(queue)work.push(loadFlightBoardAvailability());Promise.all(work).catch(()=>{});return}
+      if(view!=='migrations'||sourceEditorOpen())return;
+      const work=[];
+      if(sourcesChanged)work.push(loadSources());
+      if(relevant){
+        if(sourcesChanged||waves||queue||discovery)work.push(loadSummary());
+        if(waves||queue)work.push(loadWaves());
+        if(events)work.push(loadEvents());
+        if(tasks)work.push(loadTasks());
+      }
+      if(work.length)Promise.all(work).catch(()=>{});
+    };
+    const schedule=change=>{
+      for(const topic of change.topics||['operations'])pending.topics.add(String(topic));
+      if(change.source_id!=null)pending.sourceIds.add(String(change.source_id));
+      if(change.migration_project_id!=null)pending.projectIds.add(String(change.migration_project_id));
+      clearTimeout(refreshTimer);refreshTimer=setTimeout(flush,350);
+    };
+    const stream=new EventSource('/api/stream/operations');
+    stream.addEventListener('change',event=>{try{schedule(JSON.parse(event.data))}catch(_){apiReadCache.clear()}});
+    stream.addEventListener('ready',()=>{window.raijinOperationalStream='connected'});
+    stream.onerror=()=>{window.raijinOperationalStream='reconnecting'};
+    document.addEventListener('visibilitychange',()=>{if(!document.hidden&&pending.topics.size)flush()});
+  })();
+</script>
 <style>
   .lane-decision.state-error{border-left-color:#ef4444!important;background:#2a1018!important}
   #source-context-tags .source-tag-backend{border-color:#38bdf8;background:#0c4a6e;color:#e0f2fe}

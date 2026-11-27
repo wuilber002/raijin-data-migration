@@ -16,7 +16,9 @@ except ImportError:  # pragma: no cover - exercised only on Python < 3.11
         pass
 from typing import Generator
 from collections import deque
-from threading import Lock
+from queue import Empty, Queue
+from threading import Event as ThreadEvent, Lock, Thread
+import asyncio
 import os
 import csv
 import hmac
@@ -252,6 +254,52 @@ if parsed_database_url.drivername.startswith("postgres"):
     )
 engine = create_engine(database_url, **_engine_options)
 SessionLocal = sessionmaker(bind=engine)
+
+
+# The browser receives only compact invalidation hints through SSE.  Commands
+# and snapshots remain regular authenticated HTTP requests; workers continue
+# to communicate exclusively through PostgreSQL.
+CONSOLE_CHANGE_NOTIFY_CHANNEL = "raijin_console_change"
+CONSOLE_SSE_HEARTBEAT_SECONDS = 15
+
+
+class ConsoleChangeBroadcaster:
+    """Fan out committed PostgreSQL change hints without querying per browser."""
+
+    def __init__(self) -> None:
+        self._subscribers: dict[str, Queue] = {}
+        self._lock = Lock()
+
+    def subscribe(self) -> tuple[str, Queue]:
+        token, subscriber = str(uuid.uuid4()), Queue(maxsize=64)
+        with self._lock:
+            self._subscribers[token] = subscriber
+        return token, subscriber
+
+    def unsubscribe(self, token: str) -> None:
+        with self._lock:
+            self._subscribers.pop(token, None)
+
+    def publish(self, change: dict) -> None:
+        with self._lock:
+            subscribers = list(self._subscribers.values())
+        for subscriber in subscribers:
+            try:
+                subscriber.put_nowait(change)
+            except Exception:
+                # Keep the most recent invalidation when a disconnected or
+                # slow browser has filled its bounded queue.
+                try:
+                    subscriber.get_nowait()
+                    subscriber.put_nowait(change)
+                except Exception:
+                    pass
+
+
+console_change_broadcaster = ConsoleChangeBroadcaster()
+_console_change_listener_stop = ThreadEvent()
+_console_change_listener_thread: Thread | None = None
+_console_change_listener_connection = None
 
 
 class Base(DeclarativeBase):
@@ -2294,7 +2342,11 @@ def apply_console_security_headers(response: Response, path: str) -> Response:
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
     if path.startswith("/api/") or path in {"/", "/login"}:
-        response.headers["Cache-Control"] = "no-store"
+        # An SSE stream must remain unbuffered by an intermediary; ordinary
+        # API responses continue to be strictly non-cacheable.
+        response.headers["Cache-Control"] = (
+            "no-cache, no-transform" if response.media_type == "text/event-stream" else "no-store"
+        )
     return response
 
 
@@ -2843,6 +2895,12 @@ def create_schema() -> None:
                          f"Pipeline run {run.id} now separates the AWS service window from operational safety",
                          source_id=run.source_id)
             session.commit()
+    start_console_change_listener()
+
+
+@app.on_event("shutdown")
+def stop_console_change_listener_on_shutdown() -> None:
+    stop_console_change_listener()
 
 
 def get_session() -> Generator[Session, None, None]:
@@ -2927,8 +2985,10 @@ def record_event(session: Session, kind: str, message: str, source_id: int | Non
                 Source.id == source_id
             ))
         elif wave_id is not None:
-            migration_project_id = session.scalar(select(Source.migration_project_id)
-                .join(Wave, Wave.source_id == Source.id).where(Wave.id == wave_id))
+            wave_context = session.execute(select(Source.id, Source.migration_project_id)
+                .join(Wave, Wave.source_id == Source.id).where(Wave.id == wave_id)).one_or_none()
+            if wave_context:
+                source_id, migration_project_id = wave_context
     session.add(Event(
         kind=kind,
         message=message,
@@ -2936,6 +2996,115 @@ def record_event(session: Session, kind: str, message: str, source_id: int | Non
         wave_id=wave_id,
         migration_project_id=migration_project_id,
     ))
+    publish_console_change_hint(session, kind=kind, source_id=source_id, wave_id=wave_id,
+                                migration_project_id=migration_project_id)
+
+
+def console_change_topics(kind: str, source_id: int | None = None,
+                          wave_id: int | None = None) -> list[str]:
+    """Classify a durable event without exposing its evidence text to SSE."""
+    normalized = str(kind or "").upper()
+    topics = {"events", "operations"}
+    if source_id is not None:
+        topics.add("sources")
+    if wave_id is not None:
+        topics.update({"waves", "queue"})
+    if "DISCOVERY" in normalized or "INVENTORY" in normalized:
+        topics.update({"discovery", "sources"})
+    if normalized.startswith("TASK_"):
+        topics.update({"tasks", "queue"})
+    if any(token in normalized for token in ("TRANSFER", "RESTORE", "RAIJU", "LANE")):
+        topics.add("queue")
+    return sorted(topics)
+
+
+def console_change_payload(*, kind: str, source_id: int | None = None,
+                           wave_id: int | None = None,
+                           migration_project_id: int | None = None) -> dict:
+    """Small, non-sensitive event delivered after the surrounding transaction commits."""
+    return {
+        "kind": str(kind or "CHANGE")[:64],
+        "source_id": source_id,
+        "wave_id": wave_id,
+        "migration_project_id": migration_project_id,
+        "topics": console_change_topics(kind, source_id, wave_id),
+    }
+
+
+def publish_console_change_hint(session: Session, *, kind: str, source_id: int | None = None,
+                                wave_id: int | None = None,
+                                migration_project_id: int | None = None) -> None:
+    """Schedule an SSE hint in the same transaction as its durable event.
+
+    PostgreSQL delivers ``pg_notify`` only after commit, so a browser can
+    never be prompted to read state that later rolls back. SQLite contract
+    tests and non-PostgreSQL development stores intentionally skip it.
+    """
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    payload = json.dumps(console_change_payload(
+        kind=kind, source_id=source_id, wave_id=wave_id,
+        migration_project_id=migration_project_id,
+    ), separators=(",", ":"), sort_keys=True)
+    session.execute(text("SELECT pg_notify(:channel, :payload)"), {
+        "channel": CONSOLE_CHANGE_NOTIFY_CHANNEL, "payload": payload,
+    })
+
+
+def _console_listener_dsn() -> str:
+    return make_url(database_url).set(drivername="postgresql").render_as_string(hide_password=False)
+
+
+def _run_console_change_listener() -> None:
+    """Receive committed database notifications and fan them out in-process."""
+    global _console_change_listener_connection
+    if not parsed_database_url.drivername.startswith("postgres"):
+        return
+    while not _console_change_listener_stop.is_set():
+        try:
+            import psycopg
+            with psycopg.connect(_console_listener_dsn(), autocommit=True) as connection:
+                _console_change_listener_connection = connection
+                connection.execute(f"LISTEN {CONSOLE_CHANGE_NOTIFY_CHANNEL}")
+                for notification in connection.notifies():
+                    if _console_change_listener_stop.is_set():
+                        break
+                    try:
+                        payload = json.loads(notification.payload)
+                    except (TypeError, ValueError):
+                        payload = {"kind": "CHANGE", "topics": ["operations"]}
+                    if isinstance(payload, dict):
+                        console_change_broadcaster.publish(payload)
+        except Exception:
+            # The browser's slow polling fallback remains active while the
+            # listener reconnects (for example during a PostgreSQL restart).
+            _console_change_listener_stop.wait(2)
+        finally:
+            _console_change_listener_connection = None
+
+
+def start_console_change_listener() -> None:
+    global _console_change_listener_thread
+    if not parsed_database_url.drivername.startswith("postgres"):
+        return
+    if _console_change_listener_thread and _console_change_listener_thread.is_alive():
+        return
+    _console_change_listener_stop.clear()
+    _console_change_listener_thread = Thread(
+        target=_run_console_change_listener, name="raijin-console-sse-listener", daemon=True,
+    )
+    _console_change_listener_thread.start()
+
+
+def stop_console_change_listener() -> None:
+    _console_change_listener_stop.set()
+    connection = _console_change_listener_connection
+    if connection is not None:
+        try:
+            connection.close()
+        except Exception:
+            pass
 
 
 def dynamic_reforecast_event_due(session: Session, wave_id: int, reference: datetime,
@@ -4391,6 +4560,52 @@ def console_principal(request: FastAPIRequest) -> dict:
     if not principal:
         raise HTTPException(status_code=401, detail="Authentication required")
     return principal
+
+
+def sse_frame(event: str | None, payload: dict | None = None) -> str:
+    """Build a minimal Server-Sent Event frame without arbitrary text fields."""
+    lines = []
+    if event:
+        lines.append(f"event: {event}")
+    if payload is not None:
+        lines.append("data: " + json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    return "\n".join(lines) + "\n\n"
+
+
+@app.get("/api/stream/operations")
+async def stream_operational_changes(request: FastAPIRequest) -> StreamingResponse:
+    """Authenticated, compact server-to-console invalidation stream.
+
+    The stream deliberately carries no event message, object key, credential,
+    or operational snapshot.  The browser receives only IDs/topics and then
+    refreshes the relevant existing API panel.
+    """
+    console_principal(request)
+    token, subscriber = console_change_broadcaster.subscribe()
+
+    async def stream() -> Generator[str, None, None]:
+        try:
+            yield sse_frame("ready", {"protocol": 1, "heartbeat_seconds": CONSOLE_SSE_HEARTBEAT_SECONDS})
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    change = await asyncio.to_thread(
+                        subscriber.get, True, CONSOLE_SSE_HEARTBEAT_SECONDS,
+                    )
+                    yield sse_frame("change", change)
+                except Empty:
+                    # Comment frames keep proxies/NATs from silently closing
+                    # an otherwise idle operational console stream.
+                    yield ": keepalive\n\n"
+        finally:
+            console_change_broadcaster.unsubscribe(token)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    })
 
 
 def create_console_session(session: Session, user: ConsoleUser) -> tuple[str, str]:

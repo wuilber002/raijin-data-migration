@@ -1423,6 +1423,45 @@ def test_completed_empty_inventory_is_done_but_zero_byte_objects_remain_discover
     assert rows["zero-byte-file"]["operational_status"] == "DISCOVERED"
 
 
+def test_console_sse_change_hints_are_compact_and_fan_out_without_event_evidence():
+    import asyncio
+    from starlette.requests import Request
+    import app.main as main
+
+    payload = main.console_change_payload(
+        kind="DISCOVERY_COMPLETED", source_id=18, wave_id=None, migration_project_id=7,
+    )
+    assert payload == {
+        "kind": "DISCOVERY_COMPLETED", "source_id": 18, "wave_id": None,
+        "migration_project_id": 7,
+        "topics": ["discovery", "events", "operations", "sources"],
+    }
+    assert "message" not in payload and "object_key" not in payload
+    frame = main.sse_frame("change", payload)
+    assert frame.startswith("event: change\ndata: {") and frame.endswith("\n\n")
+
+    broadcaster = main.ConsoleChangeBroadcaster()
+    token, subscriber = broadcaster.subscribe()
+    broadcaster.publish(payload)
+    assert subscriber.get_nowait() == payload
+    broadcaster.unsubscribe(token)
+
+    async def first_stream_frame():
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        request = Request({"type": "http", "method": "GET", "path": "/api/stream/operations", "headers": []}, receive)
+        request.state.console_principal = {"id": 1, "role": "VIEWER"}
+        response = await main.stream_operational_changes(request)
+        frame = await anext(response.body_iterator)
+        await response.body_iterator.aclose()
+        return response, frame
+
+    response, frame = asyncio.run(first_stream_frame())
+    assert response.media_type == "text/event-stream"
+    assert response.headers["X-Accel-Buffering"] == "no"
+    assert 'event: ready' in frame and '"protocol":1' in frame
+
+
 def test_diagnostic_par_is_encrypted_prefix_scoped_and_preflighted_without_leaking_url(monkeypatch):
     from app import main
 

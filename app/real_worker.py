@@ -41,7 +41,7 @@ from app.duration_format import format_duration
 from app.oci_runtime import resolve_object_storage_namespace
 from app.main import (
     AwsConnection, DiscoveryJob, Event, MigrationProject, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, RuntimeLaneControlState, RuntimeLaneMeasurement, TransferQueueItem, TransferQueueState, merge_discovery_rows, refresh_source_inventory_size_cache, source_key_in_scope, source_prefix_values,
-    DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, complete_project_transfer_drain_if_idle, continuous_transfer_drain_requested, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, resolve_destination_object_key, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, select_global_transfer_lane_candidate, transfer_priority, utcnow,
+    DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, complete_project_transfer_drain_if_idle, continuous_transfer_drain_requested, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, publish_console_change_hint, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, resolve_destination_object_key, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, select_global_transfer_lane_candidate, transfer_priority, utcnow,
 )
 
 # Raiju is the operational worker identity.  Raikou is the separate governance
@@ -720,10 +720,14 @@ def event(session, kind: str, message: str, source_id: int | None = None, wave_i
                 Source.id == source_id
             ))
         elif wave_id is not None:
-            migration_project_id = session.scalar(select(Source.migration_project_id)
-                .join(Wave, Wave.source_id == Source.id).where(Wave.id == wave_id))
+            wave_context = session.execute(select(Source.id, Source.migration_project_id)
+                .join(Wave, Wave.source_id == Source.id).where(Wave.id == wave_id)).one_or_none()
+            if wave_context:
+                source_id, migration_project_id = wave_context
     session.add(Event(kind=kind, message=message, source_id=source_id, wave_id=wave_id,
                       migration_project_id=migration_project_id))
+    publish_console_change_hint(session, kind=kind, source_id=source_id, wave_id=wave_id,
+                                migration_project_id=migration_project_id)
 
 
 def connection_values(connection: AwsConnection) -> dict[str, str]:
