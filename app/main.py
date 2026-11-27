@@ -1493,6 +1493,9 @@ class RuntimeSettings(Base):
     # A PAR is a bearer capability. Only its encrypted form is persisted and
     # it is never included in API responses, diagnostics or application logs.
     diagnostic_par_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # OCI returns a prefix PAR URL at /o/ without the prefix itself. Preserve
+    # the non-secret configured prefix so every probe and bundle stays scoped.
+    diagnostic_par_prefix: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
@@ -2086,6 +2089,7 @@ class ConsoleApplicationLogRequest(BaseModel):
 
 class DiagnosticParUpdate(BaseModel):
     par_url: str = Field(min_length=32, max_length=3500)
+    prefix: str = Field(min_length=1, max_length=1024)
 
 
 class ConsoleAuthSettingsUpdate(BaseModel):
@@ -5129,16 +5133,23 @@ def normalize_diagnostic_par_url(value: str) -> str:
     return value.rstrip("/") + "/"
 
 
-def diagnostic_par_object_url(par_url: str, object_name: str) -> str:
+def normalize_diagnostic_par_prefix(value: str) -> str:
+    prefix = value.strip().lstrip("/")
+    if not prefix or "\x00" in prefix or prefix.startswith("../") or "/../" in prefix:
+        raise ValueError("Informe o prefixo OCI da PAR, sem caminho relativo")
+    return prefix.rstrip("/") + "/"
+
+
+def diagnostic_par_object_url(par_url: str, prefix: str, object_name: str) -> str:
     # quote preserves the controlled pseudo-directory separators while keeping
     # arbitrary input out of URL syntax. Object names are generated locally.
-    return par_url + quote(object_name.lstrip("/"), safe="/")
+    return par_url + quote(normalize_diagnostic_par_prefix(prefix) + object_name.lstrip("/"), safe="/")
 
 
-def diagnostic_par_preflight(par_url: str) -> None:
+def diagnostic_par_preflight(par_url: str, prefix: str) -> None:
     """Prove the configured PAR can overwrite and read its controlled probe."""
     probe_name = "_raijin-validation/probe.json"
-    probe_url = diagnostic_par_object_url(par_url, probe_name)
+    probe_url = diagnostic_par_object_url(par_url, prefix, probe_name)
     payload = json.dumps({"service": "raijin", "purpose": "diagnostic-par-preflight",
                           "checked_at": utcnow().isoformat()}, separators=(",", ":")).encode("utf-8")
     try:
@@ -5225,7 +5236,8 @@ def build_diagnostic_bundle(session: Session) -> tuple[bytes, str, dict]:
 
 @app.get("/api/admin/diagnostic-bundle")
 def diagnostic_bundle_status(session: Session = Depends(get_session)) -> dict:
-    return {"configured": bool(runtime_settings(session).diagnostic_par_encrypted)}
+    settings = runtime_settings(session)
+    return {"configured": bool(settings.diagnostic_par_encrypted and settings.diagnostic_par_prefix)}
 
 
 @app.put("/api/admin/diagnostic-bundle/par")
@@ -5233,9 +5245,12 @@ def configure_diagnostic_bundle_par(payload: DiagnosticParUpdate, request: FastA
                                     session: Session = Depends(get_session)) -> dict:
     try:
         par_url = normalize_diagnostic_par_url(payload.par_url)
+        prefix = normalize_diagnostic_par_prefix(payload.prefix)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    runtime_settings(session).diagnostic_par_encrypted = diagnostic_par_encrypt(par_url)
+    settings = runtime_settings(session)
+    settings.diagnostic_par_encrypted = diagnostic_par_encrypt(par_url)
+    settings.diagnostic_par_prefix = prefix
     auth_audit(session, "DIAGNOSTIC_PAR_CONFIGURED", actor_user_id=console_principal(request)["id"],
                target="configured", request=request)
     session.commit()
@@ -5249,7 +5264,8 @@ def upload_diagnostic_bundle(request: FastAPIRequest, session: Session = Depends
         raise HTTPException(status_code=428, detail="Configure uma PAR OCI com leitura e escrita antes de gerar o bundle")
     try:
         par_url = normalize_diagnostic_par_url(diagnostic_par_decrypt(settings.diagnostic_par_encrypted))
-        diagnostic_par_preflight(par_url)
+        prefix = normalize_diagnostic_par_prefix(settings.diagnostic_par_prefix or "")
+        diagnostic_par_preflight(par_url, prefix)
     except ValueError as error:
         auth_audit(session, "DIAGNOSTIC_BUNDLE_PAR_INVALID", actor_user_id=console_principal(request)["id"],
                    target="validation_failed", result="FAILED", request=request)
@@ -5257,7 +5273,7 @@ def upload_diagnostic_bundle(request: FastAPIRequest, session: Session = Depends
         raise HTTPException(status_code=422, detail=str(error)) from error
     content, filename, metadata = build_diagnostic_bundle(session)
     try:
-        target = diagnostic_par_object_url(par_url, filename)
+        target = diagnostic_par_object_url(par_url, prefix, filename)
         upload = Request(target, data=content, method="PUT", headers={
             "Content-Type": "application/zip", "Content-Length": str(len(content)),
             "User-Agent": "raijin-diagnostic-bundle/1",

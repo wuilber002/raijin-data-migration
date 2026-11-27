@@ -8,7 +8,7 @@ from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 
-PRODUCTION_SCHEMA_VERSION = 5
+PRODUCTION_SCHEMA_VERSION = 6
 REVISION_TABLE = "raijin_schema_revisions"
 MIGRATION_DESCRIPTIONS = {
     1: "Initial versioned Raijin production control-plane schema",
@@ -16,6 +16,7 @@ MIGRATION_DESCRIPTIONS = {
     3: "Add immutable checksums to production schema revision history",
     4: "Add durable import-driven continuous pipeline items",
     5: "Store encrypted OCI diagnostic bundle PAR",
+    6: "Store OCI diagnostic bundle PAR prefix",
 }
 
 
@@ -142,6 +143,27 @@ def migrate(engine: Engine, metadata: MetaData) -> int:
                 "checksum": migration_checksum(5, MIGRATION_DESCRIPTIONS[5]),
             })
             revision = 5
+        if revision < 6:
+            columns = ({column["name"] for column in inspect(connection).get_columns("runtime_settings")}
+                       if connection.dialect.has_table(connection, "runtime_settings") else set())
+            # Be defensive about a partially applied prior release: the v6
+            # expansion must leave the complete diagnostic-PAR schema.
+            if columns and "diagnostic_par_encrypted" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE runtime_settings ADD COLUMN diagnostic_par_encrypted TEXT"
+                ))
+                columns.add("diagnostic_par_encrypted")
+            if columns and "diagnostic_par_prefix" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE runtime_settings ADD COLUMN diagnostic_par_prefix VARCHAR(1024)"
+                ))
+            connection.execute(text(
+                f"INSERT INTO {REVISION_TABLE} (version, description, checksum) VALUES (6, :description, :checksum)"
+            ), {
+                "description": MIGRATION_DESCRIPTIONS[6],
+                "checksum": migration_checksum(6, MIGRATION_DESCRIPTIONS[6]),
+            })
+            revision = 6
         if revision >= 3:
             ensure_revision_checksums(connection)
         if revision != PRODUCTION_SCHEMA_VERSION:

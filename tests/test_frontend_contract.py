@@ -612,6 +612,7 @@ def test_console_application_logs_support_periods_and_download():
     assert "console-diagnostic-bundle" in script
     assert "/api/admin/diagnostic-bundle" in script
     assert "PAR OCI para pasta (leitura e escrita)" in script
+    assert "Prefixo da PAR" in script
 
 
 def test_console_disables_dynamic_migration_mutations_for_viewers():

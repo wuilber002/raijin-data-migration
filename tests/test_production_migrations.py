@@ -74,7 +74,7 @@ def test_v2_schema_expands_to_current_revision_without_recreating_control_plane_
         assert connection.dialect.has_table(connection, "import_pipeline_items")
 
 
-def test_v5_adds_encrypted_diagnostic_par_column_to_an_existing_runtime_settings_table():
+def test_v6_adds_diagnostic_par_fields_to_an_existing_runtime_settings_table():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     with engine.begin() as connection:
         connection.execute(text(
@@ -82,7 +82,7 @@ def test_v5_adds_encrypted_diagnostic_par_column_to_an_existing_runtime_settings
             "version INTEGER PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, description TEXT NOT NULL, checksum VARCHAR(64))"
         ))
         connection.execute(text("CREATE TABLE runtime_settings (id INTEGER PRIMARY KEY)"))
-        for version in range(1, 5):
+        for version in range(1, 6):
             connection.execute(text(
                 "INSERT INTO raijin_schema_revisions (version, description) VALUES (:version, :description)"
             ), {"version": version, "description": MIGRATION_DESCRIPTIONS[version]})
@@ -90,6 +90,7 @@ def test_v5_adds_encrypted_diagnostic_par_column_to_an_existing_runtime_settings
     with engine.connect() as connection:
         columns = {column["name"] for column in connection.dialect.get_columns(connection, "runtime_settings")}
         assert "diagnostic_par_encrypted" in columns
+        assert "diagnostic_par_prefix" in columns
 
 
 def test_newer_production_schema_is_rejected():

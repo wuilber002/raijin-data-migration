@@ -1380,7 +1380,8 @@ def test_diagnostic_par_is_encrypted_prefix_scoped_and_preflighted_without_leaki
     encrypted = main.diagnostic_par_encrypt(normalized)
     assert "token" not in encrypted
     assert main.diagnostic_par_decrypt(encrypted) == normalized
-    assert main.diagnostic_par_object_url(normalized, "bundles/a file.zip").endswith("bundles/a%20file.zip")
+    prefix = "HIAE/raijin-diagnostics/"
+    assert main.diagnostic_par_object_url(normalized, prefix, "bundles/a file.zip").endswith("HIAE/raijin-diagnostics/bundles/a%20file.zip")
 
     calls = []
     class Response:
@@ -1393,7 +1394,7 @@ def test_diagnostic_par_is_encrypted_prefix_scoped_and_preflighted_without_leaki
         calls.append((request.get_method(), request.full_url, timeout))
         return Response(b'{"purpose":"diagnostic-par-preflight"}')
     monkeypatch.setattr(main, "urlopen", fake_urlopen)
-    main.diagnostic_par_preflight(normalized)
+    main.diagnostic_par_preflight(normalized, prefix)
     assert [method for method, _, _ in calls] == ["PUT", "GET"]
     assert all("token" in url for _, url, _ in calls)  # sent only to OCI, never returned by helpers
 
