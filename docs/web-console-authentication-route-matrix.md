@@ -11,6 +11,7 @@ o release de compatibilidade permanece em `RAIJIN_WEB_AUTH_MODE=disabled`.
 | Sessão | `/api/auth/logout`, `/api/auth/me`, troca de senha | Usuário autenticado + CSRF nas mutações | Cookie opaco, `HttpOnly`, `SameSite=Lax`. |
 | Console HTML/estáticos | `/`, `/static/*` | Sessão válida, exceto ativos mínimos da tela de login | A console serve exclusivamente ao Raijin. |
 | Consulta operacional | `GET /api/*`, CSV, relatórios e downloads | `VIEWER` | Exceto rotas explicitamente administrativas ou internas nesta tabela. |
+| Atualização operacional em tempo real | `GET /api/stream/operations` | `VIEWER` | SSE autenticado; entrega apenas dicas compactas de invalidação, nunca logs, credenciais, chaves de objeto ou snapshots. |
 | Operação de migração | mutações de sources, discoveries, waves, queue, audit e pause/resume | `OPERATOR` | Inclui reprocessamento e ações que alteram filas ou waves. |
 | Administração | runtime mode, settings, AWS/OCI connections, pricing, project lifecycle | `ADMIN` | Inclui credenciais e limites operacionais. |
 | Administração de acesso | `/api/admin/users*`, `/api/admin/sessions*`, `/api/admin/auth-audit*` | `ADMIN` | Novas rotas de P2–P4. |

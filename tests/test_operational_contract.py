@@ -1459,6 +1459,7 @@ def test_console_sse_change_hints_are_compact_and_fan_out_without_event_evidence
     response, frame = asyncio.run(first_stream_frame())
     assert response.media_type == "text/event-stream"
     assert response.headers["X-Accel-Buffering"] == "no"
+    assert response.headers["Cache-Control"] == "no-cache, no-transform"
     assert 'event: ready' in frame and '"protocol":1' in frame
 
 
@@ -3858,7 +3859,7 @@ def test_dynamic_restore_slot_correction_is_persisted_independently_of_lane_fore
     assert "materially_changed_schedule(" in source
     assert "transfer_schedule_changed" in source
     assert "restore_schedule_changed" in source
-    assert "replan_dynamic_pipeline(session, settings, now=source_scheduler_clock(source).effective_now)" in source
+    assert "scheduler_now = now or source_scheduler_clock(run.source).effective_now" in source
 
 
 def test_restore_release_checks_maximum_buffer_after_adding_candidate_wave():

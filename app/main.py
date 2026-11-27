@@ -10450,6 +10450,11 @@ def list_sources(session: Session = Depends(get_session),
     # Deactivated sources remain selectable so their inventory, waves and
     # audit trail can still be consulted.  Execution paths continue to use
     # ``archived_at IS NULL`` as the backward-compatible active predicate.
+    # FastAPI resolves ``Query(False)`` to a bool for HTTP requests.  Keeping
+    # this explicit also makes direct callers (diagnostics and contract tests)
+    # use the full, non-compact representation instead of treating the Query
+    # metadata object as truthy.
+    compact_mode = compact if isinstance(compact, bool) else False
     sources = list(session.scalars(select(Source).order_by(Source.id)))
     source_ids = [s.id for s in sources]
     wave_statuses: dict[int, set[str]] = {}
@@ -10471,7 +10476,7 @@ def list_sources(session: Session = Depends(get_session),
     # and make navigation itself time out. The compact view relies on
     # source/wave state; the selected source still gets exact totals from
     # /summary.
-    total_rows = [] if compact else (session.execute(
+    total_rows = [] if compact_mode else (session.execute(
         select(ObjectRecord.source_id, func.count(ObjectRecord.id),
                func.coalesce(func.sum(case((ObjectRecord.state == ObjectState.VERIFIED, 1), else_=0)), 0),
                func.coalesce(func.sum(case((ObjectRecord.state.in_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]), 1), else_=0)), 0),
@@ -10504,7 +10509,7 @@ def list_sources(session: Session = Depends(get_session),
     def migration_status(source: Source) -> str:
         if completed_empty_inventory(source):
             return "COMPLETED"
-        if compact:
+        if compact_mode:
             statuses = wave_statuses.get(source.id, set())
             if statuses and statuses <= {"COMPLETED", "VERIFIED"}:
                 return "COMPLETED"
@@ -10559,7 +10564,7 @@ def list_sources(session: Session = Depends(get_session),
              "discovery_objects_inserted": s.discovery_objects_inserted,
              # Null means that a completed inventory is not available yet;
              # zero is a valid discovered inventory and is deliberately kept.
-             "inventory_size_bytes": ((s.discovery_size_bytes if compact else
+             "inventory_size_bytes": ((s.discovery_size_bytes if compact_mode else
                                          totals.get(s.id, (0, 0, 0, 0, 0))[4])
                                       if s.status == "DISCOVERED" else None),
              "last_discovery_mode": s.last_discovery_mode, "discovery_generation": s.discovery_generation,
