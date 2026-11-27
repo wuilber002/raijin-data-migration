@@ -548,6 +548,12 @@ class Source(Base):
     destination_size_mismatch_count: Mapped[int] = mapped_column(Integer, default=0)
     destination_metadata_mismatch_count: Mapped[int] = mapped_column(Integer, default=0)
     destination_extra_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Snapshot of the OCI listing from the latest destination validation. It
+    # supports an AWS-versus-OCI comparison without re-listing OCI in the UI.
+    destination_found_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    destination_found_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    destination_missing_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    destination_size_mismatch_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # The transfer forecast is frozen when the first restore is submitted.
     # It preserves what the operator was told at the beginning even when the
     # adaptive scheduler later changes worker allocation or wave timing.
@@ -2653,7 +2659,7 @@ def create_schema() -> None:
     }
     source_columns = {"discovery_requested_at": "TIMESTAMP WITH TIME ZONE", "discovery_started_at": "TIMESTAMP WITH TIME ZONE", "discovery_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "discovery_completed_at": "TIMESTAMP WITH TIME ZONE", "discovery_error": "TEXT", "discovery_continuation_token": "TEXT", "discovery_prefix_index": "INTEGER NOT NULL DEFAULT 0", "discovery_pages_completed": "INTEGER NOT NULL DEFAULT 0", "discovery_size_bytes": "BIGINT", "last_discovery_mode": "VARCHAR(32)", "discovery_generation": "INTEGER NOT NULL DEFAULT 0", "aws_connection_id": "INTEGER", "aws_endpoint_snapshot_json": "TEXT NOT NULL DEFAULT '{}'", "aws_bucket_region": "VARCHAR(64)", "migration_project_id": "BIGINT", "destination_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''", "destination_identity_copy": "BOOLEAN NOT NULL DEFAULT FALSE", "business_priority": "INTEGER NOT NULL DEFAULT 999", "continuous_transfer_drain_requested": "BOOLEAN NOT NULL DEFAULT FALSE", "continuous_transfer_drain_requested_at": "TIMESTAMP WITH TIME ZONE", "continuous_transfer_drain_completed_at": "TIMESTAMP WITH TIME ZONE"}
     source_columns["archived_at"] = "TIMESTAMP WITH TIME ZONE"
-    source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION", "completion_estimate_json": "TEXT NOT NULL DEFAULT '{}'"})
+    source_columns.update({"destination_validation_at": "TIMESTAMP WITH TIME ZONE", "destination_validation_status": "VARCHAR(32)", "destination_missing_count": "INTEGER NOT NULL DEFAULT 0", "destination_size_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_metadata_mismatch_count": "INTEGER NOT NULL DEFAULT 0", "destination_extra_count": "INTEGER NOT NULL DEFAULT 0", "destination_found_count": "BIGINT", "destination_found_bytes": "BIGINT", "destination_missing_bytes": "BIGINT", "destination_size_mismatch_bytes": "BIGINT", "completion_estimate_created_at": "TIMESTAMP WITH TIME ZONE", "completion_estimated_transfer_seconds": "DOUBLE PRECISION", "completion_estimate_json": "TEXT NOT NULL DEFAULT '{}'"})
     wave_columns = {"batch_job_id": "VARCHAR(128)", "batch_job_status": "VARCHAR(64)", "manifest_key": "VARCHAR(2048)", "manifest_etag": "VARCHAR(128)", "last_poll_at": "TIMESTAMP WITH TIME ZONE", "poll_count": "INTEGER NOT NULL DEFAULT 0", "pipeline_run_id": "BIGINT", "availability_head_requests": "BIGINT NOT NULL DEFAULT 0", "availability_poll_elapsed_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "availability_throttle_retries": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_objects": "INTEGER NOT NULL DEFAULT 0", "last_availability_poll_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "planner_mode": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'", "predicted_transfer_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "prediction_samples": "INTEGER NOT NULL DEFAULT 0", "predicted_restore_first_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_complete_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "predicted_restore_confidence_seconds": "DOUBLE PRECISION NOT NULL DEFAULT 0", "active_transfer_workers": "INTEGER NOT NULL DEFAULT 0", "planned_restore_at": "TIMESTAMP WITH TIME ZONE", "restore_submission_deadline_at": "TIMESTAMP WITH TIME ZONE", "planned_transfer_start_at": "TIMESTAMP WITH TIME ZONE", "restore_observed_at": "TIMESTAMP WITH TIME ZONE", "first_restore_available_at": "TIMESTAMP WITH TIME ZONE", "last_restore_available_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_started_at": "TIMESTAMP WITH TIME ZONE", "transfer_observed_completed_at": "TIMESTAMP WITH TIME ZONE", "transfer_clock_held": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_required": "BOOLEAN NOT NULL DEFAULT FALSE", "restore_reapproval_reason": "TEXT", "restore_reapproval_detected_at": "TIMESTAMP WITH TIME ZONE", "transfer_release_policy": "VARCHAR(32) NOT NULL DEFAULT 'AS_OBJECTS_AVAILABLE'"}
     existing_runtime_columns = {column["name"] for column in inspect(engine).get_columns("runtime_settings")}
     existing_source_columns = {column["name"] for column in inspect(engine).get_columns("sources")}
@@ -10674,7 +10680,11 @@ def list_sources(session: Session = Depends(get_session),
              "pipeline_restore_days": (int(latest_pipeline_by_source[s.id].restore_days or 0)
                                        if s.id in latest_pipeline_by_source else 0),
              "destination_validation": {"status": s.destination_validation_status, "at": s.destination_validation_at,
-                                        "missing": s.destination_missing_count, "size_mismatches": s.destination_size_mismatch_count},
+                                        "missing": s.destination_missing_count, "size_mismatches": s.destination_size_mismatch_count,
+                                        "metadata_mismatches": s.destination_metadata_mismatch_count, "extras": s.destination_extra_count,
+                                        "found_objects": s.destination_found_count, "found_bytes": s.destination_found_bytes,
+                                        "missing_bytes": s.destination_missing_bytes,
+                                        "size_mismatch_bytes": s.destination_size_mismatch_bytes},
              "migration_status": migration_status(s), "operational_status": operational_status(s),
              "can_delete": not source_has_executed_wave(session, s.id),
              "scope_conflicts": ([] if False else
@@ -11408,6 +11418,9 @@ def source_summary(source_id: int, session: Session = Depends(get_session)) -> d
             "destination_validation": {"status": source.destination_validation_status, "at": source.destination_validation_at,
                                        "missing": source.destination_missing_count, "size_mismatches": source.destination_size_mismatch_count,
                                        "metadata_mismatches": source.destination_metadata_mismatch_count, "extras": source.destination_extra_count,
+                                       "found_objects": source.destination_found_count, "found_bytes": source.destination_found_bytes,
+                                       "missing_bytes": source.destination_missing_bytes,
+                                       "size_mismatch_bytes": source.destination_size_mismatch_bytes,
                                        "current_for_modified_changes": bool(newest_pending_change and source.destination_validation_at and source.destination_validation_at >= newest_pending_change)},
             "discovery": {"status": source.status, "requested_at": source.discovery_requested_at,
                           "completed_at": source.discovery_completed_at, "error": source.discovery_error,
@@ -11843,9 +11856,18 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
         except Exception:
             metadata_mismatched.append(key)
     extras = sorted(key for key in found if key not in expected)
+    missing_bytes = sum(int(expected[key].size_bytes or 0) for key in missing)
+    size_mismatch_bytes = sum(
+        abs(int(expected[key].size_bytes or 0) - int(found[key] or 0))
+        for key in mismatched
+    )
     source.destination_validation_at = utcnow()
     source.destination_missing_count, source.destination_size_mismatch_count = len(missing), len(mismatched)
     source.destination_metadata_mismatch_count, source.destination_extra_count = len(metadata_mismatched), len(extras)
+    source.destination_found_count = len(found)
+    source.destination_found_bytes = sum(found.values())
+    source.destination_missing_bytes = missing_bytes
+    source.destination_size_mismatch_bytes = size_mismatch_bytes
     source.destination_validation_status = "VALID" if not missing and not mismatched and not metadata_mismatched else "DIFFERENT"
     adopted_keys = [
         key for key, obj in expected.items()
@@ -11890,7 +11912,7 @@ def validate_destination(source_id: int, session: Session = Depends(get_session)
         record_event(session, "DESTINATION_DIVERGENCE_REOPENED_WAVE", f"Wave reopened after OCI destination validation; {affected_objects} object(s) require reprocessing", source_id=source.id, wave_id=wave.id)
     record_event(session, "DESTINATION_VALIDATED", f"OCI destination reconciliation: {len(adopted_keys)} pre-existing object(s) adopted by key and size, {len(missing)} missing, {len(mismatched)} size mismatch(es), {len(metadata_mismatched)} Raijin provenance mismatch(es), {len(extras)} extra object(s)", source_id=source.id)
     session.commit()
-    return {"source_id": source.id, "status": source.destination_validation_status, "expected": len(expected), "found": len(found), "adopted": len(adopted_keys), "missing": len(missing), "size_mismatches": len(mismatched), "metadata_mismatches": len(metadata_mismatched), "extras": len(extras), "missing_examples": missing[:50], "size_mismatch_examples": mismatched[:50], "metadata_mismatch_examples": metadata_mismatched[:50], "extra_examples": extras[:50], "validated_at": source.destination_validation_at}
+    return {"source_id": source.id, "status": source.destination_validation_status, "expected": len(expected), "found": len(found), "found_bytes": source.destination_found_bytes, "missing_bytes": missing_bytes, "size_mismatch_bytes": size_mismatch_bytes, "adopted": len(adopted_keys), "missing": len(missing), "size_mismatches": len(mismatched), "metadata_mismatches": len(metadata_mismatched), "extras": len(extras), "missing_examples": missing[:50], "size_mismatch_examples": mismatched[:50], "metadata_mismatch_examples": metadata_mismatched[:50], "extra_examples": extras[:50], "validated_at": source.destination_validation_at}
 
 
 @app.get("/api/sources/{source_id}/inventory")

@@ -1347,6 +1347,14 @@ def test_source_selector_distinguishes_completed_empty_inventories_and_uses_done
     assert ".source-status-partial" in page
 
 
+def test_source_summary_replaces_internal_object_states_with_destination_comparison():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    assert "function destinationReconciliationMarkup" in page
+    assert "Comparação AWS × OCI" in page
+    assert "found_objects" in page and "missing_bytes" in page
+    assert "destination-difference" in page
+
+
 def test_console_uses_sse_invalidation_with_targeted_refresh_and_polling_fallback():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "new EventSource('/api/stream/operations')" in page

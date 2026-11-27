@@ -2902,6 +2902,9 @@ def test_destination_validation_adopts_matching_external_copy_without_raijin_met
     session.refresh(obj)
     assert result["status"] == "VALID"
     assert result["adopted"] == 1
+    assert result["found_bytes"] == 42
+    assert result["missing_bytes"] == 0
+    assert result["size_mismatch_bytes"] == 0
     assert obj.state == ObjectState.PRESENT_IN_DESTINATION
     assert obj.delivery_integrity_status == "OCI_PREEXISTING"
     assert destination_is_adoptable_external_copy(obj)
@@ -2909,6 +2912,8 @@ def test_destination_validation_adopts_matching_external_copy_without_raijin_met
     summary = source_summary(source.id, session)
     assert summary["migration_status"] == "COMPLETED"
     assert summary["object_states"][ObjectState.PRESENT_IN_DESTINATION] == 1
+    assert summary["destination_validation"]["found_objects"] == 1
+    assert summary["destination_validation"]["found_bytes"] == 42
     session.close()
 
 
@@ -2919,6 +2924,44 @@ def test_destination_validation_keeps_raijin_provenance_requirement_after_wave_a
     })()
     assert destination_requires_raijin_provenance(obj)
     assert not destination_is_adoptable_external_copy(obj)
+
+
+def test_destination_validation_persists_aws_oci_volume_comparison(monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    source = Source(name="comparison", s3_bucket="source", aws_region="us-east-1",
+                    destination_bucket="destination", status="DISCOVERED")
+    session.add(source); session.flush()
+    session.add_all([
+        ObjectRecord(source_id=source.id, object_key="missing", destination_object_key="missing", size_bytes=100),
+        ObjectRecord(source_id=source.id, object_key="different", destination_object_key="different", size_bytes=200),
+    ])
+    session.commit()
+
+    class Client:
+        def list_objects(self, *_args, **_kwargs):
+            return SimpleNamespace(data=SimpleNamespace(
+                objects=[SimpleNamespace(name="different", size=170)], next_start_with=None
+            ))
+
+    fake_oci = SimpleNamespace(auth=SimpleNamespace(signers=SimpleNamespace(
+        InstancePrincipalsSecurityTokenSigner=lambda: object()
+    )))
+    monkeypatch.setitem(__import__("sys").modules, "oci", fake_oci)
+    monkeypatch.setattr("app.main.read_oci_runtime_config", lambda: object())
+    monkeypatch.setattr("app.main.oci_object_storage_client", lambda *_args, **_kwargs: Client())
+    monkeypatch.setattr("app.main.resolve_object_storage_namespace", lambda *_args, **_kwargs: ("namespace", "tenancy"))
+
+    result = validate_destination(source.id, session)
+    summary = source_summary(source.id, session)
+
+    assert result["status"] == "DIFFERENT"
+    assert result["found"] == 1 and result["found_bytes"] == 170
+    assert result["missing"] == 1 and result["missing_bytes"] == 100
+    assert result["size_mismatches"] == 1 and result["size_mismatch_bytes"] == 30
+    assert summary["destination_validation"]["found_objects"] == 1
+    assert summary["destination_validation"]["missing_bytes"] == 100
 
 
 def test_multipart_size_runtime_setting_has_safe_bounds():
