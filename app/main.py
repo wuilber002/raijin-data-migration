@@ -13944,6 +13944,10 @@ def list_project_waves(project_id: int, source_id: int | None = Query(default=No
             "requested": bool(project.continuous_transfer_drain_requested),
             "requested_at": project.continuous_transfer_drain_requested_at,
             "completed_at": project.continuous_transfer_drain_completed_at,
+            # The project screen must show the effective admission state.  A
+            # global drain supersedes this project's own switch, so the UI can
+            # offer the operator the correct (global) resume action.
+            "blocked_by_global": bool(runtime_settings(session).continuous_transfer_drain_requested),
         },
     }
 

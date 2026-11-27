@@ -1199,7 +1199,7 @@ def test_project_is_required_before_the_ui_can_create_a_source():
     assert 'id="migration-project-refresh" title="Atualizar projetos"' in page
     assert "function syncSourceCreationProjectState()" in page
     assert "action.disabled=!projectId" in page
-    assert "payload.migration_project_id=projectId" in page
+    assert "payload.migration_project_id=creationProjectId" in page
     assert "payload.destination_prefix=payload.destination_identity_copy?'/':b('#source-destination-prefix')" in page
     assert 'id="source-destination-prefix"' in page
 
@@ -1929,6 +1929,9 @@ def test_continuous_transfer_drain_has_global_and_source_controls_with_completio
     assert "<span class=\"transfer-stop-icon\" aria-hidden=\"true\">■</span> Parar e drenar transfers" in page
     assert "button.className='secondary source-transfer-drain-action'" in page
     assert ".transfer-stop-icon{color:#ef4444" in page
+    assert "transfer-drain-resume-attention" in page
+    assert "data-drain-help" in page
+    assert "Retomar transferências globais" in page
 
 
 def test_project_waves_are_aggregated_without_replacing_source_waves():

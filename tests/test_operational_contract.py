@@ -892,6 +892,7 @@ def test_project_transfer_drain_preserves_source_waves_and_blocks_admission_for_
         assert main.continuous_transfer_drain_requested(session, second.id) is True
         project_waves = main.list_project_waves(project.id, session=session)
         assert len(project_waves["waves"]) == 2
+        assert project_waves["transfer_drain"]["blocked_by_global"] is False
         assert [source["name"] for source in project_waves["sources"]] == [
             "project-drain-one", "project-drain-two"
         ]
@@ -899,6 +900,26 @@ def test_project_transfer_drain_preserves_source_waves_and_blocks_admission_for_
         resumed = main.resume_continuous_transfer_drain(session, project_id=project.id)
         assert resumed["scope"] == "PROJECT"
         assert resumed["resumed"] == 2
+
+
+def test_project_transfer_control_exposes_a_global_drain_as_the_effective_blocker():
+    import app.main as main
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        project = MigrationProject(name="global-drain-project")
+        source = Source(name="global-drain-source", s3_bucket="source", aws_region="us-east-1",
+                        destination_bucket="destination", migration_project=project)
+        session.add_all([project, source])
+        session.commit()
+
+        main.request_continuous_transfer_drain(session)
+        project_waves = main.list_project_waves(project.id, session=session)
+
+        assert project_waves["transfer_drain"]["requested"] is False
+        assert project_waves["transfer_drain"]["blocked_by_global"] is True
 
 
 def test_project_executive_summary_reports_inventory_and_delivered_oci_evidence():
