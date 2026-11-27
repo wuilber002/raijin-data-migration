@@ -1326,9 +1326,10 @@ def test_source_selector_exposes_one_operational_status_per_source():
         queued = Source(id=902, name="queued", s3_bucket="bucket-2", aws_region="us-east-1", destination_bucket="destination", status="DISCOVERED")
         transferring = Source(id=903, name="transferring", s3_bucket="bucket-3", aws_region="us-east-1", destination_bucket="destination", status="DISCOVERED")
         restoring = Source(id=904, name="restoring", s3_bucket="bucket-4", aws_region="us-east-1", destination_bucket="destination", status="DISCOVERED")
-        for source in (discovered, queued, transferring, restoring):
+        partial = Source(id=905, name="partial", s3_bucket="bucket-5", aws_region="us-east-1", destination_bucket="destination", status="DISCOVERED", destination_validation_status="DIFFERENT")
+        for source in (discovered, queued, transferring, restoring, partial):
             source.aws_connection = connection
-        session.add_all([discovered, queued, transferring, restoring]); session.flush()
+        session.add_all([discovered, queued, transferring, restoring, partial]); session.flush()
         session.add_all([
             Wave(id=901, source_id=queued.id, name="queued", max_bytes=1, restore_days=1, restore_tier="BULK", status="READY_FOR_RESTORE"),
             Wave(id=902, source_id=transferring.id, name="transferring", max_bytes=1, restore_days=1, restore_tier="BULK", status="TRANSFERRING"),
@@ -1339,7 +1340,7 @@ def test_source_selector_exposes_one_operational_status_per_source():
         session.commit()
         rows = list_sources(session)
         statuses = {row["name"]: row["operational_status"] for row in rows}
-        assert statuses == {"discovered": "DISCOVERED", "queued": "QUEUED", "transferring": "TRANSFERRING", "restoring": "RESTORING"}
+        assert statuses == {"discovered": "DISCOVERED", "queued": "QUEUED", "transferring": "TRANSFERRING", "restoring": "RESTORING", "partial": "PARTIAL"}
         discovered_row = next(row for row in rows if row["name"] == "discovered")
         assert discovered_row["inventory_size_bytes"] == 15
         restoring_row = next(row for row in rows if row["name"] == "restoring")

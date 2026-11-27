@@ -1342,7 +1342,9 @@ def test_source_selector_distinguishes_completed_empty_inventories_and_uses_done
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert "COMPLETED:['DONE','completed']" in page
     assert "COMPLETED_EMPTY:['DONE','completed-empty']" in page
+    assert "PARTIAL:['PARTIAL','partial']" in page
     assert ".source-status-completed-empty" in page
+    assert ".source-status-partial" in page
 
 
 def test_console_uses_sse_invalidation_with_targeted_refresh_and_polling_fallback():

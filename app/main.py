@@ -10621,6 +10621,12 @@ def list_sources(session: Session = Depends(get_session),
             return "QUEUED"
         if source.status == "DISCOVERING":
             return "DISCOVERING"
+        # Reconciliation is a distinct, later lifecycle step than discovery.
+        # Preserve active wave states above, but do not keep an evaluated,
+        # divergent source visually indistinguishable from one that was merely
+        # discovered and has never had its OCI destination checked.
+        if source.status == "DISCOVERED" and source.destination_validation_status == "DIFFERENT":
+            return "PARTIAL"
         if source.status == "DISCOVERED":
             return "DISCOVERED"
         return "CONFIGURED"
