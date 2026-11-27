@@ -848,6 +848,10 @@ class DynamicPipelineRun(Base):
     transfer_strategy: Mapped[str] = mapped_column(String(32), default="AFTER_ALL_RESTORED")
     scheduled_restores: Mapped[bool] = mapped_column(default=False)
     selection_prefix: Mapped[str] = mapped_column(String(1024), default="")
+    # Empty means every class discovered in this source.  A non-empty value is
+    # captured with the run so subsequent adaptive materialization cannot
+    # accidentally consume another storage class.
+    selection_storage_class: Mapped[str] = mapped_column(String(64), default="")
     # The dynamic pipeline consumes exactly one inventory generation. A later
     # rediscovery is the explicit operator-approved trigger for a new run.
     discovery_generation: Mapped[int] = mapped_column(Integer, default=0)
@@ -2039,6 +2043,7 @@ class WaveCreate(BaseModel):
     max_bytes: int = Field(gt=0, le=10 * 1024**4)
     restore_days: int = Field(ge=1, le=30)
     restore_tier: str = Field(pattern="^(BULK|STANDARD)$")
+    storage_class: str = Field(default="", max_length=64)
     transfer_release_policy: str = Field(
         default="AFTER_ALL_RESTORED",
         pattern="^(AFTER_ALL_RESTORED|AS_OBJECTS_AVAILABLE)$",
@@ -2055,6 +2060,7 @@ class AutomaticWaveCreate(BaseModel):
     restore_days: int = Field(ge=1, le=30)
     restore_tier: str = Field(pattern="^(BULK|STANDARD)$")
     prefix: str = Field(default="", max_length=1024)
+    storage_class: str = Field(default="", max_length=64)
     transfer_release_policy: str = Field(
         default="AFTER_ALL_RESTORED",
         pattern="^(AFTER_ALL_RESTORED|AS_OBJECTS_AVAILABLE)$",
@@ -2067,6 +2073,7 @@ class PrioritizedWaveImport(BaseModel):
     max_bytes: int = Field(gt=0, le=10 * 1024**4)
     restore_days: int = Field(ge=1, le=30)
     restore_tier: str = Field(pattern="^(BULK|STANDARD)$")
+    storage_class: str = Field(default="", max_length=64)
     transfer_release_policy: str = Field(
         default="AFTER_ALL_RESTORED",
         pattern="^(AFTER_ALL_RESTORED|AS_OBJECTS_AVAILABLE)$",
@@ -2078,6 +2085,7 @@ class DynamicWaveCreate(BaseModel):
     restore_days: int = Field(ge=1, le=30)
     restore_tier: str = Field(pattern="^(BULK|STANDARD)$")
     prefix: str = Field(default="", max_length=1024)
+    storage_class: str = Field(default="", max_length=64)
 
 
 class ClaimRequest(BaseModel):
@@ -2817,6 +2825,7 @@ def create_schema() -> None:
         for column, sql_type in {
             "restore_horizon_waves": "INTEGER NOT NULL DEFAULT 3",
             "selection_prefix": "VARCHAR(1024) NOT NULL DEFAULT ''",
+            "selection_storage_class": "VARCHAR(64) NOT NULL DEFAULT ''",
             "discovery_generation": "INTEGER NOT NULL DEFAULT 0",
             "next_sequence": "INTEGER NOT NULL DEFAULT 1",
         }.items():
@@ -12013,10 +12022,39 @@ def export_inventory(source_id: int, session: Session = Depends(get_session)) ->
     return StreamingResponse(iter([content.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="source-{source_id}-inventory.csv"'})
 
 
-def discovered_object_filters(source_id: int, prefix: str = "") -> list:
+def normalize_storage_class_filter(value: str | None) -> str:
+    """Normalize the UI's all-classes sentinel without trusting the client."""
+    normalized = str(value or "").strip().upper()
+    return "" if normalized in {"", "ALL", "ALL_CLASSES"} else normalized
+
+
+def require_discovered_storage_class(session: Session, source_id: int, value: str | None) -> str:
+    """Ensure a requested class was actually seen in this source discovery."""
+    storage_class = normalize_storage_class_filter(value)
+    if not storage_class:
+        return ""
+    predicate = ObjectRecord.storage_class.is_(None) if storage_class == "UNKNOWN" else func.upper(ObjectRecord.storage_class) == storage_class
+    found = session.scalar(select(ObjectRecord.id).where(
+        ObjectRecord.source_id == source_id,
+        ObjectRecord.is_current_revision.is_(True),
+        predicate,
+    ).limit(1))
+    if found is None:
+        raise HTTPException(status_code=422, detail=(
+            f"Storage class '{storage_class}' is not available in the current source discovery"
+        ))
+    return storage_class
+
+
+def discovered_object_filters(source_id: int, prefix: str = "", storage_class: str = "") -> list:
     filters = [ObjectRecord.source_id == source_id, ObjectRecord.is_current_revision.is_(True), ObjectRecord.state == ObjectState.DISCOVERED]
     if prefix.strip():
         filters.append(ObjectRecord.object_key.startswith(prefix.strip()))
+    selected_class = normalize_storage_class_filter(storage_class)
+    if selected_class == "UNKNOWN":
+        filters.append(ObjectRecord.storage_class.is_(None))
+    elif selected_class:
+        filters.append(func.upper(ObjectRecord.storage_class) == selected_class)
     return filters
 
 
@@ -12063,8 +12101,9 @@ def parse_prioritized_wave_import(content: str, expected_bucket: str) -> tuple[l
     return keys, duplicates
 
 
-def prioritized_wave_import_selection(session: Session, source_id: int, keys: list[str], *, lock: bool = False) -> tuple[list[ObjectRecord], list[str], list[ObjectRecord]]:
-    """Return eligible objects in file order plus missing and unavailable entries."""
+def prioritized_wave_import_selection(session: Session, source_id: int, keys: list[str], *,
+                                      storage_class: str = "", lock: bool = False) -> tuple[list[ObjectRecord], list[str], list[ObjectRecord], list[ObjectRecord]]:
+    """Return eligible objects in file order plus missing, unavailable and class-mismatched entries."""
     rows_by_key: dict[str, ObjectRecord] = {}
     for start in range(0, len(keys), PRIORITIZED_WAVE_IMPORT_QUERY_CHUNK):
         query = select(ObjectRecord).where(
@@ -12079,15 +12118,19 @@ def prioritized_wave_import_selection(session: Session, source_id: int, keys: li
     selected: list[ObjectRecord] = []
     missing: list[str] = []
     unavailable: list[ObjectRecord] = []
+    filtered_out: list[ObjectRecord] = []
+    selected_class = normalize_storage_class_filter(storage_class)
     for key in keys:
         row = rows_by_key.get(key)
         if row is None:
             missing.append(key)
+        elif selected_class and (str(row.storage_class or "UNKNOWN").upper() != selected_class):
+            filtered_out.append(row)
         elif row.state != ObjectState.DISCOVERED:
             unavailable.append(row)
         else:
             selected.append(row)
-    return selected, missing, unavailable
+    return selected, missing, unavailable, filtered_out
 
 
 def prioritized_wave_import_groups(objects: list[ObjectRecord], max_bytes: int) -> tuple[list[tuple[list[ObjectRecord], bool]], int]:
@@ -12116,7 +12159,10 @@ def prioritized_wave_import_groups(objects: list[ObjectRecord], max_bytes: int) 
 
 def prioritized_wave_import_preview(session: Session, source: Source, payload: PrioritizedWaveImport, *, lock: bool = False) -> dict:
     keys, duplicates = parse_prioritized_wave_import(payload.content, source.s3_bucket)
-    selected, missing, unavailable = prioritized_wave_import_selection(session, source.id, keys, lock=lock)
+    selected_class = require_discovered_storage_class(session, source.id, payload.storage_class)
+    selected, missing, unavailable, filtered_out = prioritized_wave_import_selection(
+        session, source.id, keys, storage_class=selected_class, lock=lock
+    )
     groups, oversized = prioritized_wave_import_groups(selected, payload.max_bytes)
     storage_classes: dict[str, dict[str, int]] = {}
     for item in selected:
@@ -12129,6 +12175,7 @@ def prioritized_wave_import_preview(session: Session, source: Source, payload: P
         "objects": selected,
         "missing": missing,
         "unavailable": unavailable,
+        "filtered_out": filtered_out,
         "duplicates": duplicates,
         "groups": groups,
         "oversized": oversized,
@@ -12455,7 +12502,7 @@ def automatic_dynamic_duration_limit(restore_days: int) -> tuple[int, int]:
 
 
 def dynamic_wave_plan(session: Session, source_id: int, max_bytes: int, target_transfer_seconds: int,
-                      max_objects: int, prefix: str = "") -> dict:
+                      max_objects: int, prefix: str = "", storage_class: str = "") -> dict:
     """Build, but do not persist, deterministic groups for the dynamic planner."""
     settings = runtime_settings(session)
     profiles = transfer_history_profiles(session, source_id, settings.multipart_part_size_mib)
@@ -12477,7 +12524,7 @@ def dynamic_wave_plan(session: Session, source_id: int, max_bytes: int, target_t
         current_count, bytes_total, predicted_sum, sample_count = 0, 0, 0.0, 0
 
     rows = session.execute(select(ObjectRecord.size_bytes).where(
-        *discovered_object_filters(source_id, prefix)
+        *discovered_object_filters(source_id, prefix, storage_class)
     ).order_by(ObjectRecord.object_key, ObjectRecord.id)).yield_per(5000)
     for (size_bytes,) in rows:
         predicted, samples = predict_size_transfer_seconds(size_bytes, settings, profiles)
@@ -12507,7 +12554,7 @@ def dynamic_wave_plan(session: Session, source_id: int, max_bytes: int, target_t
 
 def next_dynamic_wave_plan(session: Session, source_id: int, max_bytes: int,
                            target_transfer_seconds: int, max_objects: int,
-                           prefix: str = "") -> tuple[dict | None, dict[str, dict], RuntimeSettings]:
+                           prefix: str = "", storage_class: str = "") -> tuple[dict | None, dict[str, dict], RuntimeSettings]:
     """Pack only the next unassigned dynamic wave.
 
     This is deliberately different from :func:`dynamic_wave_plan`, which is a
@@ -12520,7 +12567,7 @@ def next_dynamic_wave_plan(session: Session, source_id: int, max_bytes: int,
     object_count = bytes_total = prediction_samples = 0
     predicted_sum = 0.0
     rows = session.execute(select(ObjectRecord.size_bytes).where(
-        *discovered_object_filters(source_id, prefix)
+        *discovered_object_filters(source_id, prefix, storage_class)
     ).order_by(ObjectRecord.object_key, ObjectRecord.id)).yield_per(5000)
     for (size_bytes,) in rows:
         predicted, samples = predict_size_transfer_seconds(size_bytes, settings, profiles)
@@ -12570,12 +12617,12 @@ def dynamic_wave_schedule(run: DynamicPipelineRun, prior_waves: list[Wave],
 
 def assign_dynamic_wave_objects(session: Session, wave: Wave, source_id: int, prefix: str,
                                 plan: dict, settings: RuntimeSettings,
-                                profiles: dict[str, dict]) -> int:
+                                profiles: dict[str, dict], storage_class: str = "") -> int:
     """Assign the exact next deterministic slice without retaining payload rows."""
     assigned = 0
     mappings: list[dict] = []
     rows = session.execute(select(ObjectRecord.id, ObjectRecord.size_bytes).where(
-        *discovered_object_filters(source_id, prefix)
+        *discovered_object_filters(source_id, prefix, storage_class)
     ).order_by(ObjectRecord.object_key, ObjectRecord.id).limit(plan["object_count"])).yield_per(5000)
     for object_id, size_bytes in rows:
         prediction, _samples = predict_size_transfer_seconds(size_bytes, settings, profiles)
@@ -12870,7 +12917,7 @@ def materialize_dynamic_pipeline_horizon(session: Session, settings: RuntimeSett
     while len(active) < horizon:
         plan, profiles, planner_settings = next_dynamic_wave_plan(
             session, source.id, run.target_max_bytes, run.target_transfer_seconds,
-            run.max_objects, run.selection_prefix,
+            run.max_objects, run.selection_prefix, run.selection_storage_class,
         )
         if not plan:
             break
@@ -12905,7 +12952,8 @@ def materialize_dynamic_pipeline_horizon(session: Session, settings: RuntimeSett
         session.add(wave)
         session.flush()
         assigned = assign_dynamic_wave_objects(session, wave, source.id, run.selection_prefix,
-                                                plan, planner_settings, profiles)
+                                                plan, planner_settings, profiles,
+                                                run.selection_storage_class)
         record_event(
             session, "DYNAMIC_WAVE_MATERIALIZED",
             f"Dynamic pipeline run {run.id} materialized wave '{wave.name}' with {assigned} object(s) and {plan['bytes']} byte(s); predicted transfer {format_duration(plan['predicted_transfer_seconds'])} from {plan['prediction_samples']} historical sample(s)",
@@ -12923,13 +12971,13 @@ def materialize_dynamic_pipeline_horizon(session: Session, settings: RuntimeSett
     return created
 
 
-def next_wave_objects(session: Session, source_id: int, max_bytes: int, prefix: str = "") -> tuple[list[ObjectRecord], bool]:
+def next_wave_objects(session: Session, source_id: int, max_bytes: int, prefix: str = "", storage_class: str = "") -> tuple[list[ObjectRecord], bool]:
     """Select the next deterministic group without loading the full inventory."""
     selected: list[ObjectRecord] = []
     remaining = max_bytes
     last_key: str | None = None
     last_id: int | None = None
-    filters = discovered_object_filters(source_id, prefix)
+    filters = discovered_object_filters(source_id, prefix, storage_class)
     while True:
         keyset = []
         if last_key is not None and last_id is not None:
@@ -12967,9 +13015,11 @@ def automatic_wave_name(session: Session, source: Source, prefix: str, sequence:
 @app.get("/api/sources/{source_id}/waves/preview")
 def preview_automatic_waves(source_id: int, max_bytes: int = Query(gt=0, le=10 * 1024**4),
                             prefix: str = Query(default="", max_length=1024),
+                            storage_class: str = Query(default="", max_length=64),
                             session: Session = Depends(get_session)) -> dict:
     active_source_or_409(session, source_id)
-    filters = discovered_object_filters(source_id, prefix)
+    selected_class = require_discovered_storage_class(session, source_id, storage_class)
+    filters = discovered_object_filters(source_id, prefix, selected_class)
     objects, total_bytes = session.execute(
         select(func.count(ObjectRecord.id), func.coalesce(func.sum(ObjectRecord.size_bytes), 0)).where(*filters)
     ).one()
@@ -13001,7 +13051,8 @@ def create_wave(source_id: int, payload: WaveCreate, session: Session = Depends(
     require_non_overlapping_source_scope(session, source)
     if session.scalar(select(Wave).where(Wave.source_id == source_id, Wave.name == payload.name)):
         raise HTTPException(status_code=409, detail="Wave name already exists for this source")
-    objects, oversized = next_wave_objects(session, source_id, payload.max_bytes)
+    selected_class = require_discovered_storage_class(session, source_id, payload.storage_class)
+    objects, oversized = next_wave_objects(session, source_id, payload.max_bytes, storage_class=selected_class)
     if not objects:
         raise HTTPException(status_code=409, detail="No discovered objects are available for this wave")
     wave = assign_wave(session, source.id, payload.name, payload.max_bytes, payload.restore_days,
@@ -13017,7 +13068,8 @@ def create_automatic_waves(source_id: int, payload: AutomaticWaveCreate, session
     source = active_source_or_409(session, source_id)
     require_dynamic_pipeline_rediscovery(session, source)
     require_non_overlapping_source_scope(session, source)
-    preview = preview_automatic_waves(source_id, payload.max_bytes, payload.prefix, session)
+    selected_class = require_discovered_storage_class(session, source_id, payload.storage_class)
+    preview = preview_automatic_waves(source_id, payload.max_bytes, payload.prefix, selected_class, session)
     if not preview["objects"]:
         raise HTTPException(status_code=409, detail="No discovered objects match this automatic-wave selection")
     if preview["estimated_waves"] > preview["max_automatic_waves"]:
@@ -13026,7 +13078,7 @@ def create_automatic_waves(source_id: int, payload: AutomaticWaveCreate, session
     sequence = 1
     total_objects = total_bytes = oversized_waves = 0
     while True:
-        objects, oversized = next_wave_objects(session, source_id, payload.max_bytes, payload.prefix)
+        objects, oversized = next_wave_objects(session, source_id, payload.max_bytes, payload.prefix, selected_class)
         if not objects:
             break
         name = automatic_wave_name(session, source, payload.prefix, sequence)
@@ -13059,6 +13111,11 @@ def prioritized_wave_import_response(plan: dict) -> dict:
             {"key": item.object_key, "state": item.state, "wave_id": item.wave_id}
             for item in plan["unavailable"][:10]
         ],
+        "filtered_out": len(plan["filtered_out"]),
+        "filtered_out_examples": [
+            {"key": item.object_key, "storage_class": item.storage_class or "UNKNOWN"}
+            for item in plan["filtered_out"][:10]
+        ],
     }
 
 
@@ -13078,7 +13135,7 @@ def create_prioritized_import_waves(source_id: int, payload: PrioritizedWaveImpo
     require_dynamic_pipeline_rediscovery(session, source)
     require_non_overlapping_source_scope(session, source)
     plan = prioritized_wave_import_preview(session, source, payload, lock=True)
-    if plan["missing"] or plan["unavailable"]:
+    if plan["missing"] or plan["unavailable"] or plan["filtered_out"]:
         raise HTTPException(status_code=409, detail=(
             "The import changed since its preview: some objects are absent from the current discovery or are already assigned. Refresh the preview before creating waves."
         ))
@@ -13115,7 +13172,7 @@ def create_import_continuous_pipeline(source_id: int, payload: PrioritizedWaveIm
     require_dynamic_pipeline_rediscovery(session, source)
     require_non_overlapping_source_scope(session, source)
     plan = prioritized_wave_import_preview(session, source, payload, lock=True)
-    if plan["missing"] or plan["unavailable"]:
+    if plan["missing"] or plan["unavailable"] or plan["filtered_out"]:
         raise HTTPException(status_code=409, detail=(
             "The import is not valid for this discovery: every URI must exist and be available before the pipeline can start."
         ))
@@ -14008,7 +14065,7 @@ def repackage_unsubmitted_dynamic_waves(session: Session, settings: RuntimeSetti
     for wave in mutable:
         plan, latest_profiles, planner_settings = next_dynamic_wave_plan(
             session, source.id, run.target_max_bytes, run.target_transfer_seconds,
-            run.max_objects, run.selection_prefix,
+            run.max_objects, run.selection_prefix, run.selection_storage_class,
         )
         if plan is None:
             # A concurrent discovery/operation should not silently delete a
@@ -14039,7 +14096,8 @@ def repackage_unsubmitted_dynamic_waves(session: Session, settings: RuntimeSetti
         wave.prediction_samples = plan["prediction_samples"]
         wave.planned_restore_at, wave.planned_transfer_start_at = restore_at, transfer_at
         assign_dynamic_wave_objects(session, wave, source.id, run.selection_prefix,
-                                    plan, planner_settings, latest_profiles or profiles)
+                                    plan, planner_settings, latest_profiles or profiles,
+                                    run.selection_storage_class)
         current_ids = tuple(session.scalars(select(ObjectRecord.id).where(
             ObjectRecord.wave_id == wave.id
         ).order_by(ObjectRecord.object_key, ObjectRecord.id)))
@@ -14548,11 +14606,13 @@ def replan_dynamic_pipeline(session: Session, settings: RuntimeSettings, now: da
 def preview_dynamic_waves(source_id: int, prefix: str = Query(default="", max_length=1024),
                           restore_days: int = Query(ge=1, le=30),
                           restore_tier: str = Query(default="BULK", pattern="^(BULK|STANDARD)$"),
+                          storage_class: str = Query(default="", max_length=64),
                           session: Session = Depends(get_session)) -> dict:
     source = active_source_or_409(session, source_id)
+    selected_class = require_discovered_storage_class(session, source_id, storage_class)
     target_transfer_seconds, reserve_seconds = automatic_dynamic_duration_limit(restore_days)
     result = dynamic_wave_plan(session, source_id, DYNAMIC_PLATFORM_MAX_BYTES, target_transfer_seconds,
-                               DYNAMIC_PLATFORM_MAX_OBJECTS, prefix)
+                               DYNAMIC_PLATFORM_MAX_OBJECTS, prefix, selected_class)
     plans = result["waves"]
     for plan in plans:
         plan["restore_tier"] = restore_tier
@@ -14590,10 +14650,11 @@ def create_dynamic_waves(source_id: int, payload: DynamicWaveCreate, session: Se
     require_dynamic_pipeline_rediscovery(session, source)
     require_non_overlapping_source_scope(session, source)
     settings = runtime_settings(session)
+    selected_class = require_discovered_storage_class(session, source_id, payload.storage_class)
     target_transfer_seconds, reserve_seconds = automatic_dynamic_duration_limit(payload.restore_days)
     matching_objects, matching_bytes = session.execute(select(
         func.count(ObjectRecord.id), func.coalesce(func.sum(ObjectRecord.size_bytes), 0)
-    ).where(*discovered_object_filters(source_id, payload.prefix))).one()
+    ).where(*discovered_object_filters(source_id, payload.prefix, selected_class))).one()
     if not matching_objects:
         raise HTTPException(status_code=409, detail="No discovered objects match this dynamic-wave selection")
     run = DynamicPipelineRun(
@@ -14603,7 +14664,8 @@ def create_dynamic_waves(source_id: int, payload: DynamicWaveCreate, session: Se
         max_objects=DYNAMIC_PLATFORM_MAX_OBJECTS, restore_safety_seconds=settings.dynamic_restore_safety_seconds,
         restore_days=payload.restore_days, restore_tier=payload.restore_tier,
         transfer_strategy="AS_OBJECTS_AVAILABLE", scheduled_restores=True,
-        selection_prefix=payload.prefix.strip(), discovery_generation=int(source.discovery_generation or 0), next_sequence=1,
+        selection_prefix=payload.prefix.strip(), selection_storage_class=selected_class,
+        discovery_generation=int(source.discovery_generation or 0), next_sequence=1,
         restore_horizon_waves=settings.dynamic_restore_horizon_waves,
         historical_samples=sum(value["samples"] for value in transfer_history_profiles(
             session, source.id, settings.multipart_part_size_mib

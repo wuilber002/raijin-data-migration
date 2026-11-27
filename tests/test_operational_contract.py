@@ -75,6 +75,12 @@ def test_prioritized_wave_import_preserves_file_order_and_only_packs_discovered_
             {"storage_class": "DEEP_ARCHIVE", "objects": 1, "bytes": 6},
             {"storage_class": "GLACIER", "objects": 1, "bytes": 6},
         ]
+        glacier_only = prioritized_wave_import_preview(session, source, PrioritizedWaveImport(
+            content="s3://priority-bucket/second\ns3://priority-bucket/first",
+            max_bytes=10, restore_days=7, restore_tier="BULK", storage_class="GLACIER",
+        ))
+        assert [item.object_key for item in glacier_only["objects"]] == ["first"]
+        assert [item.object_key for item in glacier_only["filtered_out"]] == ["second"]
 
 
 def test_prioritized_wave_import_rejects_uri_from_a_different_bucket():
