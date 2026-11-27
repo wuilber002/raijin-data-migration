@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine, text
 
 from app.main import Base
@@ -27,6 +30,15 @@ def test_production_baseline_is_explicit_and_idempotent():
         assert [(version, description) for version, description, _ in rows] == list(MIGRATION_DESCRIPTIONS.items())
         assert all(checksum == migration_checksum(version, description) for version, description, checksum in rows)
     assert migrate(engine, metadata) == PRODUCTION_SCHEMA_VERSION
+
+
+def test_release_manifest_declares_current_production_schema_revision():
+    manifest = json.loads((Path(__file__).resolve().parents[1] / "release-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["contracts"]["database_schema"] == PRODUCTION_SCHEMA_VERSION
+    assert manifest["database_migration"] == {
+        "required_revision": PRODUCTION_SCHEMA_VERSION,
+        "mode": "EXPAND_ONLY",
+    }
 
 
 def test_production_schema_checksum_detects_history_tampering():
