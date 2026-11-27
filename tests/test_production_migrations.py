@@ -93,6 +93,24 @@ def test_v6_adds_diagnostic_par_fields_to_an_existing_runtime_settings_table():
         assert "diagnostic_par_prefix" in columns
 
 
+def test_v7_adds_intelligent_tiering_archive_status_to_existing_objects_table():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE raijin_schema_revisions ("
+            "version INTEGER PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, description TEXT NOT NULL, checksum VARCHAR(64))"
+        ))
+        connection.execute(text("CREATE TABLE objects (id INTEGER PRIMARY KEY)"))
+        for version in range(1, 7):
+            connection.execute(text(
+                "INSERT INTO raijin_schema_revisions (version, description) VALUES (:version, :description)"
+            ), {"version": version, "description": MIGRATION_DESCRIPTIONS[version]})
+    assert migrate(engine, MetaData()) == PRODUCTION_SCHEMA_VERSION
+    with engine.connect() as connection:
+        columns = {column["name"] for column in connection.dialect.get_columns(connection, "objects")}
+        assert "archive_status" in columns
+
+
 def test_newer_production_schema_is_rejected():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     metadata = MetaData()

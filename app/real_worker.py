@@ -41,7 +41,7 @@ from app.duration_format import format_duration
 from app.oci_runtime import resolve_object_storage_namespace
 from app.main import (
     AwsConnection, DiscoveryJob, Event, MigrationProject, MultipartCheckpointPart, ObjectRecord, ObjectState, RestoreAttempt, RestoreObjectResult, SessionLocal, Source, Task, TaskState, TransferAutoscaleState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, RuntimeLaneControlState, RuntimeLaneMeasurement, TransferQueueItem, TransferQueueState, merge_discovery_rows, refresh_source_inventory_size_cache, source_key_in_scope, source_prefix_values,
-    DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, complete_project_transfer_drain_if_idle, continuous_transfer_drain_requested, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, object_destination_key, parse_aws_connection_payload, publish_console_change_hint, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, resolve_destination_object_key, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, select_global_transfer_lane_candidate, transfer_priority, utcnow,
+    DynamicPipelineRun, RAIJU_MIN_WORKERS, TRANSFER_LANE_CLAIM_CANDIDATE_PAGE_SIZE, Wave, capture_source_completion_estimate, cloud_backend, complete_project_transfer_drain_if_idle, continuous_transfer_drain_requested, enqueue_available_transfer_objects, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalized_archive_status, object_destination_key, object_requires_restore, parse_aws_connection_payload, publish_console_change_hint, read_oci_runtime_config, reconcile_archived_source_work, refresh_dynamic_pipeline_run, refresh_due_global_aws_pricing, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, replan_dynamic_pipeline, resolve_destination_object_key, restore_availability_poll_delay_seconds, restore_result_diagnostics, runtime_context, runtime_settings, select_global_transfer_lane_candidate, transfer_priority, utcnow,
 )
 
 # Raiju is the operational worker identity.  Raikou is the separate governance
@@ -91,7 +91,18 @@ RAIJU_BOOTSTRAP_WORKERS = 8
 # chosen normal Raiju is still completing its current object.  Urgent objects
 # remain eligible for the next free slot at all times.
 COOPERATIVE_PREEMPTION_COOLDOWN_SECONDS = 60
+# Historical rows can contain the two legacy pseudo classes. New rows keep
+# ``INTELLIGENT_TIERING`` plus its HeadObject ``archive_status`` instead.
 ARCHIVE_CLASSES = {"GLACIER", "DEEP_ARCHIVE", "INTELLIGENT_TIERING_ARCHIVE_ACCESS", "INTELLIGENT_TIERING_DEEP_ARCHIVE_ACCESS"}
+
+
+def intelligent_tiering_archive_object(obj: ObjectRecord) -> bool:
+    """Identify current and pre-v7 representations of an IT archive object."""
+    return str(getattr(obj, "storage_class", "") or "").upper() in {
+        "INTELLIGENT_TIERING",
+        "INTELLIGENT_TIERING_ARCHIVE_ACCESS",
+        "INTELLIGENT_TIERING_DEEP_ARCHIVE_ACCESS",
+    }
 # A lane hold protects virtual restore-retention time while Raiju owns durable
 # work. Rechecking the same restore every second does not make that work
 # faster; it only churns the governance queue and event history.
@@ -1414,6 +1425,7 @@ def import_s3_inventory_manifest(session, source: Source, settings, job: Discove
                             "size_bytes": size,
                             "etag": (row.get("ETag") or "").strip('"') or None,
                             "storage_class": (row.get("StorageClass") or "").strip() or None,
+                            "archive_status": normalized_archive_status(row.get("IntelligentTieringAccessTier")),
                             "last_modified": inventory_timestamp(row.get("LastModifiedDate")),
                             "state": ObjectState.DISCOVERED,
                         })
@@ -1586,14 +1598,21 @@ def restored_pending_archives_from_head(s3, source: Source, archives: list[Objec
     concurrency = max(1, int(getattr(connection, "restore_poll_concurrency", RESTORE_POLL_HEAD_CONCURRENCY) or RESTORE_POLL_HEAD_CONCURRENCY))
     # Plain immutable values remain safe after a progress callback commits the
     # SQLAlchemy session and expires ORM instances.
-    targets = [(obj.id, obj.object_key, obj.version_id) for obj in archives]
+    targets = [(obj.id, obj.object_key, obj.version_id, str(getattr(obj, "storage_class", "") or "").upper()) for obj in archives]
 
-    def check(target: tuple[int, str, str | None]) -> tuple[int, datetime | None] | None:
-        object_id, object_key, version_id = target
+    def check(target: tuple[int, str, str | None, str]) -> tuple[int, datetime | None] | None:
+        object_id, object_key, version_id, storage_class = target
         arguments = {"Bucket": bucket_name, "Key": object_key}
         if version_id:
             arguments["VersionId"] = version_id
         response = s3.head_object(**arguments)
+        # An Intelligent-Tiering archive restore returns the object to
+        # Frequent Access. It therefore has no temporary Restore expiry; its
+        # ArchiveStatus simply disappears once it is readable.
+        if storage_class in {"INTELLIGENT_TIERING", "INTELLIGENT_TIERING_ARCHIVE_ACCESS", "INTELLIGENT_TIERING_DEEP_ARCHIVE_ACCESS"}:
+            if normalized_archive_status(response.get("ArchiveStatus")) is None:
+                return object_id, None
+            return None
         if restored_from_head_response(response):
             return object_id, restore_expiry_from_head_response(response)
         return None
@@ -1691,7 +1710,63 @@ def record_restore_forecast_delay(session, settings, wave: Wave, attempt: Restor
 
 
 def archive_objects(session, wave_id: int) -> list[ObjectRecord]:
-    return list(session.scalars(select(ObjectRecord).where(ObjectRecord.wave_id == wave_id, ObjectRecord.storage_class.in_(ARCHIVE_CLASSES), ObjectRecord.state == ObjectState.WAVE_ASSIGNED).order_by(ObjectRecord.object_key)))
+    return [
+        obj for obj in session.scalars(select(ObjectRecord).where(
+            ObjectRecord.wave_id == wave_id,
+            ObjectRecord.state == ObjectState.WAVE_ASSIGNED,
+        ).order_by(ObjectRecord.object_key))
+        if object_requires_restore(obj)
+    ]
+
+
+def classify_intelligent_tiering_access(s3, source: Source, objects: list[ObjectRecord]) -> tuple[dict[int, str | None], dict[str, int]]:
+    """Observe Intelligent-Tiering archive status for only one pending wave.
+
+    ListObjectsV2 never reveals this information.  A targeted, rate-limited
+    HeadObject pass avoids an inventory-wide API storm while ensuring that a
+    later GetObject is never used as a probe for an archived object.
+    """
+    targets = [
+        (obj.id, obj.object_key, obj.version_id)
+        for obj in objects
+        if str(obj.storage_class or "").upper() == "INTELLIGENT_TIERING"
+    ]
+    observed: dict[int, str | None] = {}
+    metrics = {"requests": 0, "archive_access": 0, "deep_archive_access": 0, "direct_access": 0}
+    if not targets:
+        return observed, metrics
+    connection = source.aws_connection
+    per_second = max(1, int(getattr(connection, "restore_poll_requests_per_second", RESTORE_POLL_HEAD_REQUESTS_PER_SECOND) or RESTORE_POLL_HEAD_REQUESTS_PER_SECOND))
+    concurrency = max(1, int(getattr(connection, "restore_poll_concurrency", RESTORE_POLL_HEAD_CONCURRENCY) or RESTORE_POLL_HEAD_CONCURRENCY))
+
+    def head(target: tuple[int, str, str | None]) -> tuple[int, str | None]:
+        object_id, key, version_id = target
+        arguments = {"Bucket": source.s3_bucket, "Key": key}
+        if version_id:
+            arguments["VersionId"] = version_id
+        response = s3.head_object(**arguments)
+        return object_id, normalized_archive_status(response.get("ArchiveStatus"))
+
+    for offset in range(0, len(targets), per_second):
+        batch = targets[offset:offset + per_second]
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=min(concurrency, len(batch)), thread_name_prefix="raijin-it-classify") as executor:
+            futures = [executor.submit(head, target) for target in batch]
+            for future in as_completed(futures):
+                object_id, status = future.result()
+                observed[object_id] = status
+                metrics["requests"] += 1
+                if status == "ARCHIVE_ACCESS":
+                    metrics["archive_access"] += 1
+                elif status == "DEEP_ARCHIVE_ACCESS":
+                    metrics["deep_archive_access"] += 1
+                else:
+                    metrics["direct_access"] += 1
+        if offset + per_second < len(targets):
+            remaining = 1.0 - (time.monotonic() - started)
+            if remaining > 0:
+                time.sleep(remaining)
+    return observed, metrics
 
 
 def batch_manifest_fields(has_versions: bool) -> list[str]:
@@ -1795,9 +1870,34 @@ def submit_restore(session, task: Task, settings) -> None:
     wave = session.get(Wave, task.wave_id)
     source = wave.source
     capture_source_completion_estimate(session, source, settings)
+    assigned = list(session.scalars(select(ObjectRecord).where(
+        ObjectRecord.wave_id == wave.id,
+        ObjectRecord.state == ObjectState.WAVE_ASSIGNED,
+    ).order_by(ObjectRecord.object_key)))
+    intelligent_tiering = [obj for obj in assigned if str(obj.storage_class or "").upper() == "INTELLIGENT_TIERING"]
+    clients = None
+    if intelligent_tiering:
+        try:
+            clients = aws_clients(settings, source.aws_region, source)
+            observed, metrics = classify_intelligent_tiering_access(clients[0], source, intelligent_tiering)
+        except Exception as error:
+            summary = actionable_aws_error_summary(error)
+            raise RuntimeError(f"Intelligent-Tiering access-tier classification failed: {summary}") from error
+        for obj in intelligent_tiering:
+            obj.archive_status = observed.get(obj.id)
+        event(
+            session,
+            "INTELLIGENT_TIERING_ACCESS_TIER_CLASSIFIED",
+            f"HeadObject classified {metrics['requests']} Intelligent-Tiering object(s): "
+            f"{metrics['archive_access']} Archive Access, {metrics['deep_archive_access']} Deep Archive Access, "
+            f"{metrics['direct_access']} direct-access.",
+            source_id=source.id,
+            wave_id=wave.id,
+        )
+        session.flush()
     archives = archive_objects(session, wave.id)
     if not archives:
-        for obj in session.scalars(select(ObjectRecord).where(ObjectRecord.wave_id == wave.id, ObjectRecord.state == ObjectState.WAVE_ASSIGNED)):
+        for obj in assigned:
             obj.state, obj.restored_at = ObjectState.RESTORED, utcnow()
         wave.status = "RESTORED"
         enqueue_available_transfer_objects(session, wave)
@@ -1808,51 +1908,64 @@ def submit_restore(session, task: Task, settings) -> None:
     if not operation["control_bucket"] or not operation["batch_role_arn"]:
         raise RuntimeError("AWS control bucket and Batch Operations role ARN must be configured")
     try:
-        s3, s3control, account_id = aws_clients(settings, source.aws_region, source)
+        s3, s3control, account_id = clients or aws_clients(settings, source.aws_region, source)
         validate_restore_preflight(session, source, s3, operation)
     except Exception as error:
         summary = actionable_aws_error_summary(error)
         raise RuntimeError(f"Restore preflight failed: {summary}") from error
-    attempt = RestoreAttempt(wave_id=wave.id, aws_region=source.aws_region, expected_objects=len(archives))
-    session.add(attempt)
-    session.flush()
-    has_versions = any(obj.version_id for obj in archives)
-    output = io.StringIO()
-    writer = csv.writer(output, lineterminator="\n")
-    for obj in archives:
-        row = [source.s3_bucket, quote(obj.object_key, safe="/")]
-        if has_versions:
-            row.append(obj.version_id or "")
-        writer.writerow(row)
-    manifest_key = f"{operation['control_prefix'].rstrip('/')}/manifests/wave-{wave.id}/attempt-{attempt.id}.csv"
-    try:
-        response = s3.put_object(Bucket=operation["control_bucket"], Key=manifest_key, Body=output.getvalue().encode("utf-8"), ContentType="text/csv")
-    except Exception as error:
-        summary = actionable_aws_error_summary(error)
-        raise RuntimeError(f"Control-bucket manifest upload failed: {summary}") from error
-    fields = batch_manifest_fields(has_versions)
-    try:
-        job = s3control.create_job(
-            AccountId=account_id, ConfirmationRequired=False, Priority=10, RoleArn=operation["batch_role_arn"],
-            Operation={"S3InitiateRestoreObject": {"ExpirationInDays": wave.restore_days, "GlacierJobTier": wave.restore_tier}},
-            Manifest={"Spec": {"Format": "S3BatchOperations_CSV_20180820", "Fields": fields}, "Location": {"ObjectArn": f"arn:aws:s3:::{operation['control_bucket']}/{manifest_key}", "ETag": response["ETag"].strip('"')}},
-            Report={"Bucket": f"arn:aws:s3:::{operation['control_bucket']}", "Prefix": f"{operation['control_prefix'].rstrip('/')}/reports/wave-{wave.id}/attempt-{attempt.id}/", "Format": "Report_CSV_20180820", "Enabled": True, "ReportScope": "AllTasks"},
-            Description=f"S3 to OCI restore wave {wave.id}",
-            # A retry of this durable task keeps the same token, while an
-            # operator-approved reprocess creates a new task and therefore a
-            # new Batch submission. Reusing only the wave id would make AWS
-            # reject a legitimately new manifest as an idempotency conflict.
-            ClientRequestToken=f"odmt-wave-{wave.id}-task-{task.id}",
-        )
-    except Exception as error:
-        summary = actionable_aws_error_summary(error)
-        raise RuntimeError(f"S3 Batch Operations job creation failed: {summary}") from error
-    attempt.job_id, attempt.job_status, attempt.manifest_key, attempt.manifest_etag = job["JobId"], "Preparing", manifest_key, response["ETag"].strip('"')
-    wave.batch_job_id, wave.batch_job_status, wave.manifest_key, wave.manifest_etag, wave.status = job["JobId"], "Preparing", manifest_key, response["ETag"].strip('"'), "RESTORE_REQUESTED"
-    for obj in archives:
-        obj.state, obj.restore_requested_at, obj.restore_attempt_id = ObjectState.RESTORE_REQUESTED, utcnow(), attempt.id
-        session.add(RestoreObjectResult(attempt_id=attempt.id, object_id=obj.id))
-    event(session, "BATCH_RESTORE_SUBMITTED", f"Batch job {wave.batch_job_id} submitted for {len(archives)} archive object(s); awaiting per-object acceptance evidence", source_id=source.id, wave_id=wave.id)
+    # AWS does not permit one Batch restore job to mix Glacier storage classes
+    # with Intelligent-Tiering archive tiers, and IT jobs must omit Days.
+    groups = [
+        ("GLACIER", [obj for obj in archives if not intelligent_tiering_archive_object(obj)]),
+        ("INTELLIGENT_TIERING", [obj for obj in archives if intelligent_tiering_archive_object(obj)]),
+    ]
+    submitted: list[RestoreAttempt] = []
+    for family, objects in groups:
+        if not objects:
+            continue
+        attempt = RestoreAttempt(wave_id=wave.id, aws_region=source.aws_region, expected_objects=len(objects))
+        session.add(attempt)
+        session.flush()
+        has_versions = any(obj.version_id for obj in objects)
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        for obj in objects:
+            row = [source.s3_bucket, quote(obj.object_key, safe="/")]
+            if has_versions:
+                row.append(obj.version_id or "")
+            writer.writerow(row)
+        manifest_key = f"{operation['control_prefix'].rstrip('/')}/manifests/wave-{wave.id}/attempt-{attempt.id}.csv"
+        try:
+            response = s3.put_object(Bucket=operation["control_bucket"], Key=manifest_key, Body=output.getvalue().encode("utf-8"), ContentType="text/csv")
+        except Exception as error:
+            summary = actionable_aws_error_summary(error)
+            raise RuntimeError(f"Control-bucket manifest upload failed: {summary}") from error
+        restore_operation = {"GlacierJobTier": wave.restore_tier}
+        if family == "GLACIER":
+            restore_operation["ExpirationInDays"] = wave.restore_days
+        fields = batch_manifest_fields(has_versions)
+        try:
+            job = s3control.create_job(
+                AccountId=account_id, ConfirmationRequired=False, Priority=10, RoleArn=operation["batch_role_arn"],
+                Operation={"S3InitiateRestoreObject": restore_operation},
+                Manifest={"Spec": {"Format": "S3BatchOperations_CSV_20180820", "Fields": fields}, "Location": {"ObjectArn": f"arn:aws:s3:::{operation['control_bucket']}/{manifest_key}", "ETag": response["ETag"].strip('"')}},
+                Report={"Bucket": f"arn:aws:s3:::{operation['control_bucket']}", "Prefix": f"{operation['control_prefix'].rstrip('/')}/reports/wave-{wave.id}/attempt-{attempt.id}/", "Format": "Report_CSV_20180820", "Enabled": True, "ReportScope": "AllTasks"},
+                Description=f"S3 to OCI restore wave {wave.id} ({family})",
+                ClientRequestToken=f"odmt-wave-{wave.id}-task-{task.id}-{family.lower()}",
+            )
+        except Exception as error:
+            summary = actionable_aws_error_summary(error)
+            raise RuntimeError(f"S3 Batch Operations job creation failed: {family} restore: {summary}") from error
+        attempt.job_id, attempt.job_status = job["JobId"], "Preparing"
+        attempt.manifest_key, attempt.manifest_etag = manifest_key, response["ETag"].strip('"')
+        for obj in objects:
+            obj.state, obj.restore_requested_at, obj.restore_attempt_id = ObjectState.RESTORE_REQUESTED, utcnow(), attempt.id
+            session.add(RestoreObjectResult(attempt_id=attempt.id, object_id=obj.id))
+        submitted.append(attempt)
+        event(session, "BATCH_RESTORE_SUBMITTED", f"Batch job {attempt.job_id} submitted for {len(objects)} {family} archive object(s); awaiting per-object acceptance evidence", source_id=source.id, wave_id=wave.id)
+    primary = submitted[0]
+    wave.batch_job_id, wave.batch_job_status = primary.job_id, primary.job_status
+    wave.manifest_key, wave.manifest_etag, wave.status = primary.manifest_key, primary.manifest_etag, "RESTORE_REQUESTED"
     succeed(session, task, "POLL_RESTORE")
 
 
@@ -1866,63 +1979,81 @@ def poll_restore(session, task: Task, settings) -> None:
     # raijin-control prefix.
     operation = aws_operation_config(source, settings)
     s3, s3control, account_id = aws_clients(settings, source.aws_region, source)
-    if wave.batch_job_id:
-        attempt = restore_attempt_for_job(session, wave, source)
-        # The Batch completion report is immutable evidence.  Once imported,
-        # do not call DescribeJob or re-list/re-read its report on every
-        # availability poll.  That was the source of repeated events and
-        # avoidable charged control-bucket requests in the first archive test.
-        if attempt.completed_at is None or attempt.report_manifest_key is None:
-            attempt.batch_describe_requests = int(attempt.batch_describe_requests or 0) + 1
-            job = s3control.describe_job(AccountId=account_id, JobId=wave.batch_job_id)["Job"]
-            attempt.job_status = wave.batch_job_status = job.get("Status")
-            if job["Status"] not in {"Complete", "Completed"}:
-                if job["Status"] in {"Failed", "Cancelled", "Canceled"}:
-                    fail_restore_attempt(session, task, wave, attempt, f"Batch job {wave.batch_job_id} ended as {job['Status']}")
-                    return
-                wave.status = "RESTORING"
-                wave.last_poll_at, wave.poll_count = utcnow(), wave.poll_count + 1
-                session.commit()
-                retry(session, task, f"Batch job status is {job['Status']}", min(1800, 300 + wave.poll_count * 60))
+    # A reprocess keeps historic failed attempts as immutable evidence. Poll
+    # only attempts currently referenced by unfinished objects, otherwise an
+    # old terminal job could block a corrected submission.
+    attempts = list(session.scalars(select(RestoreAttempt).join(
+        ObjectRecord, ObjectRecord.restore_attempt_id == RestoreAttempt.id,
+    ).where(
+        RestoreAttempt.wave_id == wave.id,
+        RestoreAttempt.job_id.is_not(None),
+        ObjectRecord.state.in_({
+            ObjectState.RESTORE_REQUESTED, ObjectState.RESTORE_REQUEST_ACCEPTED,
+            ObjectState.RESTORING,
+        }),
+    ).distinct().order_by(RestoreAttempt.id)))
+    if not attempts and wave.batch_job_id:
+        attempts = [restore_attempt_for_job(session, wave, source)]
+    attempt = attempts[-1] if attempts else None
+    waiting_message = None
+    for current_attempt in attempts:
+        if current_attempt.completed_at is not None and current_attempt.report_manifest_key is not None:
+            continue
+        current_attempt.batch_describe_requests = int(current_attempt.batch_describe_requests or 0) + 1
+        job = s3control.describe_job(AccountId=account_id, JobId=current_attempt.job_id)["Job"]
+        current_attempt.job_status = job.get("Status")
+        if current_attempt.job_id == wave.batch_job_id:
+            wave.batch_job_status = current_attempt.job_status
+        if job["Status"] not in {"Complete", "Completed"}:
+            if job["Status"] in {"Failed", "Cancelled", "Canceled"}:
+                fail_restore_attempt(session, task, wave, current_attempt, f"Batch job {current_attempt.job_id} ended as {job['Status']}")
                 return
-            progress = job.get("ProgressSummary", {}) or {}
-            attempt.succeeded_objects = int(progress.get("NumberOfTasksSucceeded") or 0)
-            attempt.failed_objects = int(progress.get("NumberOfTasksFailed") or 0)
-            objects = list(session.scalars(select(ObjectRecord).where(ObjectRecord.wave_id == wave.id)))
-            try:
-                report_available, report_metrics = import_completion_report(session, s3, operation, attempt, objects)
-                attempt.completion_report_list_requests = int(attempt.completion_report_list_requests or 0) + report_metrics["list_requests"]
-                attempt.completion_report_get_requests = int(attempt.completion_report_get_requests or 0) + report_metrics["get_requests"]
-            except Exception as error:
-                summary = actionable_aws_error_summary(error)
-                raise RuntimeError(f"S3 Batch completion-report processing failed: {summary}") from error
-            if not report_available:
-                wave.status = "RESTORE_REQUESTED"
-                wave.last_poll_at, wave.poll_count = utcnow(), wave.poll_count + 1
-                session.commit()
-                retry(session, task, "Batch job is complete; waiting for per-object completion report evidence", 60)
-                return
-            diagnosis = restore_result_diagnostics(session, attempt.id)
-            if diagnosis["action_required"]:
-                reason = diagnosis["reasons"][0] if diagnosis["reasons"] else {"code": "UNKNOWN", "count": diagnosis["unexpected_failed"]}
-                message = (f"S3 Batch restore requires operator action: {reason['count']} object(s) reported "
-                           f"{reason['code']}; {diagnosis['effective_accepted']}/{attempt.expected_objects} "
-                           "requests are accepted or already in progress")
-                fail_restore_attempt(session, task, wave, attempt, message)
-                return
-            attempt.completed_at, attempt.failure_summary = utcnow(), None
-            for obj in objects:
-                if obj.storage_class in ARCHIVE_CLASSES and obj.state in {ObjectState.RESTORE_REQUESTED, ObjectState.RESTORING}:
-                    obj.state = ObjectState.RESTORE_REQUEST_ACCEPTED
-            wave.status = "RESTORE_REQUEST_ACCEPTED"
-            event(session, "RESTORE_REQUEST_ACCEPTED",
-                  f"Batch job {wave.batch_job_id}: {diagnosis['raw_succeeded']} succeeded and "
-                  f"{diagnosis['accepted_equivalent']} already in progress; all {attempt.expected_objects} "
-                  "archive objects accepted with per-object evidence",
-                  source_id=source.id, wave_id=wave.id)
-            session.commit()
+            waiting_message = f"Batch job {current_attempt.job_id} status is {job['Status']}"
+            continue
+        progress = job.get("ProgressSummary", {}) or {}
+        current_attempt.succeeded_objects = int(progress.get("NumberOfTasksSucceeded") or 0)
+        current_attempt.failed_objects = int(progress.get("NumberOfTasksFailed") or 0)
+        objects = list(session.scalars(select(ObjectRecord).where(
+            ObjectRecord.restore_attempt_id == current_attempt.id,
+        )))
+        try:
+            report_available, report_metrics = import_completion_report(session, s3, operation, current_attempt, objects)
+            current_attempt.completion_report_list_requests = int(current_attempt.completion_report_list_requests or 0) + report_metrics["list_requests"]
+            current_attempt.completion_report_get_requests = int(current_attempt.completion_report_get_requests or 0) + report_metrics["get_requests"]
+        except Exception as error:
+            summary = actionable_aws_error_summary(error)
+            raise RuntimeError(f"S3 Batch completion-report processing failed: {summary}") from error
+        if not report_available:
+            waiting_message = "Batch job is complete; waiting for per-object completion report evidence"
+            continue
+        diagnosis = restore_result_diagnostics(session, current_attempt.id)
+        if diagnosis["action_required"]:
+            reason = diagnosis["reasons"][0] if diagnosis["reasons"] else {"code": "UNKNOWN", "count": diagnosis["unexpected_failed"]}
+            message = (f"S3 Batch restore requires operator action: {reason['count']} object(s) reported "
+                       f"{reason['code']}; {diagnosis['effective_accepted']}/{current_attempt.expected_objects} "
+                       "requests are accepted or already in progress")
+            fail_restore_attempt(session, task, wave, current_attempt, message)
+            return
+        current_attempt.completed_at, current_attempt.failure_summary = utcnow(), None
+        for obj in objects:
+            if object_requires_restore(obj) and obj.state in {ObjectState.RESTORE_REQUESTED, ObjectState.RESTORING}:
+                obj.state = ObjectState.RESTORE_REQUEST_ACCEPTED
+        event(session, "RESTORE_REQUEST_ACCEPTED",
+              f"Batch job {current_attempt.job_id}: {diagnosis['raw_succeeded']} succeeded and "
+              f"{diagnosis['accepted_equivalent']} already in progress; all {current_attempt.expected_objects} "
+              "archive objects accepted with per-object evidence",
+              source_id=source.id, wave_id=wave.id)
+    if waiting_message:
+        wave.status = "RESTORING"
+        wave.last_poll_at, wave.poll_count = utcnow(), wave.poll_count + 1
+        session.commit()
+        retry(session, task, waiting_message, min(1800, 300 + wave.poll_count * 60))
+        return
+    if attempts:
+        wave.status = "RESTORE_REQUEST_ACCEPTED"
+        session.commit()
     objects = list(session.scalars(select(ObjectRecord).where(ObjectRecord.wave_id == wave.id)))
-    pending_archives = [obj for obj in objects if obj.storage_class in ARCHIVE_CLASSES and obj.state in {
+    pending_archives = [obj for obj in objects if object_requires_restore(obj) and obj.state in {
         ObjectState.RESTORE_REQUESTED, ObjectState.RESTORE_REQUEST_ACCEPTED, ObjectState.RESTORING,
     }]
     # The availability/expiry values are collected from the same targeted
@@ -1974,10 +2105,10 @@ def poll_restore(session, task: Task, settings) -> None:
     objects = list(session.scalars(select(ObjectRecord).where(ObjectRecord.wave_id == wave.id)))
     availability_observed_at = utcnow()
     for obj in objects:
-        if obj.storage_class not in ARCHIVE_CLASSES or obj.id in ready_expiries:
+        if not object_requires_restore(obj) or obj.id in ready_expiries:
             if obj.state in {ObjectState.RESTORE_REQUESTED, ObjectState.RESTORE_REQUEST_ACCEPTED, ObjectState.RESTORING, ObjectState.WAVE_ASSIGNED}:
                 obj.state, obj.restored_at = ObjectState.RESTORED, obj.restored_at or availability_observed_at
-                if obj.storage_class in ARCHIVE_CLASSES:
+                if object_requires_restore(obj):
                     obj.restore_expires_at = ready_expiries.get(obj.id)
         elif obj.state in {ObjectState.RESTORE_REQUESTED, ObjectState.RESTORE_REQUEST_ACCEPTED}:
             obj.state = ObjectState.RESTORING

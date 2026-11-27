@@ -8,7 +8,7 @@ from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 
-PRODUCTION_SCHEMA_VERSION = 6
+PRODUCTION_SCHEMA_VERSION = 7
 REVISION_TABLE = "raijin_schema_revisions"
 MIGRATION_DESCRIPTIONS = {
     1: "Initial versioned Raijin production control-plane schema",
@@ -17,6 +17,7 @@ MIGRATION_DESCRIPTIONS = {
     4: "Add durable import-driven continuous pipeline items",
     5: "Store encrypted OCI diagnostic bundle PAR",
     6: "Store OCI diagnostic bundle PAR prefix",
+    7: "Store S3 Intelligent-Tiering archive access status",
 }
 
 
@@ -164,6 +165,23 @@ def migrate(engine: Engine, metadata: MetaData) -> int:
                 "checksum": migration_checksum(6, MIGRATION_DESCRIPTIONS[6]),
             })
             revision = 6
+        # ListObjectsV2 does not expose the active Intelligent-Tiering access
+        # tier. This nullable, additive field stores the targeted HeadObject
+        # observation used to decide whether a restore is necessary.
+        if revision < 7:
+            columns = ({column["name"] for column in inspect(connection).get_columns("objects")}
+                       if connection.dialect.has_table(connection, "objects") else set())
+            if columns and "archive_status" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE objects ADD COLUMN archive_status VARCHAR(32)"
+                ))
+            connection.execute(text(
+                f"INSERT INTO {REVISION_TABLE} (version, description, checksum) VALUES (7, :description, :checksum)"
+            ), {
+                "description": MIGRATION_DESCRIPTIONS[7],
+                "checksum": migration_checksum(7, MIGRATION_DESCRIPTIONS[7]),
+            })
+            revision = 7
         if revision >= 3:
             ensure_revision_checksums(connection)
         if revision != PRODUCTION_SCHEMA_VERSION:

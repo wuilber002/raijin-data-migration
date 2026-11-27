@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.main import AWS_CONNECTION_SCHEMA_VERSION, AwsConnection, Base, CostPricing, CostPricingUpdate, DeepAuditStart, DiscoveryChange, DiscoveryJob, DynamicPipelineRun, DynamicWaveCreate, Event, GlobalAwsPricing, LegacySourceConnectionMigration, MigrationProject, MultipartCheckpointPart, OCI_VAULT_SECRET_SEARCH_QUERY, ObjectRecord, ObjectState, ProjectClosureIssueRequest, ProjectClosureReport, RestoreAttempt, RestoreObjectResult, RuntimeSettings, RuntimeSettingsUpdate, Source, SourcePrefix, Task, TaskState, TransferDispatchBatch, TransferLaneMeasurement, TransferLaneSegment, TransferQueueItem, TransferQueueState, Wave, WaveCreate, WaveReprocessRequest, active_source_scope_conflicts, adaptive_restore_slot_limit, automatic_dynamic_duration_limit, capture_source_completion_estimate, connection_endpoint_configuration, continuous_lane_capacity_profile, continuous_lane_forecast_profile, create_dynamic_waves, deep_audits, delete_unexecuted_source_data, destination_provenance_matches, dynamic_schedule_times, dynamic_wave_plan, enqueue_available_transfer_objects, flight_board, freeze_source_endpoint_configuration, internal_rate_value, issue_project_closure_report, list_sources, mark_restore_reapproval_required, materialize_dynamic_pipeline_horizon, normalize_source_prefixes, observed_restore_forecast_seconds, observability, operations_overview, parse_aws_connection_payload, percentile_75, predict_object_transfer_seconds, project_closure_readiness, project_closure_snapshot, prometheus_metrics, public_rate_value, public_s3_rates_from_catalog, public_transfer_rates_from_catalog, refresh_dynamic_pipeline_run, refresh_transfer_queue_priorities, release_dynamic_restore_horizon, repair_completed_deep_audit_statuses, replan_dynamic_pipeline, reprocess_preview, reprocess_wave, restore_availability_poll_delay_seconds, restore_forecast_seconds, restore_queue_details, restore_result_diagnostics, safe_aws_error_summary, safe_aws_secret_validation_summary, safe_oci_error_summary, source_completion_report, source_completion_statistics, source_deep_audit_preview, source_key_in_scope, source_summary, source_throughput_samples, start_source_deep_audit, pause_deep_audit_queue, resume_deep_audit_queue, transfer_queue, wave_cost_estimate
 from app.main import ConsolePresence, ConsolePresenceHeartbeat, console_presence_heartbeat
+from app.main import object_requires_restore
 from app.main import IMPORT_PIPELINE_PLANNER_VERSION, ImportPipelineItem, PrioritizedWaveImport, parse_prioritized_wave_import, prioritized_wave_import_groups, prioritized_wave_import_preview
 from app.main import app as raijin_app, healthz
 from app.closure_report import build_artifacts, canonical_json, safe_csv_cell, sha256
@@ -2707,6 +2708,17 @@ def test_restore_models_preserve_attempt_and_per_object_evidence():
     assert ObjectState.RESTORE_REQUEST_ACCEPTED == "RESTORE_REQUEST_ACCEPTED"
 
 
+def test_intelligent_tiering_requires_restore_only_when_head_object_reports_archive_access():
+    direct = SimpleNamespace(storage_class="INTELLIGENT_TIERING", archive_status=None)
+    archive = SimpleNamespace(storage_class="INTELLIGENT_TIERING", archive_status="ARCHIVE_ACCESS")
+    deep_archive = SimpleNamespace(storage_class="INTELLIGENT_TIERING", archive_status="deep archive access")
+    glacier = SimpleNamespace(storage_class="GLACIER", archive_status=None)
+    assert not object_requires_restore(direct)
+    assert object_requires_restore(archive)
+    assert object_requires_restore(deep_archive)
+    assert object_requires_restore(glacier)
+
+
 def test_wave_list_exposes_durable_restore_timing_without_per_wave_queries():
     source = Path("app/main.py").read_text(encoding="utf-8")
     start = source.index("def list_waves")
@@ -2810,7 +2822,7 @@ def test_wave_report_returns_tasks_in_durable_execution_order():
     assert 'select(Task).where(Task.wave_id == wave_id).order_by(Task.id)' in report
     assert 'for t in tasks' in report
     assert '"restore_requirement"' in report
-    assert "ARCHIVE_STORAGE_CLASSES" in report
+    assert "archive_object_filter()" in report
 
 
 def test_restore_polling_uses_the_same_control_prefix_as_submission_and_labels_report_errors():
@@ -4764,11 +4776,12 @@ def test_restore_completion_evidence_is_idempotent_and_request_metrics_are_durab
     worker = Path("app/real_worker.py").read_text(encoding="utf-8")
     source = Path("app/main.py").read_text(encoding="utf-8")
     poll = worker[worker.index("def poll_restore"):worker.index("\n\nDIRECT_SHA_LIMIT")]
-    assert "if attempt.completed_at is None or attempt.report_manifest_key is None:" in poll
-    assert "restore_result_diagnostics(session, attempt.id)" in poll
+    assert "for current_attempt in attempts:" in poll
+    assert "if current_attempt.completed_at is not None and current_attempt.report_manifest_key is not None:" in poll
+    assert "restore_result_diagnostics(session, current_attempt.id)" in poll
     assert "RestoreAlreadyInProgress" in source
-    assert "attempt.batch_describe_requests" in poll
-    assert "attempt.completion_report_list_requests" in poll
+    assert "current_attempt.batch_describe_requests" in poll
+    assert "current_attempt.completion_report_list_requests" in poll
     assert "completion_report_get_requests" in source
     assert "attempt and attempt.job_id and not attempt.failure_summary" in worker
     assert "/api/waves/{wave_id}/retry-restore-evidence" in source

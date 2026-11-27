@@ -346,6 +346,43 @@ ARCHIVE_STORAGE_CLASSES = {
     "GLACIER", "DEEP_ARCHIVE", "INTELLIGENT_TIERING_ARCHIVE_ACCESS",
     "INTELLIGENT_TIERING_DEEP_ARCHIVE_ACCESS",
 }
+# ``ListObjectsV2`` deliberately reports only ``INTELLIGENT_TIERING``.  It
+# does not expose whether an object is currently in an archive access tier.
+# ``HeadObject.ArchiveStatus`` is the authoritative, per-object observation.
+INTELLIGENT_TIERING_ARCHIVE_STATUSES = {"ARCHIVE_ACCESS", "DEEP_ARCHIVE_ACCESS"}
+
+
+def normalized_archive_status(value: str | None) -> str | None:
+    status = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    return status or None
+
+
+def object_requires_restore(obj) -> bool:
+    """Return whether the observed S3 object needs a restore before GetObject.
+
+    Legacy pseudo storage classes remain readable so historical inventory is
+    not reinterpreted unsafely. New Intelligent-Tiering observations use the
+    actual ArchiveStatus returned by HeadObject instead.
+    """
+    storage_class = str(getattr(obj, "storage_class", "") or "").upper()
+    if storage_class in ARCHIVE_STORAGE_CLASSES:
+        return True
+    return (
+        storage_class == "INTELLIGENT_TIERING"
+        and normalized_archive_status(getattr(obj, "archive_status", None))
+        in INTELLIGENT_TIERING_ARCHIVE_STATUSES
+    )
+
+
+def archive_object_filter():
+    """SQL predicate matching :func:`object_requires_restore`."""
+    return or_(
+        ObjectRecord.storage_class.in_(ARCHIVE_STORAGE_CLASSES),
+        and_(
+            ObjectRecord.storage_class == "INTELLIGENT_TIERING",
+            ObjectRecord.archive_status.in_(INTELLIGENT_TIERING_ARCHIVE_STATUSES),
+        ),
+    )
 
 # OCI Resource Search uses this resource type for OCI Vault Secret metadata.
 # It deliberately retrieves only Secret identifiers and metadata; values are
@@ -641,6 +678,9 @@ class ObjectRecord(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     etag: Mapped[str | None] = mapped_column(String(128), nullable=True)
     storage_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Present only after a targeted HeadObject observation for an
+    # Intelligent-Tiering object. NULL is never treated as archived.
+    archive_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_modified: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     tags_json: Mapped[str] = mapped_column(Text, default="{}")
@@ -1473,7 +1513,7 @@ def merge_discovery_rows(session: Session, source: Source, rows: list[dict], job
                                     previous_etag=prior.etag, current_etag=row.get("etag"),
                                     previous_version_id=prior.version_id, current_version_id=row.get("version_id"),
                                     previous_last_modified=prior.last_modified, current_last_modified=row.get("last_modified")))
-        for field in ("size_bytes", "version_id", "etag", "storage_class", "last_modified", "source_checksum", "checksum_algorithm"):
+        for field in ("size_bytes", "version_id", "etag", "storage_class", "archive_status", "last_modified", "source_checksum", "checksum_algorithm"):
             if field in row and row[field] is not None:
                 setattr(prior, field, row[field])
         updated += 1
@@ -1973,6 +2013,7 @@ class InventoryItem(BaseModel):
     version_id: str | None = None
     etag: str | None = None
     storage_class: str | None = None
+    archive_status: str | None = None
     last_modified: datetime | None = None
     metadata_json: str = "{}"
     tags_json: str = "{}"
@@ -2542,6 +2583,7 @@ def create_schema() -> None:
         "source_checksum": "VARCHAR(256)",
         "destination_checksum": "VARCHAR(256)",
         "checksum_algorithm": "VARCHAR(32)",
+        "archive_status": "VARCHAR(32)",
         "restore_requested_at": "TIMESTAMP WITH TIME ZONE",
         "restore_attempt_id": "BIGINT",
         "restored_at": "TIMESTAMP WITH TIME ZONE",
@@ -4412,7 +4454,7 @@ def wave_cost_estimate(session: Session, wave: Wave) -> dict:
     source_objects = session.scalar(select(func.count(ObjectRecord.id)).where(ObjectRecord.source_id == source.id)) or 0
     total_bytes = sum(int(obj.size_bytes or 0) for obj in objects)
     total_gib = total_bytes / 1024**3
-    archived = [obj for obj in objects if (obj.storage_class or "").upper() in ARCHIVE_STORAGE_CLASSES]
+    archived = [obj for obj in objects if object_requires_restore(obj)]
     glacier_gib = sum(obj.size_bytes for obj in archived if (obj.storage_class or "").upper() == "GLACIER") / 1024**3
     deep_gib = sum(obj.size_bytes for obj in archived if (obj.storage_class or "").upper() == "DEEP_ARCHIVE") / 1024**3
     unpriced_archive_gib = sum(obj.size_bytes for obj in archived if (obj.storage_class or "").upper() not in {"GLACIER", "DEEP_ARCHIVE"}) / 1024**3
@@ -6671,7 +6713,7 @@ def operations_overview(session: Session = Depends(get_session),
     restored_files, first_restore = session.execute(
         select(func.count(ObjectRecord.id), func.min(ObjectRecord.restored_at)).where(
             ObjectRecord.restored_at >= since,
-            ObjectRecord.storage_class.in_(ARCHIVE_STORAGE_CLASSES),
+            archive_object_filter(),
             object_scope,
         )
     ).one()
@@ -11095,6 +11137,7 @@ def upload_inventory_file(source_id: int, inventory_file: UploadFile = File(...)
                 "version_id": inventory_file_value(row, "version_id", "versionid"),
                 "etag": inventory_file_value(row, "etag"),
                 "storage_class": inventory_file_value(row, "storage_class", "storageclass"),
+                "archive_status": inventory_file_value(row, "archive_status", "archivestatus", "intelligent_tiering_access_tier", "intelligenttieringaccesstier"),
                 "last_modified": parsed_last_modified,
                 "metadata_json": inventory_file_value(row, "metadata_json") or "{}",
                 "tags_json": inventory_file_value(row, "tags_json") or "{}",
@@ -11873,9 +11916,9 @@ def export_inventory(source_id: int, session: Session = Depends(get_session)) ->
     source_or_404(session, source_id)
     content = io.StringIO()
     writer = csv.writer(content, lineterminator="\n")
-    writer.writerow(["object_key", "destination_object_key", "version_id", "size_bytes", "etag", "storage_class", "last_modified", "state", "wave_id", "metadata_json", "tags_json"])
+    writer.writerow(["object_key", "destination_object_key", "version_id", "size_bytes", "etag", "storage_class", "archive_status", "last_modified", "state", "wave_id", "metadata_json", "tags_json"])
     for obj in session.scalars(select(ObjectRecord).where(ObjectRecord.source_id == source_id, ObjectRecord.is_current_revision.is_(True)).order_by(ObjectRecord.object_key)):
-        writer.writerow([obj.object_key, object_destination_key(obj), obj.version_id or "", obj.size_bytes, obj.etag or "", obj.storage_class or "",
+        writer.writerow([obj.object_key, object_destination_key(obj), obj.version_id or "", obj.size_bytes, obj.etag or "", obj.storage_class or "", obj.archive_status or "",
                          obj.last_modified.isoformat() if obj.last_modified else "", obj.state, obj.wave_id or "", obj.metadata_json, obj.tags_json])
     return StreamingResponse(iter([content.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="source-{source_id}-inventory.csv"'})
 
@@ -14715,7 +14758,7 @@ def wave_report(wave_id: int, session: Session = Depends(get_session)) -> dict:
         func.coalesce(func.sum(ObjectRecord.size_bytes), 0),
     ).where(
         ObjectRecord.wave_id == wave_id,
-        ObjectRecord.storage_class.in_(ARCHIVE_STORAGE_CLASSES),
+        archive_object_filter(),
     )).one()
     integrity_verified, integrity_failed = session.execute(
         select(
