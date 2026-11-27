@@ -1326,11 +1326,14 @@ def test_source_selector_exposes_one_operational_status_per_source():
             Wave(id=902, source_id=transferring.id, name="transferring", max_bytes=1, restore_days=1, restore_tier="BULK", status="TRANSFERRING"),
             Wave(id=903, source_id=restoring.id, name="restoring", max_bytes=1, restore_days=1, restore_tier="BULK", status="RESTORING"),
         ])
+        session.add(ObjectRecord(source_id=discovered.id, object_key="current", size_bytes=15, is_current_revision=True))
         session.add(DynamicPipelineRun(id=905, source_id=restoring.id, status="IN_PROGRESS", scheduled_restores=True))
         session.commit()
         rows = list_sources(session)
         statuses = {row["name"]: row["operational_status"] for row in rows}
         assert statuses == {"discovered": "DISCOVERED", "queued": "QUEUED", "transferring": "TRANSFERRING", "restoring": "RESTORING"}
+        discovered_row = next(row for row in rows if row["name"] == "discovered")
+        assert discovered_row["inventory_size_bytes"] == 15
         restoring_row = next(row for row in rows if row["name"] == "restoring")
         assert restoring_row["inventory_status"] == "DISCOVERED"
         assert restoring_row["pipeline_status"] == "IN_PROGRESS"
@@ -1366,6 +1369,33 @@ def test_source_selector_keeps_deactivated_sources_visible_with_explicit_state()
     assert '@app.post("/api/sources/{source_id}/deactivate")' in app_source
     assert 'source.archived_at = utcnow()' in app_source
     assert 'source.archived_at, source.status = utcnow(), "DEACTIVATED"' not in app_source
+
+
+def test_diagnostic_par_is_encrypted_prefix_scoped_and_preflighted_without_leaking_url(monkeypatch):
+    from app import main
+
+    par = "https://objectstorage.sa-saopaulo-1.oraclecloud.com/p/token/n/namespace/b/diagnostics/o/"
+    normalized = main.normalize_diagnostic_par_url(par)
+    assert normalized == par
+    encrypted = main.diagnostic_par_encrypt(normalized)
+    assert "token" not in encrypted
+    assert main.diagnostic_par_decrypt(encrypted) == normalized
+    assert main.diagnostic_par_object_url(normalized, "bundles/a file.zip").endswith("bundles/a%20file.zip")
+
+    calls = []
+    class Response:
+        def __init__(self, body=b'{}'): self.body = body
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def getcode(self): return 200
+        def read(self, _): return self.body
+    def fake_urlopen(request, timeout):
+        calls.append((request.get_method(), request.full_url, timeout))
+        return Response(b'{"purpose":"diagnostic-par-preflight"}')
+    monkeypatch.setattr(main, "urlopen", fake_urlopen)
+    main.diagnostic_par_preflight(normalized)
+    assert [method for method, _, _ in calls] == ["PUT", "GET"]
+    assert all("token" in url for _, url, _ in calls)  # sent only to OCI, never returned by helpers
 
 
 def test_global_actionable_failure_banner_ignores_archived_sources():

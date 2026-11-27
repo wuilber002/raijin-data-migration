@@ -609,6 +609,9 @@ def test_console_application_logs_support_periods_and_download():
     assert 'application_log_control_root=/var/lib/raijin-data-migration/application-log-control' in bootstrap
     assert '"$application_log_control_root"' in bootstrap
     assert 'install -d -m 0750 "$application_log_control_root"' in runtime
+    assert "console-diagnostic-bundle" in script
+    assert "/api/admin/diagnostic-bundle" in script
+    assert "PAR OCI para pasta (leitura e escrita)" in script
 
 
 def test_console_disables_dynamic_migration_mutations_for_viewers():
@@ -1184,6 +1187,8 @@ def test_source_selector_prioritizes_compact_route_and_status_tags_before_name()
     assert "${sourceSelectorTags(x)}<span class=\"source-select-option-name\">" in page
     assert ".source-select-option-tags{display:inline-flex;flex:0 0 auto" in page
     assert "font-size:.61rem" in page
+    assert "source.inventory_size_bytes==null" in page
+    assert "source-select-option-size" in page
 
 
 def test_project_is_required_before_the_ui_can_create_a_source():
@@ -1226,10 +1231,11 @@ def test_project_panel_omits_removed_operational_buttons_and_dead_ui_code():
     assert "migration-project-groups" not in page
 
 
-def test_queue_project_selector_and_timeline_are_grouped_at_the_right():
+def test_queue_global_drain_sits_between_title_and_project_filter():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     assert ".queue-project-filter{display:flex;align-items:end;justify-content:flex-end" in page
-    assert "margin-left:auto" in page
+    assert "#view-queue section.card>.row:first-child{display:grid;grid-template-columns:minmax(0,1fr) auto auto" in page
+    assert ".queue-global-transfer-drain{position:static;grid-column:2" in page
     assert "const timelineButton=$('#flight-board-button');if(timelineButton)filter.append(timelineButton)" in page
     assert page.index("filter.append(timelineButton)") > page.index("filter.innerHTML='<label>Projeto")
 

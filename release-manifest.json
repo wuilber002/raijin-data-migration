@@ -3,10 +3,10 @@
   "contracts": {
     "web_api": 1,
     "worker_protocol": 1,
-    "database_schema": 4
+    "database_schema": 5
   },
   "database_migration": {
-    "required_revision": 4,
+    "required_revision": 5,
     "mode": "EXPAND_ONLY"
   },
   "selective_rollout": {

@@ -8,13 +8,14 @@ from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 
-PRODUCTION_SCHEMA_VERSION = 4
+PRODUCTION_SCHEMA_VERSION = 5
 REVISION_TABLE = "raijin_schema_revisions"
 MIGRATION_DESCRIPTIONS = {
     1: "Initial versioned Raijin production control-plane schema",
     2: "Add append-only production schema metadata",
     3: "Add immutable checksums to production schema revision history",
     4: "Add durable import-driven continuous pipeline items",
+    5: "Store encrypted OCI diagnostic bundle PAR",
 }
 
 
@@ -124,6 +125,23 @@ def migrate(engine: Engine, metadata: MetaData) -> int:
                 "checksum": migration_checksum(4, MIGRATION_DESCRIPTIONS[4]),
             })
             revision = 4
+        # The diagnostic-upload PAR is a bearer capability.  Keep the column
+        # additive so existing installations can be upgraded without exposing
+        # or rewriting any persisted operational evidence.
+        if revision < 5:
+            columns = ({column["name"] for column in inspect(connection).get_columns("runtime_settings")}
+                       if connection.dialect.has_table(connection, "runtime_settings") else set())
+            if columns and "diagnostic_par_encrypted" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE runtime_settings ADD COLUMN diagnostic_par_encrypted TEXT"
+                ))
+            connection.execute(text(
+                f"INSERT INTO {REVISION_TABLE} (version, description, checksum) VALUES (5, :description, :checksum)"
+            ), {
+                "description": MIGRATION_DESCRIPTIONS[5],
+                "checksum": migration_checksum(5, MIGRATION_DESCRIPTIONS[5]),
+            })
+            revision = 5
         if revision >= 3:
             ensure_revision_checksums(connection)
         if revision != PRODUCTION_SCHEMA_VERSION:

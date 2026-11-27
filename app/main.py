@@ -27,6 +27,7 @@ import math
 import re
 import shutil
 import uuid
+import zipfile
 import base64
 import struct
 import time
@@ -36,7 +37,8 @@ from qrcode.image.svg import SvgPathImage
 from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 from urllib.request import Request, urlopen
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
+from urllib.error import HTTPError, URLError
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, Request as FastAPIRequest
 from fastapi.encoders import jsonable_encoder
@@ -222,6 +224,9 @@ cloud_backend = backend_for(runtime_context)
 password = read_secret(os.environ["POSTGRES_PASSWORD_FILE"])
 _mfa_cipher = Fernet(base64.urlsafe_b64encode(hashlib.sha256(
     ("raijin-console-mfa-v1:" + password).encode("utf-8")
+).digest()))
+_diagnostic_par_cipher = Fernet(base64.urlsafe_b64encode(hashlib.sha256(
+    ("raijin-diagnostic-par-v1:" + password).encode("utf-8")
 ).digest()))
 parsed_database_url = make_url(database_url)
 if parsed_database_url.drivername.startswith("postgres"):
@@ -1485,6 +1490,9 @@ class RuntimeSettings(Base):
     restore_forecast_bulk_complete_seconds: Mapped[int] = mapped_column(Integer, default=48 * 3600)
     restore_forecast_standard_first_seconds: Mapped[int] = mapped_column(Integer, default=4 * 3600)
     restore_forecast_standard_complete_seconds: Mapped[int] = mapped_column(Integer, default=18 * 3600)
+    # A PAR is a bearer capability. Only its encrypted form is persisted and
+    # it is never included in API responses, diagnostics or application logs.
+    diagnostic_par_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
@@ -2074,6 +2082,10 @@ class ConsoleApplicationLogRequest(BaseModel):
     end_at: datetime
     component: str = Field(default="all", max_length=48)
     level: str = Field(default="all", max_length=16)
+
+
+class DiagnosticParUpdate(BaseModel):
+    par_url: str = Field(min_length=32, max_length=3500)
 
 
 class ConsoleAuthSettingsUpdate(BaseModel):
@@ -5084,6 +5096,189 @@ def console_download_application_logs() -> Response:
     state = console_application_log_state()
     component, level = str(state.get("component") or "all"), str(state.get("level") or "all")
     return Response(content=content, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": f"attachment; filename=raijin-{component}-{level}-logs.txt"})
+
+
+def diagnostic_par_encrypt(value: str) -> str:
+    return _diagnostic_par_cipher.encrypt(value.encode("utf-8")).decode("ascii")
+
+
+def diagnostic_par_decrypt(value: str | None) -> str:
+    if not value:
+        raise ValueError("No diagnostic PAR is configured")
+    try:
+        return _diagnostic_par_cipher.decrypt(value.encode("ascii")).decode("utf-8")
+    except (InvalidToken, UnicodeDecodeError) as error:
+        raise ValueError("The stored diagnostic PAR cannot be read") from error
+
+
+def normalize_diagnostic_par_url(value: str) -> str:
+    """Validate only the public shape of an OCI Object Storage prefix PAR.
+
+    The token stays in the path, so this function must never return it in an
+    error, event, or response. A prefix-scoped PAR ends at the object route
+    (``/o/``); object names are appended only by the backend.
+    """
+    value = value.strip()
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if (parsed.scheme != "https" or not host or "objectstorage" not in host
+            or not parsed.path.startswith("/p/") or "/o/" not in parsed.path):
+        raise ValueError("Informe uma URL HTTPS de PAR do OCI Object Storage para um prefixo")
+    if parsed.query or parsed.fragment or parsed.username or parsed.password:
+        raise ValueError("A URL PAR não pode conter query string, fragmento ou credenciais adicionais")
+    return value.rstrip("/") + "/"
+
+
+def diagnostic_par_object_url(par_url: str, object_name: str) -> str:
+    # quote preserves the controlled pseudo-directory separators while keeping
+    # arbitrary input out of URL syntax. Object names are generated locally.
+    return par_url + quote(object_name.lstrip("/"), safe="/")
+
+
+def diagnostic_par_preflight(par_url: str) -> None:
+    """Prove the configured PAR can overwrite and read its controlled probe."""
+    probe_name = "_raijin-validation/probe.json"
+    probe_url = diagnostic_par_object_url(par_url, probe_name)
+    payload = json.dumps({"service": "raijin", "purpose": "diagnostic-par-preflight",
+                          "checked_at": utcnow().isoformat()}, separators=(",", ":")).encode("utf-8")
+    try:
+        put = Request(probe_url, data=payload, method="PUT", headers={
+            "Content-Type": "application/json", "Content-Length": str(len(payload)),
+            "User-Agent": "raijin-diagnostic-bundle/1",
+        })
+        with urlopen(put, timeout=20) as response:
+            if not 200 <= int(response.getcode() or 0) < 300:
+                raise RuntimeError(f"HTTP {response.getcode()}")
+        with urlopen(Request(probe_url, method="GET", headers={"User-Agent": "raijin-diagnostic-bundle/1"}), timeout=20) as response:
+            if not 200 <= int(response.getcode() or 0) < 300:
+                raise RuntimeError(f"HTTP {response.getcode()}")
+            if b'"purpose":"diagnostic-par-preflight"' not in response.read(4096):
+                raise RuntimeError("probe content was not returned")
+    except HTTPError as error:
+        raise ValueError(f"A PAR não está válida para leitura e sobrescrita (HTTP {error.code})") from error
+    except (URLError, TimeoutError, OSError, RuntimeError) as error:
+        raise ValueError("Não foi possível validar leitura e sobrescrita da PAR") from error
+
+
+def redact_diagnostic_text(value: str) -> str:
+    """Remove bearer PAR URLs while retaining actionable failure context."""
+    return re.sub(r"https://[^\s\"']*/p/[^\s\"']+", "[OCI PAR REDACTED]", value)
+
+
+def diagnostic_rows(session: Session, model, fields: tuple[str, ...], limit: int = 1000) -> list[dict]:
+    rows = session.scalars(select(model).order_by(model.id.desc()).limit(limit)).all()
+    return [
+        {field: redact_diagnostic_text(value) if isinstance(value := getattr(row, field), str) else value
+         for field in fields}
+        for row in rows
+    ]
+
+
+def build_diagnostic_bundle(session: Session) -> tuple[bytes, str, dict]:
+    """Create a bounded, credential-free operational evidence archive."""
+    generated_at = utcnow()
+    app_logs = console_application_log_state(include_content=True)
+    settings = runtime_settings(session)
+    entries = {
+        "runtime.json": {
+            "generated_at": generated_at,
+            "service_version": RAIJIN_SERVICE_VERSION,
+            "build_revision": RAIJIN_BUILD_REVISION,
+            "host": {"platform": os.uname().sysname, "release": os.uname().release},
+            "settings": settings_dict(settings),
+        },
+        "sources.json": list_sources(session),
+        "projects.json": diagnostic_rows(session, MigrationProject,
+            ("id", "name", "status", "continuous_transfer_drain_requested", "created_at", "updated_at")),
+        "waves.json": diagnostic_rows(session, Wave,
+            ("id", "source_id", "name", "status", "restore_tier", "restore_days", "created_at", "last_poll_at")),
+        "tasks.json": diagnostic_rows(session, Task,
+            ("id", "wave_id", "kind", "state", "attempts", "error", "available_at", "lease_expires_at", "created_at")),
+        "discovery-jobs.json": diagnostic_rows(session, DiscoveryJob,
+            ("id", "source_id", "mode", "state", "attempts", "checkpoint_pages_completed", "checkpoint_objects_observed", "error", "created_at", "completed_at")),
+        "transfer-queue.json": diagnostic_rows(session, TransferQueueItem,
+            ("id", "project_id", "source_id", "wave_id", "size_bytes", "state", "attempts", "priority_score", "priority_band", "retry_at", "lease_expires_at", "entry_reason", "exit_reason")),
+        "events.json": diagnostic_rows(session, Event,
+            ("id", "source_id", "wave_id", "migration_project_id", "kind", "message", "created_at")),
+        "application-log.txt": redact_diagnostic_text(str(app_logs.get("content") or "No application log collection is available.")),
+    }
+    manifest = {
+        "format": "raijin-diagnostic-bundle/v1",
+        "generated_at": generated_at,
+        "contains": sorted(entries),
+        "limits": {"operational_rows_per_dataset": 1000, "application_log_bytes": 4 * 1024 * 1024},
+        "secrets_included": False,
+        "par_included": False,
+    }
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        for name, content in entries.items():
+            if name.endswith(".json"):
+                content = json.dumps(jsonable_encoder(content), sort_keys=True, indent=2, ensure_ascii=False)
+            bundle.writestr(name, content)
+        bundle.writestr("manifest.json", json.dumps(jsonable_encoder(manifest), sort_keys=True, indent=2, ensure_ascii=False))
+    content = archive.getvalue()
+    digest = hashlib.sha256(content).hexdigest()
+    filename = f"bundles/raijin-diagnostic-{generated_at.strftime('%Y%m%dT%H%M%SZ')}-{digest[:12]}.zip"
+    return content, filename, {"sha256": digest, "size_bytes": len(content), "generated_at": generated_at}
+
+
+@app.get("/api/admin/diagnostic-bundle")
+def diagnostic_bundle_status(session: Session = Depends(get_session)) -> dict:
+    return {"configured": bool(runtime_settings(session).diagnostic_par_encrypted)}
+
+
+@app.put("/api/admin/diagnostic-bundle/par")
+def configure_diagnostic_bundle_par(payload: DiagnosticParUpdate, request: FastAPIRequest,
+                                    session: Session = Depends(get_session)) -> dict:
+    try:
+        par_url = normalize_diagnostic_par_url(payload.par_url)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    runtime_settings(session).diagnostic_par_encrypted = diagnostic_par_encrypt(par_url)
+    auth_audit(session, "DIAGNOSTIC_PAR_CONFIGURED", actor_user_id=console_principal(request)["id"],
+               target="configured", request=request)
+    session.commit()
+    return {"configured": True}
+
+
+@app.post("/api/admin/diagnostic-bundle")
+def upload_diagnostic_bundle(request: FastAPIRequest, session: Session = Depends(get_session)) -> dict:
+    settings = runtime_settings(session)
+    if not settings.diagnostic_par_encrypted:
+        raise HTTPException(status_code=428, detail="Configure uma PAR OCI com leitura e escrita antes de gerar o bundle")
+    try:
+        par_url = normalize_diagnostic_par_url(diagnostic_par_decrypt(settings.diagnostic_par_encrypted))
+        diagnostic_par_preflight(par_url)
+    except ValueError as error:
+        auth_audit(session, "DIAGNOSTIC_BUNDLE_PAR_INVALID", actor_user_id=console_principal(request)["id"],
+                   target="validation_failed", result="FAILED", request=request)
+        session.commit()
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    content, filename, metadata = build_diagnostic_bundle(session)
+    try:
+        target = diagnostic_par_object_url(par_url, filename)
+        upload = Request(target, data=content, method="PUT", headers={
+            "Content-Type": "application/zip", "Content-Length": str(len(content)),
+            "User-Agent": "raijin-diagnostic-bundle/1",
+        })
+        with urlopen(upload, timeout=90) as response:
+            if not 200 <= int(response.getcode() or 0) < 300:
+                raise RuntimeError(f"HTTP {response.getcode()}")
+    except HTTPError as error:
+        auth_audit(session, "DIAGNOSTIC_BUNDLE_UPLOAD_FAILED", actor_user_id=console_principal(request)["id"],
+                   target="upload_failed", result="FAILED", request=request, detail={"http_status": error.code})
+        session.commit()
+        raise HTTPException(status_code=502, detail=f"Upload do bundle recusado pela PAR (HTTP {error.code})") from error
+    except (URLError, TimeoutError, OSError, RuntimeError) as error:
+        auth_audit(session, "DIAGNOSTIC_BUNDLE_UPLOAD_FAILED", actor_user_id=console_principal(request)["id"],
+                   target="upload_failed", result="FAILED", request=request)
+        session.commit()
+        raise HTTPException(status_code=502, detail="Não foi possível enviar o bundle de diagnóstico") from error
+    auth_audit(session, "DIAGNOSTIC_BUNDLE_UPLOADED", actor_user_id=console_principal(request)["id"],
+               target=filename, request=request, detail={"sha256": metadata["sha256"], "size_bytes": metadata["size_bytes"]})
+    session.commit()
+    return {"uploaded": True, "object_name": filename, **metadata}
 
 
 @app.get("/api/admin/web-bind/addresses")
@@ -9864,12 +10059,17 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
         select(ObjectRecord.source_id, func.count(ObjectRecord.id),
                func.coalesce(func.sum(case((ObjectRecord.state == ObjectState.VERIFIED, 1), else_=0)), 0),
                func.coalesce(func.sum(case((ObjectRecord.state.in_([ObjectState.TRANSFERRED, ObjectState.VERIFIED]), 1), else_=0)), 0),
-               func.coalesce(func.sum(case((ObjectRecord.delivery_integrity_status == "OCI_ACCEPTED", 1), else_=0)), 0))
+               func.coalesce(func.sum(case((ObjectRecord.delivery_integrity_status == "OCI_ACCEPTED", 1), else_=0)), 0),
+               # Rediscovery retains historical revisions.  The selector must
+               # show the same current-inventory size shown in the source
+               # summary, without issuing one summary request per source.
+               func.coalesce(func.sum(case((ObjectRecord.is_current_revision.is_(True), ObjectRecord.size_bytes), else_=0)), 0))
         .where(ObjectRecord.source_id.in_([s.id for s in sources])).group_by(ObjectRecord.source_id)
     ).all() if sources else []
-    totals = {source_id: (int(total), int(verified), int(transferred), int(delivery_verified)) for source_id, total, verified, transferred, delivery_verified in total_rows}
+    totals = {source_id: (int(total), int(verified), int(transferred), int(delivery_verified), int(inventory_bytes))
+              for source_id, total, verified, transferred, delivery_verified, inventory_bytes in total_rows}
     def migration_status(source: Source) -> str:
-        total, verified, transferred, delivery_verified = totals.get(source.id, (0, 0, 0, 0))
+        total, verified, transferred, delivery_verified, _inventory_bytes = totals.get(source.id, (0, 0, 0, 0, 0))
         if source.destination_validation_status == "DIFFERENT":
             return "DESTINATION_DIVERGENT"
         if total and (verified == total or (transferred == total and delivery_verified == total)):
@@ -9915,6 +10115,10 @@ def list_sources(session: Session = Depends(get_session)) -> list[dict]:
              "discovery_requested_at": s.discovery_requested_at, "discovery_completed_at": s.discovery_completed_at,
              "discovery_error": s.discovery_error, "discovery_pages_completed": s.discovery_pages_completed,
              "discovery_objects_inserted": s.discovery_objects_inserted,
+             # Null means that a completed inventory is not available yet;
+             # zero is a valid discovered inventory and is deliberately kept.
+             "inventory_size_bytes": (totals.get(s.id, (0, 0, 0, 0, 0))[4]
+                                      if s.status == "DISCOVERED" else None),
              "last_discovery_mode": s.last_discovery_mode, "discovery_generation": s.discovery_generation,
              "discovery_can_resume": bool(s.discovery_continuation_token),
              "deactivated": s.archived_at is not None, "deactivated_at": s.archived_at,
