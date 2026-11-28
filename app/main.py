@@ -2055,6 +2055,13 @@ class WaveReprocessRequest(BaseModel):
     approve_new_restore: bool = False
 
 
+class RestorePermissionTestRequest(BaseModel):
+    """Explicit authorization for the one-object, billable restore preflight."""
+    confirmed: bool = False
+    restore_days: int = Field(ge=1, le=30)
+    restore_tier: str = Field(pattern="^(BULK|STANDARD)$")
+
+
 class AutomaticWaveCreate(BaseModel):
     max_bytes: int = Field(gt=0, le=10 * 1024**4)
     restore_days: int = Field(ge=1, le=30)
@@ -3868,11 +3875,46 @@ def aws_simulated_permission_check(iam, principal_arn: str, permission: str,
         }
 
 
-def project_source_aws_permission_report(session: Session, source: Source) -> dict:
-    """Produce an AWS-only, no-write permission report for one source."""
+def permission_restore_candidate(session: Session, source: Source) -> ObjectRecord | None:
+    """Return the smallest unassigned discovered object known to need restore."""
+    return session.scalar(select(ObjectRecord).where(
+        ObjectRecord.source_id == source.id,
+        ObjectRecord.is_current_revision.is_(True),
+        ObjectRecord.state == ObjectState.DISCOVERED,
+        archive_object_filter(),
+    ).order_by(ObjectRecord.size_bytes, ObjectRecord.object_key, ObjectRecord.id).limit(1))
+
+
+def permission_restore_candidate_summary(session: Session, source: Source) -> dict | None:
+    candidate = permission_restore_candidate(session, source)
+    if not candidate:
+        return None
+    intelligent = str(candidate.storage_class or "").upper() == "INTELLIGENT_TIERING"
+    return {
+        "object_id": candidate.id,
+        "object_key": candidate.object_key,
+        "size_bytes": int(candidate.size_bytes or 0),
+        "storage_class": candidate.storage_class or "UNKNOWN",
+        "archive_status": candidate.archive_status,
+        "retention_applies": not intelligent,
+        "message": ("Intelligent-Tiering Archive Access does not use a temporary-copy retention period."
+                    if intelligent else "AWS will create a temporary restored copy for the selected retention period."),
+    }
+
+
+def project_source_aws_permission_report(session: Session, source: Source, *, s3=None, iam=None,
+                                         payload: dict | None = None,
+                                         connection_preflight_failed: bool = False) -> dict:
+    """Produce the checks that actually depend on one source bucket/prefix.
+
+    Authentication, control-bucket, PassRole and CreateJob checks deliberately
+    live at the AWS-connection level. Repeating them for every source both
+    wastes API calls and obscures which configuration is shared.
+    """
     report = {
         "source_id": source.id, "source_name": source.name, "bucket": source.s3_bucket,
-        "region": source.aws_region, "checks": [],
+        "region": source.aws_region, "connection_id": source.aws_connection_id, "checks": [],
+        "restore_candidate": permission_restore_candidate_summary(session, source),
     }
     connection = source.aws_connection
     if not connection:
@@ -3880,40 +3922,40 @@ def project_source_aws_permission_report(session: Session, source: Source) -> di
                                  "resource": "—", "method": "CONFIGURATION", "status": "FAILED",
                                  "evidence": {"message": "A source não possui conexão AWS."}})
         return report
-    try:
-        payload = aws_secret_payload(connection.secret_ocid)
-        import boto3
-        from botocore.config import Config
-        config = Config(connect_timeout=10, read_timeout=30, retries={"max_attempts": 2, "mode": "standard"})
-        bootstrap = boto3.client(
-            "sts", region_name=source.aws_region,
-            aws_access_key_id=payload["bootstrap_access_key_id"],
-            aws_secret_access_key=payload["bootstrap_secret_access_key"],
-            **aws_client_options(connection, "sts", config),
-        )
-        assumed = bootstrap.assume_role(
-            RoleArn=payload["migration_role_arn"], RoleSessionName="raijin-project-permission-preflight",
-            DurationSeconds=900,
-        )["Credentials"]
-        role_session = boto3.Session(
-            aws_access_key_id=assumed["AccessKeyId"], aws_secret_access_key=assumed["SecretAccessKey"],
-            aws_session_token=assumed["SessionToken"], region_name=source.aws_region,
-        )
-        endpoints = source_endpoint_configuration(source)
-        s3 = role_session.client("s3", **aws_client_options_from_endpoint_configuration(endpoints, "s3", config))
-        sts = role_session.client("sts", **aws_client_options(connection, "sts", config))
-        iam = role_session.client("iam", config=config)
-        identity = sts.get_caller_identity()
-        report["assumed_role_arn"] = identity.get("Arn")
-        report["checks"].append({"capability": "Assumir role de migração", "permission": "sts:AssumeRole",
-                                 "resource": payload["migration_role_arn"], "method": "DIRECT_SAFE_PROBE",
-                                 "status": "PASSED", "evidence": {"account": identity.get("Account")}})
-    except Exception as error:
-        report["checks"].append({"capability": "Assumir role de migração", "permission": "sts:AssumeRole",
-                                 "resource": "—",
-                                 "method": "DIRECT_SAFE_PROBE", "status": "FAILED",
-                                 "evidence": aws_permission_error_evidence(error)})
+    if connection_preflight_failed:
+        report["checks"].append({"capability": "Testes do bucket da source", "permission": "—",
+                                 "resource": f"arn:aws:s3:::{source.s3_bucket}", "method": "DEPENDENCY",
+                                 "status": "UNVERIFIABLE",
+                                 "evidence": {"message": "A sessão compartilhada da conexão AWS não pôde ser criada; consulte a seção da conexão."}})
         return report
+    if s3 is None or iam is None or payload is None:
+        try:
+            payload = aws_secret_payload(connection.secret_ocid)
+            import boto3
+            from botocore.config import Config
+            config = Config(connect_timeout=10, read_timeout=30, retries={"max_attempts": 2, "mode": "standard"})
+            bootstrap = boto3.client(
+                "sts", region_name=source.aws_region,
+                aws_access_key_id=payload["bootstrap_access_key_id"],
+                aws_secret_access_key=payload["bootstrap_secret_access_key"],
+                **aws_client_options(connection, "sts", config),
+            )
+            assumed = bootstrap.assume_role(
+                RoleArn=payload["migration_role_arn"], RoleSessionName="raijin-project-permission-preflight",
+                DurationSeconds=900,
+            )["Credentials"]
+            role_session = boto3.Session(
+                aws_access_key_id=assumed["AccessKeyId"], aws_secret_access_key=assumed["SecretAccessKey"],
+                aws_session_token=assumed["SessionToken"], region_name=source.aws_region,
+            )
+            endpoints = source_endpoint_configuration(source)
+            s3 = role_session.client("s3", **aws_client_options_from_endpoint_configuration(endpoints, "s3", config))
+            iam = role_session.client("iam", config=config)
+        except Exception as error:
+            report["checks"].append({"capability": "Sessão da conexão AWS", "permission": "sts:AssumeRole",
+                                     "resource": "—", "method": "DIRECT_SAFE_PROBE", "status": "FAILED",
+                                     "evidence": aws_permission_error_evidence(error)})
+            return report
 
     bucket_arn = f"arn:aws:s3:::{source.s3_bucket}"
     prefixes = source_prefix_values(source) or [""]
@@ -3952,7 +3994,54 @@ def project_source_aws_permission_report(session: Session, source: Source) -> di
     if versioned:
         report["checks"].append(aws_permission_check("s3:GetObjectVersion", f"{bucket_arn}/{versioned.object_key}",
             "Leitura de objetos versionados", lambda: get_one(versioned, versioned_read=True)))
+    for prefix in prefixes:
+        report["checks"].append(aws_simulated_permission_check(
+            iam, payload["batch_operations_role_arn"], "s3:RestoreObject", f"{bucket_arn}/{prefix}*",
+            f"Executar restore pelo S3 Batch Operations (prefixo {prefix or '/'})"))
+    return report
 
+
+def project_connection_aws_permission_report(connection: AwsConnection, sources: list[Source]) -> tuple[dict, object | None, object | None, dict | None]:
+    """Validate connection-scoped AWS capabilities exactly once per connection."""
+    report = {"connection_id": connection.id, "connection_label": connection.label,
+              "control_bucket": connection.control_bucket, "checks": []}
+    reference_source = sources[0] if sources else None
+    if not reference_source:
+        return report, None, None, None
+    try:
+        payload = aws_secret_payload(connection.secret_ocid)
+        import boto3
+        from botocore.config import Config
+        config = Config(connect_timeout=10, read_timeout=30, retries={"max_attempts": 2, "mode": "standard"})
+        bootstrap = boto3.client(
+            "sts", region_name=connection.default_region,
+            aws_access_key_id=payload["bootstrap_access_key_id"],
+            aws_secret_access_key=payload["bootstrap_secret_access_key"],
+            **aws_client_options(connection, "sts", config),
+        )
+        assumed = bootstrap.assume_role(
+            RoleArn=payload["migration_role_arn"], RoleSessionName="raijin-project-permission-preflight",
+            DurationSeconds=900,
+        )["Credentials"]
+        role_session = boto3.Session(
+            aws_access_key_id=assumed["AccessKeyId"], aws_secret_access_key=assumed["SecretAccessKey"],
+            aws_session_token=assumed["SessionToken"], region_name=connection.default_region,
+        )
+        endpoints = source_endpoint_configuration(reference_source)
+        s3 = role_session.client("s3", **aws_client_options_from_endpoint_configuration(endpoints, "s3", config))
+        sts = role_session.client("sts", **aws_client_options(connection, "sts", config))
+        iam = role_session.client("iam", config=config)
+        identity = sts.get_caller_identity()
+        report["assumed_role_arn"] = identity.get("Arn")
+        report["checks"].append({"capability": "Assumir role de migração", "permission": "sts:AssumeRole",
+                                 "resource": payload["migration_role_arn"], "method": "DIRECT_SAFE_PROBE",
+                                 "status": "PASSED", "evidence": {"account": identity.get("Account")}})
+    except Exception as error:
+        report["checks"].append({"capability": "Assumir role de migração", "permission": "sts:AssumeRole",
+                                 "resource": "—",
+                                 "method": "DIRECT_SAFE_PROBE", "status": "FAILED",
+                                 "evidence": aws_permission_error_evidence(error)})
+        return report, None, None, None
     control_bucket = payload["control_bucket"]
     control_arn = f"arn:aws:s3:::{control_bucket}"
     report["checks"].append(aws_permission_check("s3:ListBucket", control_arn,
@@ -3965,11 +4054,9 @@ def project_source_aws_permission_report(session: Session, source: Source) -> di
         (payload["batch_operations_role_arn"], "s3:GetObject", f"{control_arn}/raijin/*", "Ler manifesto pelo S3 Batch Operations"),
         (payload["batch_operations_role_arn"], "s3:PutObject", f"{control_arn}/raijin/*", "Gravar relatório pelo S3 Batch Operations"),
     ]
-    simulated.extend((payload["batch_operations_role_arn"], "s3:RestoreObject", f"{bucket_arn}/{prefix}*",
-                      f"Executar restore pelo S3 Batch Operations (prefixo {prefix or '/'})") for prefix in prefixes)
     report["checks"].extend(aws_simulated_permission_check(iam, principal, permission, resource, capability)
                             for principal, permission, resource, capability in simulated)
-    return report
+    return report, s3, iam, payload
 
 
 def safe_oci_error_summary(error: Exception) -> str:
@@ -9866,7 +9953,7 @@ def migration_project_report(project_id: int, include_costs: bool = False,
 @app.post("/api/migration-projects/{project_id}/aws-permissions-report")
 def validate_migration_project_aws_permissions(project_id: int,
                                                session: Session = Depends(get_session)) -> dict:
-    """Run a safe, source-by-source AWS access preflight for a project.
+    """Run a safe AWS access preflight, consolidating connection-wide checks.
 
     This endpoint intentionally never creates a restore, Batch Operations job,
     manifest or report object.  Actions without an AWS dry-run are evaluated
@@ -9876,8 +9963,30 @@ def validate_migration_project_aws_permissions(project_id: int,
     sources = list(session.scalars(select(Source).where(
         Source.migration_project_id == project.id, Source.archived_at.is_(None)
     ).order_by(Source.name, Source.id)))
-    reports = [project_source_aws_permission_report(session, source) for source in sources]
-    checks = [check for report in reports for check in report["checks"]]
+    grouped: dict[int | None, list[Source]] = {}
+    for source in sources:
+        grouped.setdefault(source.aws_connection_id, []).append(source)
+    connection_reports: list[dict] = []
+    reports: list[dict] = []
+    for connection_id, grouped_sources in grouped.items():
+        connection = grouped_sources[0].aws_connection if connection_id is not None else None
+        if connection is None:
+            connection_report = {
+                "connection_id": None, "connection_label": "Sem conexão AWS", "control_bucket": None,
+                "checks": [{"capability": "Configuração da conexão AWS", "permission": "sts:AssumeRole",
+                            "resource": "—", "method": "CONFIGURATION", "status": "FAILED",
+                            "evidence": {"message": "Uma ou mais sources não possuem conexão AWS."}}],
+            }
+            s3 = iam = payload = None
+        else:
+            connection_report, s3, iam, payload = project_connection_aws_permission_report(connection, grouped_sources)
+        connection_reports.append(connection_report)
+        reports.extend(project_source_aws_permission_report(
+            session, source, s3=s3, iam=iam, payload=payload,
+            connection_preflight_failed=connection is not None and payload is None,
+        )
+                       for source in grouped_sources)
+    checks = [check for report in connection_reports + reports for check in report["checks"]]
     counts = {status: sum(check["status"] == status for check in checks)
               for status in ("PASSED", "FAILED", "UNVERIFIABLE", "NOT_APPLICABLE")}
     record_event(
@@ -9890,10 +9999,66 @@ def validate_migration_project_aws_permissions(project_id: int,
     return {
         "project_id": project.id, "project_name": project.name, "generated_at": utcnow(),
         "safe_no_write": True, "ready": bool(sources) and counts["FAILED"] == 0 and counts["UNVERIFIABLE"] == 0,
-        "counts": counts, "sources": reports,
-        "note": ("Probes diretos usam somente chamadas de leitura e uma leitura de até 1 byte de um objeto "
-                 "descoberto. CreateJob, PassRole e permissões da role Batch são avaliadas por IAM simulation; "
-                 "se SimulatePrincipalPolicy não for permitido, o relatório preserva o erro AWS e marca UNVERIFIABLE."),
+        "counts": counts, "connections": connection_reports, "sources": reports,
+        "note": ("A role, o bucket de controle, PassRole, CreateJob e as permissões compartilhadas são testados "
+                 "uma vez por conexão AWS. Cada source testa somente seu bucket, prefixos e uma leitura de até 1 byte. "
+                 "CreateJob, PassRole e permissões da role Batch usam IAM simulation; caso SimulatePrincipalPolicy "
+                 "não seja permitido, o relatório preserva o erro AWS e marca UNVERIFIABLE. Um restore real opcional "
+                 "pode confirmar toda a cadeia, mediante autorização explícita do operador."),
+    }
+
+
+def permission_preflight_wave_name(session: Session, source: Source) -> str:
+    sequence = 1
+    while True:
+        candidate = f"{source.name[:96].rstrip('-_') or 'source'}-permission-restore-{sequence:03d}"
+        if not session.scalar(select(Wave.id).where(Wave.source_id == source.id, Wave.name == candidate)):
+            return candidate
+        sequence += 1
+
+
+@app.post("/api/migration-projects/{project_id}/sources/{source_id}/restore-permission-test", status_code=201)
+def start_restore_permission_test(project_id: int, source_id: int, payload: RestorePermissionTestRequest,
+                                  session: Session = Depends(get_session)) -> dict:
+    """Queue one explicitly approved real restore as end-to-end AWS evidence.
+
+    The selected object is the smallest currently unassigned discovered object
+    known to require restore. It becomes a normal one-object wave, so the
+    subsequent Batch report, polling and eventual transfer are durable
+    evidence rather than an untracked probe.
+    """
+    if not payload.confirmed:
+        raise HTTPException(status_code=422, detail="Explicit operator approval is required before requesting a real AWS restore")
+    project = migration_project_or_404(session, project_id)
+    source = session.get(Source, source_id)
+    if not source or source.migration_project_id != project.id or source.archived_at is not None:
+        raise HTTPException(status_code=404, detail="Active source not found in this project")
+    candidate = permission_restore_candidate(session, source)
+    if not candidate:
+        raise HTTPException(status_code=409, detail="No unassigned discovered object requiring restore is available for this source")
+    wave = assign_wave(
+        session, source.id, permission_preflight_wave_name(session, source), max(1, int(candidate.size_bytes or 0)),
+        payload.restore_days, payload.restore_tier, [candidate], oversized=False,
+        planner_mode="PERMISSION_PREFLIGHT", transfer_release_policy="AS_OBJECTS_AVAILABLE",
+    )
+    wave.status = "READY_FOR_RESTORE"
+    session.add(Task(wave_id=wave.id, kind="SUBMIT_BATCH_RESTORE"))
+    record_event(
+        session, "PERMISSION_PREFLIGHT_RESTORE_QUEUED",
+        (f"Operator approved a real permission-preflight restore for one object ({candidate.object_key}, "
+         f"{candidate.size_bytes} bytes, {candidate.storage_class or 'UNKNOWN'}), tier {payload.restore_tier}, "
+         f"retention {payload.restore_days} day(s)."),
+        source_id=source.id, wave_id=wave.id, migration_project_id=project.id,
+    )
+    session.commit()
+    return {
+        "project_id": project.id, "source_id": source.id, "wave_id": wave.id, "wave_name": wave.name,
+        "object_id": candidate.id, "object_key": candidate.object_key, "size_bytes": int(candidate.size_bytes or 0),
+        "storage_class": candidate.storage_class or "UNKNOWN", "restore_tier": payload.restore_tier,
+        "restore_days": payload.restore_days,
+        "retention_applies": str(candidate.storage_class or "").upper() != "INTELLIGENT_TIERING",
+        "status": wave.status,
+        "message": "Real restore permission preflight queued; the wave report will contain the AWS Batch and restore evidence.",
     }
 
 
