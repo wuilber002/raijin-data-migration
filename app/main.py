@@ -7309,6 +7309,7 @@ def wave_state_history(events: list[Event], current_state: str, state_since: dat
         "DYNAMIC_RESTORE_RELEASED": "RESTORE SCHEDULED",
         "BATCH_RESTORE_SUBMITTED": "RESTORE REQUESTED",
         "RESTORE_REQUEST_ACCEPTED": "RESTORE ACCEPTED",
+        "PERMISSION_PREFLIGHT_RESTORE_VALIDATED": "RESTORE PERMISSION VALIDATED",
         "RESTORE_OBJECTS_RELEASED": "RESTORE + TRANSFER",
         "RESTORE_AVAILABLE": "RESTORE COMPLETED",
         "CONTINUOUS_WAVE_COMPLETED": "COMPLETED",
@@ -7497,6 +7498,8 @@ def transfer_queue(session: Session = Depends(get_session), project_id: int | No
             operational_state = "RESTORE REQUESTED"
         elif wave.status == "RESTORE_REQUEST_ACCEPTED":
             operational_state = "RESTORE ACCEPTED"
+        elif wave.status == "RESTORE_PERMISSION_VALIDATED":
+            operational_state = "RESTORE PERMISSION VALIDATED"
         elif wave.status == "RESTORING":
             operational_state = "RESTORING"
         elif wave.status == "RESTORE_SCHEDULED":

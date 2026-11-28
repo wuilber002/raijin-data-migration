@@ -2052,6 +2052,22 @@ def poll_restore(session, task: Task, settings) -> None:
     if attempts:
         wave.status = "RESTORE_REQUEST_ACCEPTED"
         session.commit()
+    # A permission preflight intentionally ends at the durable per-object
+    # Batch completion report.  AWS accepting CreateJob alone does not prove
+    # that the Batch role could read the manifest and invoke RestoreObject;
+    # the accepted task outcome does.  Do not wait for the temporary copy to
+    # become available and do not admit this diagnostic object to Raikou.
+    if wave.planner_mode == "PERMISSION_PREFLIGHT":
+        wave.status = "RESTORE_PERMISSION_VALIDATED"
+        event(
+            session, "PERMISSION_PREFLIGHT_RESTORE_VALIDATED",
+            (f"Restore permission preflight validated by S3 Batch completion report for "
+             f"{sum(attempt.expected_objects for attempt in attempts)} object(s); "
+             "availability polling and transfer were intentionally not started."),
+            source_id=source.id, wave_id=wave.id,
+        )
+        succeed(session, task)
+        return
     objects = list(session.scalars(select(ObjectRecord).where(ObjectRecord.wave_id == wave.id)))
     pending_archives = [obj for obj in objects if object_requires_restore(obj) and obj.state in {
         ObjectState.RESTORE_REQUESTED, ObjectState.RESTORE_REQUEST_ACCEPTED, ObjectState.RESTORING,
