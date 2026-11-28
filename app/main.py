@@ -3808,6 +3808,170 @@ def safe_aws_error_summary(error: Exception) -> str:
     return f"{type(error).__name__}{f' ({context})' if context else ''}"
 
 
+def aws_permission_error_evidence(error: Exception) -> dict:
+    """Keep the actionable AWS denial in an operator report without secrets.
+
+    AWS includes the denied action, principal and resource in its service
+    message.  That evidence is exactly what an operator needs to correct a
+    bucket or role policy.  Credentials are never part of an SDK error body.
+    """
+    response = getattr(error, "response", {}) or {}
+    metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+    detail = response.get("Error", {}) if isinstance(response, dict) else {}
+    return {
+        "exception": type(error).__name__,
+        "http_status": metadata.get("HTTPStatusCode") or getattr(error, "status_code", None),
+        "aws_code": detail.get("Code"),
+        "message": str(detail.get("Message") or str(error) or type(error).__name__)[:4000],
+        "request_id": metadata.get("RequestId") or metadata.get("RequestID"),
+    }
+
+
+def aws_permission_check(permission: str, resource: str, capability: str, probe) -> dict:
+    """Execute one read-only AWS permission probe and preserve its evidence."""
+    try:
+        probe()
+        return {"capability": capability, "permission": permission, "resource": resource,
+                "method": "DIRECT_SAFE_PROBE", "status": "PASSED", "evidence": None}
+    except Exception as error:
+        return {"capability": capability, "permission": permission, "resource": resource,
+                "method": "DIRECT_SAFE_PROBE", "status": "FAILED",
+                "evidence": aws_permission_error_evidence(error)}
+
+
+def aws_simulated_permission_check(iam, principal_arn: str, permission: str,
+                                   resource: str, capability: str) -> dict:
+    """Check a non-mutating IAM decision for actions with no AWS dry-run.
+
+    S3 Batch Operations has no dry-run.  Calling CreateJob only to test IAM
+    can create work and costs; IAM simulation is therefore the strongest safe
+    evidence.  If the caller cannot simulate policy, the report says so
+    rather than falsely declaring the target permission missing.
+    """
+    try:
+        response = iam.simulate_principal_policy(
+            PolicySourceArn=principal_arn, ActionNames=[permission], ResourceArns=[resource],
+        )
+        result = (response.get("EvaluationResults") or [{}])[0]
+        decision = str(result.get("EvalDecision") or "unknown")
+        status = "PASSED" if decision.lower() == "allowed" else "FAILED"
+        return {
+            "capability": capability, "permission": permission, "resource": resource,
+            "method": "IAM_POLICY_SIMULATION", "status": status,
+            "evidence": {"decision": decision, "missing_context": result.get("MissingContextValues") or []},
+        }
+    except Exception as error:
+        return {
+            "capability": capability, "permission": permission, "resource": resource,
+            "method": "IAM_POLICY_SIMULATION", "status": "UNVERIFIABLE",
+            "evidence": aws_permission_error_evidence(error),
+        }
+
+
+def project_source_aws_permission_report(session: Session, source: Source) -> dict:
+    """Produce an AWS-only, no-write permission report for one source."""
+    report = {
+        "source_id": source.id, "source_name": source.name, "bucket": source.s3_bucket,
+        "region": source.aws_region, "checks": [],
+    }
+    connection = source.aws_connection
+    if not connection:
+        report["checks"].append({"capability": "Identidade AWS", "permission": "sts:AssumeRole",
+                                 "resource": "—", "method": "CONFIGURATION", "status": "FAILED",
+                                 "evidence": {"message": "A source não possui conexão AWS."}})
+        return report
+    try:
+        payload = aws_secret_payload(connection.secret_ocid)
+        import boto3
+        from botocore.config import Config
+        config = Config(connect_timeout=10, read_timeout=30, retries={"max_attempts": 2, "mode": "standard"})
+        bootstrap = boto3.client(
+            "sts", region_name=source.aws_region,
+            aws_access_key_id=payload["bootstrap_access_key_id"],
+            aws_secret_access_key=payload["bootstrap_secret_access_key"],
+            **aws_client_options(connection, "sts", config),
+        )
+        assumed = bootstrap.assume_role(
+            RoleArn=payload["migration_role_arn"], RoleSessionName="raijin-project-permission-preflight",
+            DurationSeconds=900,
+        )["Credentials"]
+        role_session = boto3.Session(
+            aws_access_key_id=assumed["AccessKeyId"], aws_secret_access_key=assumed["SecretAccessKey"],
+            aws_session_token=assumed["SessionToken"], region_name=source.aws_region,
+        )
+        endpoints = source_endpoint_configuration(source)
+        s3 = role_session.client("s3", **aws_client_options_from_endpoint_configuration(endpoints, "s3", config))
+        sts = role_session.client("sts", **aws_client_options(connection, "sts", config))
+        iam = role_session.client("iam", config=config)
+        identity = sts.get_caller_identity()
+        report["assumed_role_arn"] = identity.get("Arn")
+        report["checks"].append({"capability": "Assumir role de migração", "permission": "sts:AssumeRole",
+                                 "resource": payload["migration_role_arn"], "method": "DIRECT_SAFE_PROBE",
+                                 "status": "PASSED", "evidence": {"account": identity.get("Account")}})
+    except Exception as error:
+        report["checks"].append({"capability": "Assumir role de migração", "permission": "sts:AssumeRole",
+                                 "resource": "—",
+                                 "method": "DIRECT_SAFE_PROBE", "status": "FAILED",
+                                 "evidence": aws_permission_error_evidence(error)})
+        return report
+
+    bucket_arn = f"arn:aws:s3:::{source.s3_bucket}"
+    prefixes = source_prefix_values(source) or [""]
+    report["checks"].append(aws_permission_check("s3:GetBucketLocation", bucket_arn,
+        "Região e topologia do bucket", lambda: s3.get_bucket_location(Bucket=source.s3_bucket)))
+    for prefix in prefixes:
+        scope = prefix or "/"
+        report["checks"].append(aws_permission_check("s3:ListBucket", bucket_arn,
+            f"Discovery remoto (prefixo {scope})",
+            lambda prefix=prefix: s3.list_objects_v2(Bucket=source.s3_bucket, Prefix=prefix, MaxKeys=1)))
+    versioned = session.scalar(select(ObjectRecord).where(
+        ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True),
+        ObjectRecord.version_id.is_not(None), ObjectRecord.version_id != ""
+    ).order_by(ObjectRecord.object_key).limit(1))
+    def get_one(item: ObjectRecord, *, versioned_read: bool = False):
+        arguments = {"Bucket": source.s3_bucket, "Key": item.object_key, "Range": "bytes=0-0"}
+        if versioned_read:
+            arguments["VersionId"] = item.version_id
+        response = s3.get_object(**arguments)
+        response["Body"].read(1)
+        response["Body"].close()
+    for prefix in prefixes:
+        sample_query = select(ObjectRecord).where(
+            ObjectRecord.source_id == source.id, ObjectRecord.is_current_revision.is_(True)
+        )
+        if prefix:
+            sample_query = sample_query.where(ObjectRecord.object_key.startswith(prefix))
+        sample = session.scalar(sample_query.order_by(ObjectRecord.object_key).limit(1))
+        if sample:
+            report["checks"].append(aws_permission_check("s3:GetObject", f"{bucket_arn}/{sample.object_key}",
+                f"Leitura para transferência (prefixo {prefix or '/'})", lambda sample=sample: get_one(sample)))
+        else:
+            report["checks"].append({"capability": f"Leitura para transferência (prefixo {prefix or '/'})", "permission": "s3:GetObject",
+                "resource": f"{bucket_arn}/{prefix}*", "method": "DIRECT_SAFE_PROBE", "status": "NOT_APPLICABLE",
+                "evidence": {"message": "Não há objeto descoberto neste prefixo para uma leitura de 1 byte."}})
+    if versioned:
+        report["checks"].append(aws_permission_check("s3:GetObjectVersion", f"{bucket_arn}/{versioned.object_key}",
+            "Leitura de objetos versionados", lambda: get_one(versioned, versioned_read=True)))
+
+    control_bucket = payload["control_bucket"]
+    control_arn = f"arn:aws:s3:::{control_bucket}"
+    report["checks"].append(aws_permission_check("s3:ListBucket", control_arn,
+        "Listar manifestos e relatórios do Batch", lambda: s3.list_objects_v2(Bucket=control_bucket, Prefix="raijin/", MaxKeys=1)))
+    simulated = [
+        (payload["migration_role_arn"], "iam:PassRole", payload["batch_operations_role_arn"], "Delegar role para S3 Batch Operations"),
+        (payload["migration_role_arn"], "s3control:CreateJob", "*", "Criar job de restore S3 Batch Operations"),
+        (payload["migration_role_arn"], "s3:PutObject", f"{control_arn}/raijin/*", "Gravar manifesto de restore"),
+        (payload["migration_role_arn"], "s3:GetObject", f"{control_arn}/raijin/*", "Ler relatórios do Batch"),
+        (payload["batch_operations_role_arn"], "s3:GetObject", f"{control_arn}/raijin/*", "Ler manifesto pelo S3 Batch Operations"),
+        (payload["batch_operations_role_arn"], "s3:PutObject", f"{control_arn}/raijin/*", "Gravar relatório pelo S3 Batch Operations"),
+    ]
+    simulated.extend((payload["batch_operations_role_arn"], "s3:RestoreObject", f"{bucket_arn}/{prefix}*",
+                      f"Executar restore pelo S3 Batch Operations (prefixo {prefix or '/'})") for prefix in prefixes)
+    report["checks"].extend(aws_simulated_permission_check(iam, principal, permission, resource, capability)
+                            for principal, permission, resource, capability in simulated)
+    return report
+
+
 def safe_oci_error_summary(error: Exception) -> str:
     """Return OCI status/code only, never request identifiers or service text."""
     status = getattr(error, "status", None)
@@ -9697,6 +9861,40 @@ def migration_project_report(project_id: int, include_costs: bool = False,
                              session: Session = Depends(get_session)) -> dict:
     return migration_project_metrics(session, migration_project_or_404(session, project_id),
                                      include_costs=include_costs)
+
+
+@app.post("/api/migration-projects/{project_id}/aws-permissions-report")
+def validate_migration_project_aws_permissions(project_id: int,
+                                               session: Session = Depends(get_session)) -> dict:
+    """Run a safe, source-by-source AWS access preflight for a project.
+
+    This endpoint intentionally never creates a restore, Batch Operations job,
+    manifest or report object.  Actions without an AWS dry-run are evaluated
+    with IAM simulation and labelled as such in the returned evidence.
+    """
+    project = migration_project_or_404(session, project_id)
+    sources = list(session.scalars(select(Source).where(
+        Source.migration_project_id == project.id, Source.archived_at.is_(None)
+    ).order_by(Source.name, Source.id)))
+    reports = [project_source_aws_permission_report(session, source) for source in sources]
+    checks = [check for report in reports for check in report["checks"]]
+    counts = {status: sum(check["status"] == status for check in checks)
+              for status in ("PASSED", "FAILED", "UNVERIFIABLE", "NOT_APPLICABLE")}
+    record_event(
+        session, "PROJECT_AWS_PERMISSION_PREFLIGHT",
+        (f"AWS permission preflight completed for project '{project.name}': {len(sources)} source(s), "
+         f"{counts['PASSED']} passed, {counts['FAILED']} failed, {counts['UNVERIFIABLE']} unverifiable."),
+        migration_project_id=project.id,
+    )
+    session.commit()
+    return {
+        "project_id": project.id, "project_name": project.name, "generated_at": utcnow(),
+        "safe_no_write": True, "ready": bool(sources) and counts["FAILED"] == 0 and counts["UNVERIFIABLE"] == 0,
+        "counts": counts, "sources": reports,
+        "note": ("Probes diretos usam somente chamadas de leitura e uma leitura de até 1 byte de um objeto "
+                 "descoberto. CreateJob, PassRole e permissões da role Batch são avaliadas por IAM simulation; "
+                 "se SimulatePrincipalPolicy não for permitido, o relatório preserva o erro AWS e marca UNVERIFIABLE."),
+    }
 
 
 @app.get("/api/migration-projects/{project_id}/executive-summary")
